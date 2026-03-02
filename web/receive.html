@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SP2P — Receive File</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; style-src 'self'">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-page="receive">
+  <main>
+    <header>
+      <h1>SP2P</h1>
+      <p class="subtitle">Receive file</p>
+    </header>
+
+    <div class="confirm-transfer hidden">
+      <div class="confirm-card">
+        <div class="confirm-icon">&#8595;</div>
+        <div class="confirm-title">Incoming file</div>
+        <div class="confirm-file"></div>
+        <div class="confirm-size"></div>
+        <button class="confirm-btn">Download in browser</button>
+        <p class="confirm-or">or receive via terminal:</p>
+        <div class="copy-box" data-copy="cli">
+          <span class="copy-caption">SP2P CLI</span>
+          <code class="confirm-cli"></code>
+          <span class="copy-hint">click to copy</span>
+        </div>
+        <div class="copy-box" data-copy="curl">
+          <span class="copy-caption">curl</span>
+          <code class="confirm-curl"></code>
+          <span class="copy-hint">click to copy</span>
+        </div>
+        <div class="copy-box" data-copy="wget">
+          <span class="copy-caption">wget</span>
+          <code class="confirm-wget"></code>
+          <span class="copy-hint">click to copy</span>
+        </div>
+        <div class="copy-box" data-copy="powershell">
+          <span class="copy-caption">PowerShell</span>
+          <code class="confirm-powershell"></code>
+          <span class="copy-hint">click to copy</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="steps hidden">
+      <div class="step step-pending step-connect">Connecting to server</div>
+      <div class="step step-pending step-join">Joining session</div>
+      <div class="step step-pending step-crypto">Exchanging encryption keys</div>
+      <div class="verify-code hidden"></div>
+      <div class="step step-pending step-p2p">Establishing P2P connection</div>
+      <div class="step step-pending step-transfer">Receiving file</div>
+    </div>
+
+    <div class="progress-container hidden">
+      <div class="progress-bar">
+        <div class="progress-bar-fill"></div>
+      </div>
+      <div class="progress-info"></div>
+    </div>
+
+    <div class="status-text"></div>
+    <div class="complete hidden"></div>
+  </main>
+
+  <footer>
+    <span class="footer-version" data-version="<!--SP2P_VERSION-->" data-build-time="<!--SP2P_BUILD_TIME-->"></span>
+    <a href="https://github.com/zyno-io/sp2p">GitHub</a>
+    <span class="footer-sep">&middot;</span>
+    <span>by <a href="https://zyno.io">Zyno Consulting</a></span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

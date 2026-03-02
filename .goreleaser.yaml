@@ -1,0 +1,111 @@
+version: 2
+
+builds:
+  - id: sp2p
+    main: ./cmd/sp2p
+    binary: sp2p
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.buildTime={{.Date}} -X main.defaultBaseURL=https://sp2p.io
+
+  - id: sp2p-server
+    main: ./cmd/sp2p-server
+    binary: sp2p-server
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.buildTime={{.Date}} -X main.defaultBaseURL=https://sp2p.io
+
+# All binaries are statically linked (CGO_ENABLED=0), so linux builds
+# work on Alpine/musl without a separate build.
+
+archives:
+  - id: sp2p
+    ids:
+      - sp2p
+    formats:
+      - tar.gz
+    name_template: "sp2p_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+  - id: sp2p-server
+    ids:
+      - sp2p-server
+    formats:
+      - tar.gz
+    name_template: "sp2p-server_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+nfpms:
+  - id: sp2p
+    ids:
+      - sp2p
+    package_name: sp2p
+    homepage: https://sp2p.io
+    maintainer: Zyno Consulting <oss@zyno.io>
+    description: Secure peer-to-peer file transfer
+    license: MIT
+    file_name_template: "sp2p_{{ .Arch }}"
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    contents:
+      - src: man/sp2p.1
+        dst: /usr/share/man/man1/sp2p.1
+      - src: man/sp2p-server.1
+        dst: /usr/share/man/man1/sp2p-server.1
+    apk:
+      signature:
+        key_file: "{{ .Env.APK_SIGNING_KEY }}"
+        key_name: oss@zyno.io-sp2p.rsa.pub
+
+dockers_v2:
+  - dockerfile: Dockerfile.goreleaser
+    ids:
+      - sp2p-server
+    images:
+      - "ghcr.io/zyno-io/sp2p-server"
+    tags:
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"

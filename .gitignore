@@ -1,0 +1,25 @@
+# Binaries
+bin/
+/sp2p
+/sp2p-server
+*.exe
+
+# Go
+*.test
+stats.json
+
+# Web
+web/node_modules/
+web/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Local
+.local/
