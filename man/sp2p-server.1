@@ -1,0 +1,146 @@
+.\" SPDX-License-Identifier: MIT
+.TH SP2P-SERVER 1 "2025" "sp2p" "User Commands"
+.SH NAME
+sp2p\-server \- signaling and relay server for sp2p
+.SH SYNOPSIS
+.B sp2p\-server
+.RI [ flags ]
+.SH DESCRIPTION
+.B sp2p\-server
+runs the signaling server that coordinates peer-to-peer connections for
+.BR sp2p (1)
+clients.
+It serves the web UI, handles WebSocket signaling, and optionally provides
+TURN relay and TLS termination.
+.PP
+The server never sees file contents \(em it only facilitates the initial
+connection handshake between peers.
+.SH FLAGS
+.TP
+.BI \-addr " address"
+Listen address.
+Default:
+.IR :8080 .
+.TP
+.BI \-base\-url " url"
+Public base URL for generating share links and configuring CORS.
+Default:
+.IR http://localhost:8080 .
+.TP
+.BI \-config\-dir " dir"
+Directory for persistent data such as ACME certificates.
+Default:
+.IR ~/.config/sp2p .
+.SS TLS
+.TP
+.B \-acme
+Enable automatic TLS certificates via ACME (Let's Encrypt).
+The domain is derived from
+.BR \-base\-url .
+.TP
+.BI \-acme\-email " email"
+Contact email for ACME certificate registration.
+.TP
+.BI \-tls\-cert " file"
+Path to a TLS certificate file (for manual TLS).
+.TP
+.BI \-tls\-key " file"
+Path to the corresponding TLS private key file.
+.SS TURN Relay
+.TP
+.BI \-turn\-servers " urls"
+Comma-separated list of TURN server URLs
+(e.g.
+.IR turn:turn.example.com:3478 ).
+.TP
+.BI \-turn\-username " user"
+Static TURN username.
+.TP
+.BI \-turn\-password " pass"
+Static TURN password.
+.TP
+.BI \-turn\-secret " secret"
+Shared secret for generating ephemeral TURN credentials.
+Mutually exclusive with static username/password.
+.TP
+.BI \-turn\-ttl " duration"
+TTL for ephemeral TURN credentials.
+Default:
+.IR 5m .
+.SS Reverse Proxy
+.TP
+.B \-trust\-proxy
+Trust
+.B X\-Forwarded\-For
+headers for rate limiting.
+Enable this when running behind a reverse proxy.
+.SH ENVIRONMENT
+All flags can be set via environment variables:
+.PP
+.TS
+l l.
+Flag	Variable
+\-addr	SP2P_ADDR
+\-base\-url	SP2P_BASE_URL
+\-config\-dir	SP2P_CONFIG_DIR
+\-acme	SP2P_ACME
+\-acme\-email	SP2P_ACME_EMAIL
+\-tls\-cert	SP2P_TLS_CERT
+\-tls\-key	SP2P_TLS_KEY
+\-trust\-proxy	SP2P_TRUST_PROXY
+\-turn\-servers	SP2P_TURN_SERVERS
+\-turn\-username	SP2P_TURN_USERNAME
+\-turn\-password	SP2P_TURN_PASSWORD
+\-turn\-secret	SP2P_TURN_SECRET
+\-turn\-ttl	SP2P_TURN_TTL
+.TE
+.SH EXAMPLES
+Run a local development server:
+.PP
+.RS
+.nf
+$ sp2p-server
+.fi
+.RE
+.PP
+Run with automatic TLS on a public domain:
+.PP
+.RS
+.nf
+$ sp2p-server \\
+    -base-url https://sp2p.example.com \\
+    -acme \\
+    -acme-email admin@example.com \\
+    -addr :443
+.fi
+.RE
+.PP
+Run with manual TLS certificates:
+.PP
+.RS
+.nf
+$ sp2p-server \\
+    -base-url https://sp2p.example.com \\
+    -tls-cert /etc/ssl/sp2p.crt \\
+    -tls-key /etc/ssl/sp2p.key \\
+    -addr :443
+.fi
+.RE
+.PP
+Run behind nginx with TURN relay:
+.PP
+.RS
+.nf
+$ sp2p-server \\
+    -base-url https://sp2p.example.com \\
+    -trust-proxy \\
+    -turn-servers turn:turn.example.com:3478 \\
+    -turn-secret mysecret
+.fi
+.RE
+.SH SEE ALSO
+.BR sp2p (1)
+.SH AUTHORS
+Zyno Consulting <oss@zyno.io>
+.SH BUGS
+Report bugs at <https://github.com/zyno-io/sp2p/issues>.

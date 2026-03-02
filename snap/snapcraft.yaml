@@ -1,0 +1,31 @@
+name: sp2p
+adopt-info: sp2p
+summary: Secure peer-to-peer file transfer
+description: |
+  Secure peer-to-peer file transfer. End-to-end encrypted. Send files,
+  folders, and streams seamlessly across CLI and browser.
+grade: stable
+confinement: classic
+license: MIT
+base: core24
+
+apps:
+  sp2p:
+    command: sp2p
+
+parts:
+  sp2p:
+    plugin: nil
+    override-pull: |
+      craftctl set version="$(cat "$CRAFT_PROJECT_DIR/VERSION" 2>/dev/null || echo dev)"
+    override-build: |
+      VERSION="$(craftctl get version)"
+      ARCH="$(dpkg --print-architecture)"
+      case "$ARCH" in
+        amd64) GOARCH=amd64 ;;
+        arm64) GOARCH=arm64 ;;
+        *) echo "Unsupported: $ARCH" >&2; exit 1 ;;
+      esac
+      curl -fsSL "https://github.com/zyno-io/sp2p/releases/download/v${VERSION}/sp2p_linux_${GOARCH}.tar.gz" \
+        | tar xz
+      install -Dm755 sp2p "$CRAFT_PART_INSTALL/sp2p"

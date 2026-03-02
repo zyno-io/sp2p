@@ -1,0 +1,42 @@
+services:
+  sp2p:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - SP2P_ADDR=:8080
+      - SP2P_BASE_URL=http://localhost:8080
+      - SP2P_CONFIG_DIR=/data
+      # - SP2P_TRUST_PROXY=true
+
+      ## ACME (auto-TLS) — uncomment and set your domain + email:
+      # - SP2P_ACME=true
+      # - SP2P_ACME_EMAIL=you@example.com
+
+      ## Manual TLS — uncomment and mount your certs:
+      # - SP2P_TLS_CERT=/certs/cert.pem
+      # - SP2P_TLS_KEY=/certs/key.pem
+
+      ## TURN relay — uncomment if running coturn:
+      # - SP2P_TURN_SERVERS=turn:localhost:3478
+      ## Option A: ephemeral credentials (recommended) — set the same secret in turnserver.conf:
+      # - SP2P_TURN_SECRET=change-me
+      ## Option B: static credentials:
+      # - SP2P_TURN_USERNAME=sp2p
+      # - SP2P_TURN_PASSWORD=sp2p
+    volumes:
+      - sp2p-data:/data
+      ## For manual TLS:
+      # - ./certs:/certs:ro
+    restart: unless-stopped
+
+  ## Coturn TURN relay — uncomment to enable:
+  # coturn:
+  #   image: coturn/coturn:latest
+  #   network_mode: host
+  #   volumes:
+  #     - ./turnserver.conf:/etc/turnserver.conf:ro
+  #   restart: unless-stopped
+
+volumes:
+  sp2p-data:

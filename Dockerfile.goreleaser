@@ -1,0 +1,10 @@
+FROM alpine:3.20 AS certs
+RUN apk add --no-cache ca-certificates
+
+FROM scratch
+ARG TARGETPLATFORM
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY ${TARGETPLATFORM}/sp2p-server /usr/local/bin/sp2p-server
+EXPOSE 8080 443 80
+ENTRYPOINT ["/usr/local/bin/sp2p-server"]
+CMD ["-addr", ":8080"]

@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci
+      - run: make build-web
+
+      # --- code signing setup ---
+      - name: Install signing tools
+        run: |
+          RCODESIGN_VERSION="0.27.0"
+          curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C /tmp
+          sudo mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/
+          curl -fsSL -o /tmp/codesigner https://cdn.s24.dev/apps/codesigner/CodeSigner-linux-x64
+          chmod +x /tmp/codesigner
+
+      - name: Set up Apple signing credentials
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+        run: |
+          echo "$APPLE_CERTIFICATE_P12" | base64 -d > /tmp/apple-cert.p12
+          printf '%s' "$APPLE_CERTIFICATE_PASSWORD" > /tmp/apple-cert-password
+          echo "$APP_STORE_CONNECT_API_KEY" | base64 -d > /tmp/api-key-raw.json
+          jq -r '.private_key' /tmp/api-key-raw.json > /tmp/apple-api-key.p8
+          rcodesign encode-app-store-connect-api-key \
+            "$(jq -r '.issuer_id' /tmp/api-key-raw.json)" \
+            "$(jq -r '.key_id' /tmp/api-key-raw.json)" \
+            /tmp/apple-api-key.p8 \
+            -o /tmp/app-store-connect-key.json
+          rm /tmp/api-key-raw.json /tmp/apple-api-key.p8
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up APK signing key
+        env:
+          APK_SIGNING_KEY_B64: ${{ secrets.APK_SIGNING_KEY }}
+        run: |
+          echo "$APK_SIGNING_KEY_B64" | base64 -d > /tmp/apk-signing.rsa
+          chmod 600 /tmp/apk-signing.rsa
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean --skip=publish,docker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APK_SIGNING_KEY: /tmp/apk-signing.rsa
+
+      - name: Sign macOS binaries
+        env:
+          APPLE_CERTIFICATE_P12_PATH: /tmp/apple-cert.p12
+          APPLE_CERTIFICATE_PASSWORD_PATH: /tmp/apple-cert-password
+        run: ./scripts/sign-macos.sh
+
+      - name: Sign Windows binaries
+        env:
+          CODESIGNER_PATH: /tmp/codesigner
+          CODESIGNER_AUTH: ${{ secrets.CODESIGNER_AUTH }}
+          CODESIGNER_PSK: ${{ secrets.CODESIGNER_PSK }}
+          CODESIGNER_URL: ${{ secrets.CODESIGNER_URL }}
+        run: ./scripts/sign-windows.sh
+
+      - name: Build Docker image
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p docker-stage/linux/amd64 docker-stage/linux/arm64
+          cp dist/sp2p-server_linux_amd64_v1/sp2p-server docker-stage/linux/amd64/
+          cp dist/sp2p-server_linux_arm64_v8.0/sp2p-server docker-stage/linux/arm64/
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -t ghcr.io/zyno-io/sp2p-server:${VERSION} \
+            -t ghcr.io/zyno-io/sp2p-server:latest \
+            -f Dockerfile.goreleaser \
+            docker-stage
+
+      - name: Notarize macOS binaries
+        env:
+          APP_STORE_CONNECT_API_KEY_PATH: /tmp/app-store-connect-key.json
+        run: ./scripts/notarize-macos.sh
+
+      - name: Push Docker image
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --push \
+            -t ghcr.io/zyno-io/sp2p-server:${VERSION} \
+            -t ghcr.io/zyno-io/sp2p-server:latest \
+            -f Dockerfile.goreleaser \
+            docker-stage
+
+      - name: Publish release
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            dist/*.tar.gz dist/*.zip dist/*.deb dist/*.rpm dist/*.apk dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy to server
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'cd /opt/sp2p && docker compose pull && docker compose up -d'

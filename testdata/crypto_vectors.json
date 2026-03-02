@@ -1,0 +1,79 @@
+{
+  "base62": [
+    {
+      "rawHex": "000102030405060708090a0b0c0d0e0f",
+      "encoded": "SYW7RiJxkEgOGusQGwp"
+    },
+    {
+      "rawHex": "deadbeefcafebabe0123456789abcdef",
+      "encoded": "6mBhJfNj3WXtM6Zyq83xdf"
+    },
+    {
+      "rawHex": "ffffffffffffffffffffffffffffffff",
+      "encoded": "7n42DGM5Tflk9n8mt7Fhc7"
+    }
+  ],
+  "keyDerivation": {
+    "senderPrivateHex": "e802e18667ed339d99a8b5970fd816e6b70b18dd53c774d47410d4a794cd4d8c",
+    "senderPublicHex": "64f9d4e6f64fb1cf7994e28015fe30273575490c9f09ce77137103222a27b85a",
+    "receiverPrivateHex": "0d5906f23c67cc1a8a828404c1bded4a976fd5ccfcdb6a15b8fdb941482d4c60",
+    "receiverPublicHex": "dcd3f4219770161fc547946102fba90cb0a3e484aa2a9670abc6c739726f5b5b",
+    "seedHex": "67439b41d337131f8832f5d0da907546",
+    "sessionId": "test1234",
+    "expected": {
+      "sharedSecretHex": "ab368421c2e86c3d6b9e2f1f43f962f10c048815cfe0ac3443ab516907243868",
+      "senderToReceiverHex": "fad675be964d4132796f19ab93dd7838c6a7ac51150ddc5909b8d72f1005b3d6",
+      "receiverToSenderHex": "59bf90d734e53734731a4e50732cf2d5f9f85774ab3818db26cc82791692a306",
+      "confirmHex": "af82cc831d7220c11ca4ccd3fd614126e199025853a8ebc73a16d62312b34fb9",
+      "verifyCode": "861ef280"
+    },
+    "s2rFrameTest": {
+      "msgType": 2,
+      "sequence": 0,
+      "plaintextHex": "48656c6c6f2066726f6d2073656e646572",
+      "expectedFrameHex": "0000002a020000000000000000632d6f99270e22ee107a26e184797700e0313479e5c34d35a93b1db5dbbf4dd169"
+    },
+    "r2sFrameTest": {
+      "msgType": 3,
+      "sequence": 0,
+      "plaintextHex": "48656c6c6f2066726f6d207265636569766572",
+      "expectedFrameHex": "0000002c030000000000000000840b4e48eebf495f1b06e2fc8492e700bcb8dcdf756505aec2ed3c4311c538a8ca03a5"
+    }
+  },
+  "confirmation": {
+    "confirmKeyHex": "94a19b1db26de12c6c60021f303a2bfe0e0057d6900b4c6d17e914129750fcfc",
+    "senderPubHex": "02654a230320704cd7a57697ad6b55f7f90f331ee8abf73c1008bb4bde4a8449",
+    "receiverPubHex": "ff07b2d5d2c9b1eb2de0a88a26ad5697eda6f979495f61a7350cf4cd72a79c76",
+    "expectedSenderHex": "8f28233655447a0f7427617ba59e58f1f6d443296f0cbb52b5f58827c3b1e05d",
+    "expectedReceiverHex": "fe12fe40a6b3f95468762d5905b62613d36fd06ef77b8cf555600669b4904af8"
+  },
+  "encryptedFrames": [
+    {
+      "keyHex": "90926a9760f22d27772ab443fa88220cc60c35985d3142426c9500680dfac0bc",
+      "msgType": 1,
+      "sequence": 0,
+      "plaintextHex": "48656c6c6f",
+      "expectedFrameHex": "0000001e010000000000000000966b4f763e78a3aa9619d0dd274087c964ed72aeb9"
+    },
+    {
+      "keyHex": "90926a9760f22d27772ab443fa88220cc60c35985d3142426c9500680dfac0bc",
+      "msgType": 2,
+      "sequence": 1,
+      "plaintextHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "expectedFrameHex": "000000590200000000000000018d23c11d75bda57bcf18734ba7c1bb2bfd8d3a326c35d4ff501d66b293bb7505d78d3a7f03baae4cf0141ac200c09b2ae611c3e549d0bef6cb1dd0f47b635bb28eee38d0bc9b8b6ffa49223b6c1eea81"
+    },
+    {
+      "keyHex": "90926a9760f22d27772ab443fa88220cc60c35985d3142426c9500680dfac0bc",
+      "msgType": 4,
+      "sequence": 2,
+      "plaintextHex": "",
+      "expectedFrameHex": "00000019040000000000000002aedad1353114c1a03c13f4598ff8eccf"
+    }
+  ],
+  "fileInfo": {
+    "seedHex": "0a0dae5213d0349e52dd5133823ac326",
+    "plaintextHex": "7b226e616d65223a22746573742e747874222c2273697a65223a31323334352c226973466f6c646572223a66616c73652c2266696c65436f756e74223a307d",
+    "encryptedHex": "e6806a613d3d3e114c8616aaee88165f2c6bb0105de6f4be6297a210deda11255c8636d0b7092780ee88af903e168b5c647116a844db2dfea6593a6c6a014ad356c13c65545dba06f07782881048a5e57ee657c6d77282fdbea918",
+    "derivedKeyHex": "45ad5b91c8d528749286a37649ec0bd77453fd91766d332e848f067dd017024f"
+  }
+}

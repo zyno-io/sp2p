@@ -1,0 +1,328 @@
+name: Publish Packages
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+# Required secrets (stored in the "release" environment):
+#
+#   HOMEBREW_TAP_TOKEN       PAT with contents:write on zyno-io/homebrew-tap
+#   SCOOP_BUCKET_TOKEN       PAT with contents:write on zyno-io/scoop-bucket
+#   AUR_SSH_PRIVATE_KEY      SSH key registered at aur.archlinux.org
+#   CHOCOLATEY_API_KEY       API key from community.chocolatey.org
+#   WINGET_TOKEN             PAT with public_repo scope
+#   SNAPCRAFT_STORE_CREDENTIALS  output of `snapcraft export-login`
+#
+# Required repos (create once, can be empty):
+#
+#   zyno-io/homebrew-tap    Homebrew tap (needs Formula/ directory)
+#   zyno-io/scoop-bucket       Scoop bucket
+#
+# AUR: create account + register SSH key + create sp2p-bin package
+# Snap: register sp2p name + request classic confinement approval
+
+permissions:
+  contents: read
+
+env:
+  REPO: zyno-io/sp2p
+
+jobs:
+  homebrew:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Update Homebrew tap
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+
+          gh release download "$TAG" -R "$REPO" -p checksums.txt
+          sha() { grep "$1" checksums.txt | awk '{print $1}'; }
+
+          cat > sp2p.rb <<FORMULA
+          class Sp2p < Formula
+            desc "Secure peer-to-peer file transfer"
+            homepage "https://sp2p.io"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${BASE}/sp2p_darwin_arm64.tar.gz"
+                sha256 "$(sha sp2p_darwin_arm64.tar.gz)"
+              end
+              on_intel do
+                url "${BASE}/sp2p_darwin_amd64.tar.gz"
+                sha256 "$(sha sp2p_darwin_amd64.tar.gz)"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "${BASE}/sp2p_linux_arm64.tar.gz"
+                sha256 "$(sha sp2p_linux_arm64.tar.gz)"
+              end
+              on_intel do
+                url "${BASE}/sp2p_linux_amd64.tar.gz"
+                sha256 "$(sha sp2p_linux_amd64.tar.gz)"
+              end
+            end
+
+            def install
+              bin.install "sp2p"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/sp2p version")
+            end
+          end
+          FORMULA
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/zyno-io/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp sp2p.rb tap/Formula/sp2p.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/sp2p.rb
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "sp2p ${VERSION}"
+          git push
+
+  scoop:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Update Scoop bucket
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+
+          gh release download "$TAG" -R "$REPO" -p checksums.txt
+          sha() { grep "$1" checksums.txt | awk '{print $1}'; }
+
+          SHA_AMD64="$(sha sp2p_windows_amd64.zip)"
+          SHA_ARM64="$(sha sp2p_windows_arm64.zip)"
+
+          cat > sp2p.json <<MANIFEST
+          {
+            "version": "${VERSION}",
+            "architecture": {
+              "64bit": {
+                "url": "${BASE}/sp2p_windows_amd64.zip",
+                "hash": "${SHA_AMD64}"
+              },
+              "arm64": {
+                "url": "${BASE}/sp2p_windows_arm64.zip",
+                "hash": "${SHA_ARM64}"
+              }
+            },
+            "bin": "sp2p.exe",
+            "homepage": "https://sp2p.io",
+            "license": "MIT",
+            "description": "Secure peer-to-peer file transfer",
+            "checkver": {
+              "github": "https://github.com/zyno-io/sp2p"
+            },
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/zyno-io/sp2p/releases/download/v\$version/sp2p_windows_amd64.zip"
+                },
+                "arm64": {
+                  "url": "https://github.com/zyno-io/sp2p/releases/download/v\$version/sp2p_windows_arm64.zip"
+                }
+              }
+            }
+          }
+          MANIFEST
+
+          git clone "https://x-access-token:${BUCKET_TOKEN}@github.com/zyno-io/scoop-bucket.git" bucket
+          cp sp2p.json bucket/sp2p.json
+          cd bucket
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add sp2p.json
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "sp2p ${VERSION}"
+          git push
+
+  aur:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: release
+    container: archlinux:base
+    steps:
+      - name: Install dependencies
+        run: pacman -Sy --noconfirm git openssh github-cli
+
+      - name: Publish to AUR
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${TAG#v}"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
+
+          gh release download "$TAG" -R "$REPO" -p checksums.txt
+          sha() { grep "$1" checksums.txt | awk '{print $1}'; }
+
+          SHA_AMD64="$(sha sp2p_linux_amd64.tar.gz)"
+          SHA_ARM64="$(sha sp2p_linux_arm64.tar.gz)"
+
+          # Download LICENSE for inclusion in the package source
+          gh api "repos/${REPO}/contents/LICENSE" --jq '.content' | base64 -d > LICENSE
+
+          cat > PKGBUILD <<EOF
+          # Maintainer: Zyno Consulting <oss at zyno dot io>
+          pkgname=sp2p-bin
+          pkgver=${VERSION}
+          pkgrel=1
+          pkgdesc="Secure peer-to-peer file transfer"
+          arch=('x86_64' 'aarch64')
+          url="https://sp2p.io"
+          license=('MIT')
+          provides=('sp2p')
+          conflicts=('sp2p')
+          source_x86_64=("${BASE}/sp2p_linux_amd64.tar.gz")
+          source_aarch64=("${BASE}/sp2p_linux_arm64.tar.gz")
+          sha256sums_x86_64=('${SHA_AMD64}')
+          sha256sums_aarch64=('${SHA_ARM64}')
+
+          package() {
+            install -Dm755 sp2p "\${pkgdir}/usr/bin/sp2p"
+            install -Dm644 LICENSE "\${pkgdir}/usr/share/licenses/\${pkgname}/LICENSE"
+          }
+          EOF
+          sed -i 's/^          //' PKGBUILD
+
+          # Generate .SRCINFO from PKGBUILD
+          useradd -m builder
+          chown builder: PKGBUILD LICENSE
+          su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+
+          mkdir -p ~/.ssh
+          echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          printf 'Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  User aur\n' >> ~/.ssh/config
+
+          git clone ssh://aur@aur.archlinux.org/sp2p-bin.git aur-repo
+          cp PKGBUILD .SRCINFO LICENSE aur-repo/
+          cd aur-repo
+          git config user.name "Zyno Consulting"
+          git config user.email "oss@zyno.io"
+          git add PKGBUILD .SRCINFO LICENSE
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "Update to ${VERSION}"
+          git push
+
+  chocolatey:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - name: Create and push Chocolatey package
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $version = "$env:TAG" -replace '^v',''
+          $base = "https://github.com/$env:REPO/releases/download/$env:TAG"
+
+          gh release download "$env:TAG" -R "$env:REPO" -p checksums.txt
+          $sha_amd64 = (Select-String -Path checksums.txt -Pattern 'sp2p_windows_amd64\.zip$').Line.Split(' ')[0]
+
+          New-Item -ItemType Directory -Path pkg/tools -Force | Out-Null
+
+          @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+            <metadata>
+              <id>sp2p</id>
+              <version>$version</version>
+              <title>sp2p</title>
+              <authors>Zyno-IO</authors>
+              <owners>zyno-io</owners>
+              <requireLicenseAcceptance>false</requireLicenseAcceptance>
+              <licenseUrl>https://github.com/zyno-io/sp2p/blob/main/LICENSE</licenseUrl>
+              <projectUrl>https://sp2p.io</projectUrl>
+              <projectSourceUrl>https://github.com/zyno-io/sp2p</projectSourceUrl>
+              <bugTrackerUrl>https://github.com/zyno-io/sp2p/issues</bugTrackerUrl>
+              <description>Secure peer-to-peer file transfer. End-to-end encrypted, file data flows directly between peers via WebRTC.</description>
+              <summary>Secure peer-to-peer file transfer</summary>
+              <releaseNotes>$base</releaseNotes>
+              <tags>file-transfer p2p webrtc cli security encryption</tags>
+            </metadata>
+          </package>
+          "@ | Set-Content -Path pkg/sp2p.nuspec -Encoding UTF8
+
+          @"
+          `$ErrorActionPreference = 'Stop'
+          `$toolsDir = Split-Path -Parent `$MyInvocation.MyCommand.Definition
+          `$packageArgs = @{
+            packageName    = 'sp2p'
+            url64bit       = '$base/sp2p_windows_amd64.zip'
+            unzipLocation  = `$toolsDir
+            checksum64     = '$sha_amd64'
+            checksumType64 = 'sha256'
+          }
+          Install-ChocolateyZipPackage @packageArgs
+          "@ | Set-Content -Path pkg/tools/chocolateyInstall.ps1 -Encoding UTF8
+
+          Push-Location pkg
+          choco pack
+          choco push "sp2p.$version.nupkg" --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
+
+  winget:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: Zyno-IO.sp2p
+          installers-regex: 'sp2p_windows_(amd64|arm64)\.zip$'
+          release-tag: ${{ github.event.workflow_run.head_branch }}
+          token: ${{ secrets.WINGET_TOKEN }}
+
+  snap:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    environment: release
+    # Classic confinement requires manual Snap Store approval.
+    # Request at: https://forum.snapcraft.io/t/process-for-reviewing-classic-confinement-snaps
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          fetch-depth: 0
+      - name: Write version
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+        run: echo "${TAG#v}" > VERSION
+      - name: Build snap
+        uses: snapcore/action-build@v1
+        id: build
+      - name: Publish snap
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: stable
