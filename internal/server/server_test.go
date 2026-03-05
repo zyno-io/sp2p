@@ -680,7 +680,7 @@ func TestExtractIP_XForwardedForIgnoredWithoutTrustProxy(t *testing.T) {
 
 func mustBootstrapHandler(t *testing.T, baseURL, wsURL string) *BootstrapHandler {
 	t.Helper()
-	h, err := NewBootstrapHandler(baseURL, wsURL)
+	h, err := NewBootstrapHandler(baseURL, wsURL, nil)
 	if err != nil {
 		t.Fatalf("NewBootstrapHandler: %v", err)
 	}
@@ -724,7 +724,7 @@ func TestBootstrap_BinaryInvalidPath(t *testing.T) {
 	h := mustBootstrapHandler(t, "", "")
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/dl/", nil)
+	req := httptest.NewRequest("GET", "/dl/a/b/c", nil)
 	h.ServeBinary(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rec.Code)
@@ -813,7 +813,7 @@ func TestBootstrap_InvalidURLReturnsError(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := NewBootstrapHandler(tt.baseURL, tt.wsURL)
+			_, err := NewBootstrapHandler(tt.baseURL, tt.wsURL, nil)
 			if err == nil {
 				t.Fatal("expected error for unsafe URL")
 			}
@@ -822,12 +822,116 @@ func TestBootstrap_InvalidURLReturnsError(t *testing.T) {
 }
 
 func TestBootstrap_ValidURLSucceeds(t *testing.T) {
-	h, err := NewBootstrapHandler("https://sp2p.io", "wss://sp2p.io/ws")
+	h, err := NewBootstrapHandler("https://sp2p.io", "wss://sp2p.io/ws", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if h == nil {
 		t.Fatal("expected non-nil handler")
+	}
+}
+
+func TestBootstrap_FilenameRedirect(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		wantCode int
+		wantURL  string
+	}{
+		{"deb", "/dl/sp2p_amd64.deb", http.StatusFound, githubReleaseBaseURL + "/sp2p_amd64.deb"},
+		{"rpm", "/dl/sp2p_x86_64.rpm", http.StatusFound, githubReleaseBaseURL + "/sp2p_x86_64.rpm"},
+		{"apk", "/dl/sp2p_x86_64.apk", http.StatusFound, githubReleaseBaseURL + "/sp2p_x86_64.apk"},
+		{"tar.gz", "/dl/sp2p_linux_amd64.tar.gz", http.StatusFound, githubReleaseBaseURL + "/sp2p_linux_amd64.tar.gz"},
+		{"zip", "/dl/sp2p_windows_amd64.zip", http.StatusFound, githubReleaseBaseURL + "/sp2p_windows_amd64.zip"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := mustBootstrapHandler(t, "https://sp2p.io", "wss://sp2p.io/ws")
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", tt.path, nil)
+			h.ServeBinary(rec, req)
+			if rec.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d", tt.wantCode, rec.Code)
+			}
+			if loc := rec.Header().Get("Location"); loc != tt.wantURL {
+				t.Fatalf("redirect:\n  got  %s\n  want %s", loc, tt.wantURL)
+			}
+		})
+	}
+}
+
+func TestBootstrap_FilenameValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		wantCode int
+	}{
+		{"no sp2p prefix", "/dl/malware.deb", http.StatusBadRequest},
+		{"path traversal", "/dl/sp2p_../../etc/passwd.tar.gz", http.StatusBadRequest},
+		{"backslash", "/dl/sp2p_foo\\.tar.gz", http.StatusBadRequest},
+		{"bad extension", "/dl/sp2p_linux.exe", http.StatusBadRequest},
+		{"empty filename", "/dl/", http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := mustBootstrapHandler(t, "https://sp2p.io", "wss://sp2p.io/ws")
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", tt.path, nil)
+			h.ServeBinary(rec, req)
+			if rec.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d", tt.wantCode, rec.Code)
+			}
+		})
+	}
+}
+
+func TestBootstrap_BinaryRedirectWithResolver(t *testing.T) {
+	// Set up a mock GitHub API that simulates a scoped release scenario.
+	releases := []githubRelease{
+		{
+			TagName: "v0.1.1-cli-windows",
+			Assets: []githubAsset{
+				{Name: "sp2p_windows_amd64.zip", BrowserDownloadURL: "https://github.com/zyno-io/sp2p/releases/download/v0.1.1-cli-windows/sp2p_windows_amd64.zip"},
+			},
+		},
+		{
+			TagName: "v0.1.0",
+			Assets: []githubAsset{
+				{Name: "sp2p_linux_amd64.tar.gz", BrowserDownloadURL: "https://github.com/zyno-io/sp2p/releases/download/v0.1.0/sp2p_linux_amd64.tar.gz"},
+				{Name: "sp2p_windows_amd64.zip", BrowserDownloadURL: "https://github.com/zyno-io/sp2p/releases/download/v0.1.0/sp2p_windows_amd64.zip"},
+			},
+		},
+	}
+	api := newTestGitHubAPI(t, releases)
+	defer api.Close()
+
+	resolver := newResolverWithURL(api.URL)
+	h, err := NewBootstrapHandler("https://sp2p.io", "wss://sp2p.io/ws", resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Linux should resolve to v0.1.0 (not "latest").
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/dl/linux/amd64", nil)
+	h.ServeBinary(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected 302, got %d", rec.Code)
+	}
+	loc := rec.Header().Get("Location")
+	want := "https://github.com/zyno-io/sp2p/releases/download/v0.1.0/sp2p_linux_amd64.tar.gz"
+	if loc != want {
+		t.Fatalf("linux redirect:\n  got  %s\n  want %s", loc, want)
+	}
+
+	// Windows should resolve to the scoped release.
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/dl/windows/amd64", nil)
+	h.ServeBinary(rec, req)
+	loc = rec.Header().Get("Location")
+	want = "https://github.com/zyno-io/sp2p/releases/download/v0.1.1-cli-windows/sp2p_windows_amd64.zip"
+	if loc != want {
+		t.Fatalf("windows redirect:\n  got  %s\n  want %s", loc, want)
 	}
 }
 

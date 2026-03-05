@@ -70,7 +70,19 @@ func New(cfg Config) (*Server, error) {
 	stats := NewStatsTracker(cfg.ConfigDir)
 	signalHandler := NewSignalHandler(sessions, cfg.Version, cfg.BaseURL, cfg.STUNServers, cfg.StaticTURN, cfg.TURNGen, originPatterns, cfg.TrustProxy, stats)
 	fileInfoHandler := NewFileInfoHandler(sessions)
-	bootstrapHandler, err := NewBootstrapHandler(cfg.BaseURL, wsURL)
+
+	// Create release resolver for production (non-dev) mode.
+	var resolver *ReleaseResolver
+	if cfg.BaseURL != "" {
+		if u, err := url.Parse(cfg.BaseURL); err == nil {
+			host := u.Hostname()
+			if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+				resolver = NewReleaseResolver()
+			}
+		}
+	}
+
+	bootstrapHandler, err := NewBootstrapHandler(cfg.BaseURL, wsURL, resolver)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: %w", err)
 	}

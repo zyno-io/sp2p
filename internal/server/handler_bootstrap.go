@@ -19,14 +19,16 @@ const githubReleaseBaseURL = "https://github.com/zyno-io/sp2p/releases/latest/do
 
 // BootstrapHandler serves bootstrap shell scripts and CLI binary downloads.
 type BootstrapHandler struct {
-	baseURL string
-	wsURL   string
+	baseURL  string
+	wsURL    string
+	resolver *ReleaseResolver
 }
 
 // NewBootstrapHandler creates a new bootstrap handler.
 // It validates that baseURL and wsURL are well-formed URLs to prevent
 // shell injection in generated bootstrap scripts.
-func NewBootstrapHandler(baseURL, wsURL string) (*BootstrapHandler, error) {
+// The resolver is optional — if nil, redirects fall back to GitHub's latest release URL.
+func NewBootstrapHandler(baseURL, wsURL string, resolver *ReleaseResolver) (*BootstrapHandler, error) {
 	// Validate URLs to prevent shell metacharacter injection.
 	if _, err := url.Parse(baseURL); err != nil {
 		return nil, fmt.Errorf("invalid baseURL: %w", err)
@@ -41,8 +43,9 @@ func NewBootstrapHandler(baseURL, wsURL string) (*BootstrapHandler, error) {
 		}
 	}
 	return &BootstrapHandler{
-		baseURL: baseURL,
-		wsURL:   wsURL,
+		baseURL:  baseURL,
+		wsURL:    wsURL,
+		resolver: resolver,
 	}, nil
 }
 
@@ -60,19 +63,30 @@ func (h *BootstrapHandler) ServeRecvScript(w http.ResponseWriter, r *http.Reques
 	w.Write([]byte(script))
 }
 
-// ServeBinary redirects to the GitHub Releases asset for the requested OS/arch.
-// In dev mode (baseURL empty or localhost), it serves the current binary directly
-// for the matching platform.
+// validAssetExtensions lists file extensions allowed for /dl/{filename} requests.
+var validAssetExtensions = []string{".tar.gz", ".zip", ".deb", ".rpm", ".apk"}
+
+// ServeBinary handles two URL patterns:
+//   - /dl/{os}/{arch}   — redirects to the platform-specific archive
+//   - /dl/{filename}    — redirects to a named asset (e.g. sp2p_amd64.deb)
+//
+// In dev mode (baseURL empty or localhost), /dl/{os}/{arch} serves the current
+// binary directly for the matching platform.
 func (h *BootstrapHandler) ServeBinary(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/dl/"), "/")
-	if len(parts) != 2 {
-		http.Error(w, "expected /dl/{os}/{arch}", http.StatusBadRequest)
-		return
+
+	switch len(parts) {
+	case 2:
+		h.serveBinaryByPlatform(w, r, parts[0], parts[1])
+	case 1:
+		h.serveBinaryByFilename(w, r, parts[0])
+	default:
+		http.Error(w, "expected /dl/{os}/{arch} or /dl/{filename}", http.StatusBadRequest)
 	}
+}
 
-	reqOS := parts[0]
-	reqArch := parts[1]
-
+// serveBinaryByPlatform handles /dl/{os}/{arch} requests.
+func (h *BootstrapHandler) serveBinaryByPlatform(w http.ResponseWriter, r *http.Request, reqOS, reqArch string) {
 	validOS := map[string]bool{"linux": true, "darwin": true, "windows": true}
 	validArch := map[string]bool{"amd64": true, "arm64": true}
 
@@ -83,50 +97,102 @@ func (h *BootstrapHandler) ServeBinary(w http.ResponseWriter, r *http.Request) {
 
 	// Dev mode: serve the current binary as a tar.gz if the platform matches.
 	if h.isDevMode() && reqOS == runtime.GOOS && reqArch == runtime.GOARCH {
-		exe, err := os.Executable()
-		if err != nil {
-			http.Error(w, "cannot determine current binary", http.StatusInternalServerError)
-			return
-		}
-		exe, _ = filepath.EvalSymlinks(exe)
-
-		f, err := os.Open(exe)
-		if err != nil {
-			http.Error(w, "cannot open binary", http.StatusInternalServerError)
-			return
-		}
-		defer f.Close()
-
-		info, err := f.Stat()
-		if err != nil {
-			http.Error(w, "cannot stat binary", http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/gzip")
-		w.Header().Set("Content-Disposition", `attachment; filename="sp2p.tar.gz"`)
-
-		gw := gzip.NewWriter(w)
-		defer gw.Close()
-		tw := tar.NewWriter(gw)
-		defer tw.Close()
-
-		tw.WriteHeader(&tar.Header{
-			Name: "sp2p",
-			Size: info.Size(),
-			Mode: 0o755,
-		})
-		io.Copy(tw, f)
+		h.serveLocalBinary(w)
 		return
 	}
 
-	// Redirect to GitHub Releases.
 	ext := ".tar.gz"
 	if reqOS == "windows" {
 		ext = ".zip"
 	}
-	target := fmt.Sprintf("%s/sp2p_%s_%s%s", githubReleaseBaseURL, reqOS, reqArch, ext)
+	assetName := fmt.Sprintf("sp2p_%s_%s%s", reqOS, reqArch, ext)
+	h.redirectToAsset(w, r, assetName)
+}
+
+// serveBinaryByFilename handles /dl/{filename} requests.
+func (h *BootstrapHandler) serveBinaryByFilename(w http.ResponseWriter, r *http.Request, filename string) {
+	if filename == "" {
+		http.Error(w, "expected /dl/{os}/{arch} or /dl/{filename}", http.StatusBadRequest)
+		return
+	}
+
+	// Validate filename: must start with "sp2p", have a known extension, no path traversal.
+	if !strings.HasPrefix(filename, "sp2p") {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+	if strings.Contains(filename, "..") || strings.ContainsAny(filename, "/\\") {
+		http.Error(w, "invalid filename", http.StatusBadRequest)
+		return
+	}
+	validExt := false
+	for _, ext := range validAssetExtensions {
+		if strings.HasSuffix(filename, ext) {
+			validExt = true
+			break
+		}
+	}
+	if !validExt {
+		http.Error(w, "unsupported file type", http.StatusBadRequest)
+		return
+	}
+
+	h.redirectToAsset(w, r, filename)
+}
+
+// redirectToAsset resolves the asset URL via the resolver (if available) and redirects.
+func (h *BootstrapHandler) redirectToAsset(w http.ResponseWriter, r *http.Request, assetName string) {
+	if h.resolver != nil {
+		target, err := h.resolver.ResolveAssetURL(r.Context(), assetName)
+		if err != nil {
+			http.Error(w, "failed to resolve asset", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
+
+	// No resolver — fall back to latest release URL.
+	target := fmt.Sprintf("%s/%s", githubReleaseBaseURL, assetName)
 	http.Redirect(w, r, target, http.StatusFound)
+}
+
+// serveLocalBinary serves the current binary as a tar.gz for dev mode.
+func (h *BootstrapHandler) serveLocalBinary(w http.ResponseWriter) {
+	exe, err := os.Executable()
+	if err != nil {
+		http.Error(w, "cannot determine current binary", http.StatusInternalServerError)
+		return
+	}
+	exe, _ = filepath.EvalSymlinks(exe)
+
+	f, err := os.Open(exe)
+	if err != nil {
+		http.Error(w, "cannot open binary", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, "cannot stat binary", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", `attachment; filename="sp2p.tar.gz"`)
+
+	gw := gzip.NewWriter(w)
+	defer gw.Close()
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	tw.WriteHeader(&tar.Header{
+		Name: "sp2p",
+		Size: info.Size(),
+		Mode: 0o755,
+	})
+	io.Copy(tw, f)
 }
 
 // isDevMode returns true when the server is running in development mode

@@ -58,21 +58,23 @@ brew install zyno-io/tap/sp2p
 
 ### Linux
 
+The download links below (`sp2p.io/dl/...`) redirect to the latest GitHub release for each package.
+
 **Debian / Ubuntu:**
 ```bash
-curl -LO https://github.com/zyno-io/sp2p/releases/latest/download/sp2p_amd64.deb
+curl -LO https://sp2p.io/dl/sp2p_amd64.deb
 sudo dpkg -i sp2p_amd64.deb
 ```
 
 **Fedora / RHEL:**
 ```bash
-curl -LO https://github.com/zyno-io/sp2p/releases/latest/download/sp2p_x86_64.rpm
+curl -LO https://sp2p.io/dl/sp2p_x86_64.rpm
 sudo rpm -i sp2p_x86_64.rpm
 ```
 
 **Alpine:**
 ```bash
-curl -LO https://github.com/zyno-io/sp2p/releases/latest/download/sp2p_x86_64.apk
+curl -LO https://sp2p.io/dl/sp2p_x86_64.apk
 wget -O /etc/apk/keys/oss@zyno.io-sp2p.rsa.pub https://cdn.zyno.io/apps/sp2p/sp2p.rsa.pub
 apk add sp2p_x86_64.apk
 ```
