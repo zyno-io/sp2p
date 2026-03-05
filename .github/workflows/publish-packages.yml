@@ -298,27 +298,27 @@ jobs:
           release-tag: ${{ inputs.tag }}
           token: ${{ secrets.WINGET_TOKEN }}
 
-  snap:
-    runs-on: ubuntu-latest
-    environment: release
-    # Classic confinement requires manual Snap Store approval.
-    # Request at: https://forum.snapcraft.io/t/process-for-reviewing-classic-confinement-snaps
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-      - name: Write version
-        env:
-          TAG: ${{ inputs.tag }}
-        run: echo "${TAG#v}" > VERSION
-      - name: Build snap
-        uses: snapcore/action-build@v1
-        id: build
-      - name: Publish snap
-        uses: snapcore/action-publish@v1
-        env:
-          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
-        with:
-          snap: ${{ steps.build.outputs.snap }}
-          release: stable
+  # snap:
+  #   runs-on: ubuntu-latest
+  #   environment: release
+  #   # Classic confinement requires manual Snap Store approval.
+  #   # Request at: https://forum.snapcraft.io/t/process-for-reviewing-classic-confinement-snaps
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ inputs.tag }}
+  #         fetch-depth: 0
+  #     - name: Write version
+  #       env:
+  #         TAG: ${{ inputs.tag }}
+  #       run: echo "${TAG#v}" > VERSION
+  #     - name: Build snap
+  #       uses: snapcore/action-build@v1
+  #       id: build
+  #     - name: Publish snap
+  #       uses: snapcore/action-publish@v1
+  #       env:
+  #         SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+  #       with:
+  #         snap: ${{ steps.build.outputs.snap }}
+  #         release: stable
