@@ -40,6 +40,7 @@ type Server struct {
 	sessions     *SessionManager
 	limiter      *RateLimiter
 	stats        *StatsTracker
+	releases     *ReleaseResolver
 	http         *http.Server
 	certReloader *CertReloader
 	acme         *ACMEManager
@@ -67,11 +68,9 @@ func New(cfg Config) (*Server, error) {
 		originPatterns = []string{"*"}
 	}
 
-	stats := NewStatsTracker(cfg.ConfigDir)
-	signalHandler := NewSignalHandler(sessions, cfg.Version, cfg.BaseURL, cfg.STUNServers, cfg.StaticTURN, cfg.TURNGen, originPatterns, cfg.TrustProxy, stats)
-	fileInfoHandler := NewFileInfoHandler(sessions)
-
 	// Create release resolver for production (non-dev) mode.
+	// Start() is deferred until after all fallible constructor steps
+	// to avoid leaking a polling goroutine on error.
 	var resolver *ReleaseResolver
 	if cfg.BaseURL != "" {
 		if u, err := url.Parse(cfg.BaseURL); err == nil {
@@ -81,6 +80,10 @@ func New(cfg Config) (*Server, error) {
 			}
 		}
 	}
+
+	stats := NewStatsTracker(cfg.ConfigDir)
+	signalHandler := NewSignalHandler(sessions, cfg.Version, cfg.BaseURL, cfg.STUNServers, cfg.StaticTURN, cfg.TURNGen, resolver, originPatterns, cfg.TrustProxy, stats)
+	fileInfoHandler := NewFileInfoHandler(sessions)
 
 	bootstrapHandler, err := NewBootstrapHandler(cfg.BaseURL, wsURL, resolver)
 	if err != nil {
@@ -159,6 +162,7 @@ func New(cfg Config) (*Server, error) {
 		sessions: sessions,
 		limiter:  wsLimiter,
 		stats:    stats,
+		releases: resolver,
 		http: &http.Server{
 			Addr:              cfg.Addr,
 			Handler:           mux,
@@ -181,6 +185,11 @@ func New(cfg Config) (*Server, error) {
 		}
 		cacheDir := filepath.Join(cfg.ConfigDir, "acme")
 		s.acme = NewACMEManager(u.Hostname(), cfg.ACMEEmail, cacheDir)
+	}
+
+	// Start background polling now that all fallible steps have passed.
+	if resolver != nil {
+		resolver.Start()
 	}
 
 	return s, nil
@@ -212,6 +221,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.sessions.Stop()
 	s.limiter.Stop()
 	s.stats.Stop()
+	if s.releases != nil {
+		s.releases.Stop()
+	}
 	if s.certReloader != nil {
 		s.certReloader.Stop()
 	}

@@ -297,3 +297,132 @@ func TestReleaseResolver_ConcurrentAccess(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestReleaseResolver_LatestVersionForPlatform(t *testing.T) {
+	releases := []githubRelease{
+		{
+			TagName: "v0.1.1-cli-windows",
+			Assets: []githubAsset{
+				{Name: "sp2p_windows_amd64.zip", BrowserDownloadURL: "https://example.com/windows"},
+			},
+		},
+		{
+			TagName: "v0.1.0",
+			Assets: []githubAsset{
+				{Name: "sp2p_linux_amd64.tar.gz", BrowserDownloadURL: "https://example.com/linux"},
+				{Name: "sp2p_darwin_arm64.tar.gz", BrowserDownloadURL: "https://example.com/darwin"},
+				{Name: "sp2p_windows_amd64.zip", BrowserDownloadURL: "https://example.com/windows-old"},
+			},
+		},
+	}
+
+	api := newTestGitHubAPI(t, releases)
+	defer api.Close()
+
+	r := newResolverWithURL(api.URL)
+	// Populate cache via ResolveAssetURL.
+	r.ResolveAssetURL(t.Context(), "sp2p_linux_amd64.tar.gz")
+
+	tests := []struct {
+		os, arch string
+		want     string
+	}{
+		{"linux", "amd64", "0.1.0"},
+		{"darwin", "arm64", "0.1.0"},
+		{"windows", "amd64", "0.1.1-cli-windows"},
+		{"freebsd", "amd64", ""},  // unknown platform
+		{"linux", "arm64", ""},    // no asset for this combo
+	}
+	for _, tt := range tests {
+		got := r.LatestVersionForPlatform(tt.os, tt.arch)
+		if got != tt.want {
+			t.Errorf("LatestVersionForPlatform(%s, %s) = %q, want %q", tt.os, tt.arch, got, tt.want)
+		}
+	}
+}
+
+func TestReleaseResolver_StaleCacheOnRefreshFailure(t *testing.T) {
+	var callCount atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := callCount.Add(1)
+		if n == 1 {
+			// First call succeeds.
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode([]githubRelease{
+				{
+					TagName: "v0.2.0",
+					Assets: []githubAsset{
+						{Name: "sp2p_linux_amd64.tar.gz", BrowserDownloadURL: "https://example.com/v0.2.0/linux"},
+					},
+				},
+			})
+		} else {
+			// Subsequent calls fail.
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer api.Close()
+
+	r := newResolverWithURL(api.URL)
+
+	// First call populates the cache.
+	got, err := r.ResolveAssetURL(t.Context(), "sp2p_linux_amd64.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://example.com/v0.2.0/linux" {
+		t.Fatalf("first call: got %s", got)
+	}
+
+	// Expire the cache.
+	r.mu.Lock()
+	r.fetchedAt = time.Now().Add(-releaseCacheTTL - time.Second)
+	r.mu.Unlock()
+
+	// Second call should use stale cache (not the hardcoded fallback URL).
+	got, err = r.ResolveAssetURL(t.Context(), "sp2p_linux_amd64.tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://example.com/v0.2.0/linux" {
+		t.Fatalf("stale cache fallback: got %s, want stale cached URL", got)
+	}
+
+	// LatestVersionForPlatform should also return the stale version.
+	if v := r.LatestVersionForPlatform("linux", "amd64"); v != "0.2.0" {
+		t.Fatalf("stale version: got %q, want %q", v, "0.2.0")
+	}
+}
+
+func TestReleaseResolver_BackgroundPolling(t *testing.T) {
+	var fetchCount atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fetchCount.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]githubRelease{
+			{
+				TagName: "v0.3.0",
+				Assets: []githubAsset{
+					{Name: "sp2p_linux_amd64.tar.gz", BrowserDownloadURL: "https://example.com/linux"},
+				},
+			},
+		})
+	}))
+	defer api.Close()
+
+	r := newResolverWithURL(api.URL)
+	r.Start()
+	defer r.Stop()
+
+	// Wait briefly for the initial background fetch.
+	time.Sleep(200 * time.Millisecond)
+
+	if fetchCount.Load() < 1 {
+		t.Fatal("expected at least 1 background fetch")
+	}
+
+	// Cache should be warm — LatestVersionForPlatform should return the version.
+	if v := r.LatestVersionForPlatform("linux", "amd64"); v != "0.3.0" {
+		t.Fatalf("after background poll: got %q, want %q", v, "0.3.0")
+	}
+}

@@ -44,6 +44,8 @@ const (
 type Hello struct {
 	Version    int    `json:"version"`
 	ClientType string `json:"clientType,omitempty"`
+	ClientOS   string `json:"clientOS,omitempty"`
+	ClientArch string `json:"clientArch,omitempty"`
 }
 
 // Welcome is the server's response to Hello, containing the session ID.
@@ -75,6 +77,8 @@ type Join struct {
 	Version    int    `json:"version"`
 	SessionID  string `json:"sessionId"`
 	ClientType string `json:"clientType,omitempty"`
+	ClientOS   string `json:"clientOS,omitempty"`
+	ClientArch string `json:"clientArch,omitempty"`
 }
 
 // PeerJoined notifies the sender that a receiver has joined.

@@ -22,13 +22,14 @@ type SignalHandler struct {
 	stunServers    []signal.ICEServer // STUN-only servers (sent in Welcome)
 	staticTURN     []signal.ICEServer // static TURN servers (delivered on relay-retry)
 	turnGen        *TURNCredentialGenerator // ephemeral TURN credential generator (mutually exclusive with staticTURN)
+	releases       *ReleaseResolver   // platform-aware version lookup (nil in dev mode)
 	originPatterns []string
 	trustProxy     bool // trust X-Forwarded-For for client IP extraction
 	stats          *StatsTracker
 }
 
 // NewSignalHandler creates a new signaling WebSocket handler.
-func NewSignalHandler(sessions *SessionManager, serverVersion string, baseURL string, stunServers []signal.ICEServer, staticTURN []signal.ICEServer, turnGen *TURNCredentialGenerator, originPatterns []string, trustProxy bool, stats *StatsTracker) *SignalHandler {
+func NewSignalHandler(sessions *SessionManager, serverVersion string, baseURL string, stunServers []signal.ICEServer, staticTURN []signal.ICEServer, turnGen *TURNCredentialGenerator, releases *ReleaseResolver, originPatterns []string, trustProxy bool, stats *StatsTracker) *SignalHandler {
 	return &SignalHandler{
 		sessions:       sessions,
 		serverVersion:  serverVersion,
@@ -36,6 +37,7 @@ func NewSignalHandler(sessions *SessionManager, serverVersion string, baseURL st
 		stunServers:    stunServers,
 		staticTURN:     staticTURN,
 		turnGen:        turnGen,
+		releases:       releases,
 		originPatterns: originPatterns,
 		trustProxy:     trustProxy,
 		stats:          stats,
@@ -118,7 +120,7 @@ func (h *SignalHandler) handleSender(ctx context.Context, conn *websocket.Conn, 
 		SessionID:     session.ID,
 		ICEServers:    h.stunServers,
 		TURNAvailable: h.hasTURN(),
-		ServerVersion: h.serverVersion,
+		ServerVersion: h.versionForPlatform(hello.ClientOS, hello.ClientArch),
 		BaseURL:       h.baseURL,
 	})
 
@@ -154,7 +156,7 @@ func (h *SignalHandler) handleReceiver(ctx context.Context, conn *websocket.Conn
 		ICEServers:     h.stunServers,
 		TURNAvailable:  h.hasTURN(),
 		PeerClientType: session.SenderClientType,
-		ServerVersion:  h.serverVersion,
+		ServerVersion:  h.versionForPlatform(join.ClientOS, join.ClientArch),
 		BaseURL:        h.baseURL,
 	})
 
@@ -252,6 +254,17 @@ func (h *SignalHandler) relayLoop(ctx context.Context, session *Session, conn *w
 			relayMessage(ctx, peer, data)
 		}
 	}
+}
+
+// versionForPlatform returns the latest release version for the client's platform,
+// falling back to the server's own version if the resolver is unavailable or has no data.
+func (h *SignalHandler) versionForPlatform(clientOS, clientArch string) string {
+	if h.releases != nil && clientOS != "" {
+		if v := h.releases.LatestVersionForPlatform(clientOS, clientArch); v != "" {
+			return v
+		}
+	}
+	return h.serverVersion
 }
 
 // hasTURN reports whether the server has TURN relay capability.

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"runtime"
 	"time"
 
 	"github.com/zyno-io/sp2p/internal/conn"
@@ -52,6 +53,8 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	if err := sigClient.Send(ctx, signal.TypeHello, signal.Hello{
 		Version:    signal.ProtocolVersion,
 		ClientType: signal.ClientTypeCLI,
+		ClientOS:   runtime.GOOS,
+		ClientArch: runtime.GOARCH,
 	}); err != nil {
 		return fmt.Errorf("sending hello: %w", err)
 	}

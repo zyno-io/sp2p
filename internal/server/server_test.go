@@ -943,7 +943,7 @@ func TestSignalHandler_TrustProxyForSessionIP(t *testing.T) {
 	defer stats.Stop()
 
 	// Should not panic — just verify construction with trustProxy=true.
-	h := NewSignalHandler(sessions, "1.0.0", "https://sp2p.io", nil, nil, nil, []string{"*"}, true, stats)
+	h := NewSignalHandler(sessions, "1.0.0", "https://sp2p.io", nil, nil, nil, nil, []string{"*"}, true, stats)
 	if h == nil {
 		t.Fatal("expected non-nil handler")
 	}

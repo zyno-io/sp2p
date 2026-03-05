@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/zyno-io/sp2p/internal/archive"
@@ -66,6 +67,8 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		Version:    signal.ProtocolVersion,
 		SessionID:  sessionID,
 		ClientType: signal.ClientTypeCLI,
+		ClientOS:   runtime.GOOS,
+		ClientArch: runtime.GOARCH,
 	}); err != nil {
 		return nil, fmt.Errorf("sending join: %w", err)
 	}
