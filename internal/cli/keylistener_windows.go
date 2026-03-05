@@ -10,7 +10,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var procReadConsoleInput = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReadConsoleInputW")
+var (
+	procReadConsoleInput  = windows.NewLazySystemDLL("kernel32.dll").NewProc("ReadConsoleInputW")
+	procWriteConsoleInput = windows.NewLazySystemDLL("kernel32.dll").NewProc("WriteConsoleInputW")
+)
 
 const keyEventType = 0x0001
 
@@ -46,7 +49,7 @@ func NewKeyListener() *KeyListener {
 	name, _ := windows.UTF16PtrFromString("CONIN$")
 	handle, err := windows.CreateFile(
 		name,
-		windows.GENERIC_READ,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil,
 		windows.OPEN_EXISTING,
@@ -77,6 +80,12 @@ func (kl *KeyListener) readLoop() {
 	var rec inputRecord
 	var numRead uint32
 	for {
+		// Check for stop before blocking on the next read.
+		select {
+		case <-kl.done:
+			return
+		default:
+		}
 		ret, _, _ := procReadConsoleInput.Call(
 			uintptr(kl.handle),
 			uintptr(unsafe.Pointer(&rec)),
@@ -106,7 +115,9 @@ func (kl *KeyListener) Done() <-chan struct{} {
 	return kl.done
 }
 
-// Stop closes the console handle, which unblocks the read loop.
+// Stop unblocks the read loop and closes the console handle.
+// On Windows, CloseHandle can block if ReadConsoleInputW has a pending
+// read, so we inject a dummy event first to wake the reader.
 func (kl *KeyListener) Stop() {
 	select {
 	case <-kl.done:
@@ -114,5 +125,19 @@ func (kl *KeyListener) Stop() {
 	default:
 		close(kl.done)
 	}
+	// Inject a dummy key event to unblock ReadConsoleInputW.
+	// The readLoop checks done before the next read, so it will exit.
+	var rec inputRecord
+	rec.eventType = keyEventType
+	key := (*keyEventRecord)(unsafe.Pointer(&rec.event))
+	key.keyDown = 1
+	key.char = 0 // null char, filtered by readLoop
+	var written uint32
+	procWriteConsoleInput.Call(
+		uintptr(kl.handle),
+		uintptr(unsafe.Pointer(&rec)),
+		1,
+		uintptr(unsafe.Pointer(&written)),
+	)
 	windows.CloseHandle(kl.handle)
 }
