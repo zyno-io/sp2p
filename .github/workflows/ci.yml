@@ -46,6 +46,7 @@ jobs:
           args: release --snapshot --clean --skip=publish,docker,sign
         env:
           APK_SIGNING_KEY: /dev/null
+          SP2P_VERSION: 0.0.0-snapshot
       - uses: actions/upload-artifact@v4
         with:
           name: packages
