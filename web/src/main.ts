@@ -878,7 +878,7 @@ function initFooterVersion(): void {
     if (v !== "dev") {
       const tag = "v" + v.replace(/^v/, "");
       const a = document.createElement("a");
-      a.href = "https://github.com/zyno-io/sp2p/releases/tag/" + tag;
+      a.href = "https://github.com/zyno-io/sp2p";
       a.target = "_blank";
       a.rel = "noopener noreferrer";
       a.textContent = v;
