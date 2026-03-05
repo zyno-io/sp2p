@@ -255,5 +255,5 @@ jobs:
       publish_scoop: ${{ needs.release.outputs.has_windows == 'true' && needs.release.outputs.has_cli == 'true' }}
       publish_aur: ${{ needs.release.outputs.has_linux == 'true' && needs.release.outputs.has_cli == 'true' }}
       publish_chocolatey: ${{ needs.release.outputs.has_windows == 'true' && needs.release.outputs.has_cli == 'true' }}
-      publish_winget: ${{ needs.release.outputs.scope == 'all' }}
+      publish_winget: ${{ needs.release.outputs.has_windows == 'true' && needs.release.outputs.has_cli == 'true' }}
     secrets: inherit

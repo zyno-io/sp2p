@@ -324,6 +324,7 @@ jobs:
       - uses: vedantmgoyal9/winget-releaser@v2
         with:
           identifier: zyno-io.sp2p
+          version: ${{ inputs.version }}
           installers-regex: 'sp2p_windows_(amd64|arm64)\.zip$'
           release-tag: ${{ inputs.tag }}
           token: ${{ secrets.WINGET_TOKEN }}
