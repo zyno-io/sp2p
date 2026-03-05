@@ -210,8 +210,9 @@ jobs:
 
           # Generate .SRCINFO from PKGBUILD
           useradd -m builder
-          chown builder: PKGBUILD LICENSE
-          su builder -c 'makepkg --printsrcinfo' > .SRCINFO
+          cp PKGBUILD LICENSE /home/builder/
+          chown builder: /home/builder/PKGBUILD /home/builder/LICENSE
+          su builder -c 'cd /home/builder && makepkg --printsrcinfo' > .SRCINFO
 
           mkdir -p ~/.ssh
           echo "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
