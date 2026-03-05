@@ -102,7 +102,7 @@ choco install sp2p
 
 **WinGet:** *(pending)*
 ```powershell
-winget install Zyno-IO.sp2p
+winget install zyno-io.sp2p
 ```
 
 ### From Source
