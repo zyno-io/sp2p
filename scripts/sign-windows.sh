@@ -32,5 +32,5 @@ if [[ "$found" -eq 0 ]]; then
 fi
 
 # Regenerate checksums to reflect the repacked archives.
-(cd dist && sha256sum *.tar.gz *.zip *.deb *.rpm *.apk 2>/dev/null > checksums.txt)
+(cd dist && find . -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -type f -exec sha256sum {} + > checksums.txt)
 echo "Checksums updated"

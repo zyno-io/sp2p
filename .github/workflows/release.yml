@@ -12,32 +12,98 @@ jobs:
   release:
     runs-on: ubuntu-latest
     environment: release
+    outputs:
+      clean_tag: ${{ steps.parse.outputs.clean_tag }}
+      clean_version: ${{ steps.parse.outputs.clean_version }}
+      scope: ${{ steps.parse.outputs.scope }}
+      has_server: ${{ steps.parse.outputs.has_server }}
+      has_cli: ${{ steps.parse.outputs.has_cli }}
+      has_linux: ${{ steps.parse.outputs.has_linux }}
+      has_darwin: ${{ steps.parse.outputs.has_darwin }}
+      has_windows: ${{ steps.parse.outputs.has_windows }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Parse tag scope
+        id: parse
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+
+          # Match known scope suffixes (longest first to avoid partial matches)
+          case "$TAG" in
+            *-cli-windows) SCOPE="cli-windows"; CLEAN_TAG="${TAG%-cli-windows}" ;;
+            *-cli-linux)   SCOPE="cli-linux";   CLEAN_TAG="${TAG%-cli-linux}" ;;
+            *-cli-nix)     SCOPE="cli-nix";     CLEAN_TAG="${TAG%-cli-nix}" ;;
+            *-cli-mac)     SCOPE="cli-mac";     CLEAN_TAG="${TAG%-cli-mac}" ;;
+            *-server)      SCOPE="server";      CLEAN_TAG="${TAG%-server}" ;;
+            *-cli)         SCOPE="cli";         CLEAN_TAG="${TAG%-cli}" ;;
+            *)             SCOPE="all";         CLEAN_TAG="$TAG" ;;
+          esac
+
+          CLEAN_VERSION="${CLEAN_TAG#v}"
+
+          # Validate that clean_version looks like a version (reject typos like v1.0.0-linxu)
+          if ! [[ "$CLEAN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::Tag '$TAG' does not contain a valid version (got '$CLEAN_VERSION'). Known scopes: server, cli, cli-nix, cli-linux, cli-mac, cli-windows"
+            exit 1
+          fi
+
+          # Derive platform booleans
+          case "$SCOPE" in
+            all)          HAS_SERVER=true;  HAS_CLI=true;  HAS_LINUX=true;  HAS_DARWIN=true;  HAS_WINDOWS=true  ;;
+            server)       HAS_SERVER=true;  HAS_CLI=false; HAS_LINUX=false; HAS_DARWIN=false; HAS_WINDOWS=false ;;
+            cli)          HAS_SERVER=false; HAS_CLI=true;  HAS_LINUX=true;  HAS_DARWIN=true;  HAS_WINDOWS=true  ;;
+            cli-nix)      HAS_SERVER=false; HAS_CLI=true;  HAS_LINUX=true;  HAS_DARWIN=true;  HAS_WINDOWS=false ;;
+            cli-linux)    HAS_SERVER=false; HAS_CLI=true;  HAS_LINUX=true;  HAS_DARWIN=false; HAS_WINDOWS=false ;;
+            cli-mac)      HAS_SERVER=false; HAS_CLI=true;  HAS_LINUX=false; HAS_DARWIN=true;  HAS_WINDOWS=false ;;
+            cli-windows)  HAS_SERVER=false; HAS_CLI=true;  HAS_LINUX=false; HAS_DARWIN=false; HAS_WINDOWS=true  ;;
+          esac
+
+          echo "clean_tag=$CLEAN_TAG" >> "$GITHUB_OUTPUT"
+          echo "clean_version=$CLEAN_VERSION" >> "$GITHUB_OUTPUT"
+          echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          echo "has_server=$HAS_SERVER" >> "$GITHUB_OUTPUT"
+          echo "has_cli=$HAS_CLI" >> "$GITHUB_OUTPUT"
+          echo "has_linux=$HAS_LINUX" >> "$GITHUB_OUTPUT"
+          echo "has_darwin=$HAS_DARWIN" >> "$GITHUB_OUTPUT"
+          echo "has_windows=$HAS_WINDOWS" >> "$GITHUB_OUTPUT"
+
+          echo "Tag: $TAG → scope=$SCOPE clean_tag=$CLEAN_TAG clean_version=$CLEAN_VERSION"
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
       - uses: actions/setup-node@v4
+        if: steps.parse.outputs.has_server == 'true'
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: cd web && npm ci
-      - run: make build-web
+      - if: steps.parse.outputs.has_server == 'true'
+        run: cd web && npm ci
+      - if: steps.parse.outputs.has_server == 'true'
+        run: make build-web
 
       # --- code signing setup ---
-      - name: Install signing tools
+      - name: Install rcodesign
+        if: steps.parse.outputs.has_darwin == 'true'
         run: |
           RCODESIGN_VERSION="0.27.0"
           curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
             | tar xz -C /tmp
           sudo mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/
+
+      - name: Install codesigner
+        if: steps.parse.outputs.has_windows == 'true'
+        run: |
           curl -fsSL -o /tmp/codesigner https://cdn.s24.dev/apps/codesigner/CodeSigner-linux-x64
           chmod +x /tmp/codesigner
 
       - name: Set up Apple signing credentials
+        if: steps.parse.outputs.has_darwin == 'true'
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -55,33 +121,51 @@ jobs:
           rm /tmp/api-key-raw.json /tmp/apple-api-key.p8
 
       - uses: docker/setup-buildx-action@v3
+        if: steps.parse.outputs.has_server == 'true'
       - uses: docker/login-action@v3
+        if: steps.parse.outputs.has_server == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Set up APK signing key
+        if: steps.parse.outputs.has_cli == 'true' && steps.parse.outputs.has_linux == 'true'
         env:
           APK_SIGNING_KEY_B64: ${{ secrets.APK_SIGNING_KEY }}
         run: |
           echo "$APK_SIGNING_KEY_B64" | base64 -d > /tmp/apk-signing.rsa
           chmod 600 /tmp/apk-signing.rsa
 
+      - name: Install yq
+        run: |
+          YQ_VERSION="v4.44.6"
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+
+      - name: Generate filtered goreleaser config
+        env:
+          SCOPE: ${{ steps.parse.outputs.scope }}
+        run: ./scripts/filter-goreleaser.sh "$SCOPE" /tmp/goreleaser.yaml
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean --skip=publish,docker
+          args: release --clean --skip=publish,docker --config /tmp/goreleaser.yaml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APK_SIGNING_KEY: /tmp/apk-signing.rsa
+          SP2P_VERSION: ${{ steps.parse.outputs.clean_version }}
 
       - name: Sign macOS binaries
+        if: steps.parse.outputs.has_darwin == 'true'
         env:
           APPLE_CERTIFICATE_P12_PATH: /tmp/apple-cert.p12
           APPLE_CERTIFICATE_PASSWORD_PATH: /tmp/apple-cert-password
         run: ./scripts/sign-macos.sh
 
       - name: Sign Windows binaries
+        if: steps.parse.outputs.has_windows == 'true'
         env:
           CODESIGNER_PATH: /tmp/codesigner
           CODESIGNER_AUTH: ${{ secrets.CODESIGNER_AUTH }}
@@ -90,8 +174,9 @@ jobs:
         run: ./scripts/sign-windows.sh
 
       - name: Build Docker image
+        if: steps.parse.outputs.has_server == 'true'
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ steps.parse.outputs.clean_version }}"
           mkdir -p docker-stage/linux/amd64 docker-stage/linux/arm64
           cp dist/sp2p-server_linux_amd64_v1/sp2p-server docker-stage/linux/amd64/
           cp dist/sp2p-server_linux_arm64_v8.0/sp2p-server docker-stage/linux/arm64/
@@ -103,13 +188,15 @@ jobs:
             docker-stage
 
       - name: Notarize macOS binaries
+        if: steps.parse.outputs.has_darwin == 'true'
         env:
           APP_STORE_CONNECT_API_KEY_PATH: /tmp/app-store-connect-key.json
         run: ./scripts/notarize-macos.sh
 
       - name: Push Docker image
+        if: steps.parse.outputs.has_server == 'true'
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${{ steps.parse.outputs.clean_version }}"
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
@@ -118,16 +205,39 @@ jobs:
             -f Dockerfile.goreleaser \
             docker-stage
 
+      - name: Determine release title
+        id: title
+        run: |
+          SCOPE="${{ steps.parse.outputs.scope }}"
+          CLEAN_TAG="${{ steps.parse.outputs.clean_tag }}"
+          case "$SCOPE" in
+            all)          TITLE="$CLEAN_TAG" ;;
+            server)       TITLE="$CLEAN_TAG (Server Only)" ;;
+            cli)          TITLE="$CLEAN_TAG (CLI Only)" ;;
+            cli-nix)      TITLE="$CLEAN_TAG (CLI: Linux + macOS)" ;;
+            cli-linux)    TITLE="$CLEAN_TAG (CLI: Linux)" ;;
+            cli-mac)      TITLE="$CLEAN_TAG (CLI: macOS)" ;;
+            cli-windows)  TITLE="$CLEAN_TAG (CLI: Windows)" ;;
+          esac
+          echo "title=$TITLE" >> "$GITHUB_OUTPUT"
+
       - name: Publish release
         run: |
+          ASSETS=$(find dist/ -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' -o -name 'checksums.txt' \) -type f)
+          if [ -z "$ASSETS" ]; then
+            echo "No release assets found"
+            exit 1
+          fi
+          # shellcheck disable=SC2086
           gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
+            --title "${{ steps.title.outputs.title }}" \
             --generate-notes \
-            dist/*.tar.gz dist/*.zip dist/*.deb dist/*.rpm dist/*.apk dist/checksums.txt
+            $ASSETS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Deploy to server
+        if: steps.parse.outputs.has_server == 'true'
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
@@ -140,4 +250,10 @@ jobs:
     uses: ./.github/workflows/publish-packages.yml
     with:
       tag: ${{ github.ref_name }}
+      version: ${{ needs.release.outputs.clean_version }}
+      publish_homebrew: ${{ needs.release.outputs.has_darwin == 'true' && needs.release.outputs.has_linux == 'true' && needs.release.outputs.has_cli == 'true' }}
+      publish_scoop: ${{ needs.release.outputs.has_windows == 'true' && needs.release.outputs.has_cli == 'true' }}
+      publish_aur: ${{ needs.release.outputs.has_linux == 'true' && needs.release.outputs.has_cli == 'true' }}
+      publish_chocolatey: ${{ needs.release.outputs.has_windows == 'true' && needs.release.outputs.has_cli == 'true' }}
+      publish_winget: ${{ needs.release.outputs.scope == 'all' }}
     secrets: inherit

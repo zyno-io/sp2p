@@ -6,6 +6,29 @@ on:
       tag:
         required: true
         type: string
+      version:
+        required: true
+        type: string
+      publish_homebrew:
+        required: false
+        type: boolean
+        default: true
+      publish_scoop:
+        required: false
+        type: boolean
+        default: true
+      publish_aur:
+        required: false
+        type: boolean
+        default: true
+      publish_chocolatey:
+        required: false
+        type: boolean
+        default: true
+      publish_winget:
+        required: false
+        type: boolean
+        default: true
 
 # Required secrets (stored in the "release" environment):
 #
@@ -32,16 +55,17 @@ env:
 
 jobs:
   homebrew:
+    if: inputs.publish_homebrew
     runs-on: ubuntu-latest
     environment: release
     steps:
       - name: Update Homebrew tap
         env:
           TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${TAG#v}"
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
           gh release download "$TAG" -R "$REPO" -p checksums.txt
@@ -98,16 +122,17 @@ jobs:
           git push
 
   scoop:
+    if: inputs.publish_scoop
     runs-on: ubuntu-latest
     environment: release
     steps:
       - name: Update Scoop bucket
         env:
           TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
           BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${TAG#v}"
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
           gh release download "$TAG" -R "$REPO" -p checksums.txt
@@ -160,6 +185,7 @@ jobs:
           git push
 
   aur:
+    if: inputs.publish_aur
     runs-on: ubuntu-latest
     environment: release
     container: archlinux:base
@@ -170,10 +196,10 @@ jobs:
       - name: Publish to AUR
         env:
           TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="${TAG#v}"
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
           gh release download "$TAG" -R "$REPO" -p checksums.txt
@@ -231,17 +257,19 @@ jobs:
           git push
 
   chocolatey:
+    if: inputs.publish_chocolatey
     runs-on: windows-latest
     environment: release
     steps:
       - name: Create and push Chocolatey package
         env:
           TAG: ${{ inputs.tag }}
+          VERSION: ${{ inputs.version }}
           CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
         run: |
-          $version = "$env:TAG" -replace '^v',''
+          $version = "$env:VERSION"
           $base = "https://github.com/$env:REPO/releases/download/$env:TAG"
 
           gh release download "$env:TAG" -R "$env:REPO" -p checksums.txt
@@ -289,6 +317,7 @@ jobs:
           choco push "sp2p.$version.nupkg" --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
 
   winget:
+    if: inputs.publish_winget
     runs-on: ubuntu-latest
     environment: release
     steps:
