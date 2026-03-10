@@ -62,6 +62,13 @@ Default: value of
 .B SP2P_URL
 or the server URL.
 .TP
+.BI \-transport " mode"
+Transport to use for the P2P connection.
+Values:
+.BR auto ", " tcp ", " webrtc .
+Default:
+.BR auto .
+.TP
 .B \-v
 Verbose diagnostic output.
 .SH RECEIVE FLAGS
@@ -83,6 +90,13 @@ Default: value of
 .B SP2P_SERVER
 or
 .IR http://localhost:8080 .
+.TP
+.BI \-transport " mode"
+Transport to use for the P2P connection.
+Values:
+.BR auto ", " tcp ", " webrtc .
+Default:
+.BR auto .
 .TP
 .B \-v
 Verbose diagnostic output.
@@ -122,6 +136,9 @@ compress: 3
 
 # Allow TURN relay without prompting
 allow-relay: false
+
+# Transport mode (auto, tcp, webrtc)
+transport: auto
 
 # Default output directory for received files
 output: ~/Downloads

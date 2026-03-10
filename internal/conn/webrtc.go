@@ -17,16 +17,18 @@ import (
 
 const (
 	dataChannelLabel  = "sp2p"
-	dataChannelBuffer = 16 * 1024 * 1024 // 16 MB buffered amount
+	dataChannelBuffer = 64 * 1024 * 1024  // 64 MB buffered amount
+	sctpMaxMsgSize    = 256 * 1024        // 256 KiB SCTP message size — browser DataChannels typically cap at 256 KiB
 )
 
 // WebRTCConfig holds configuration for WebRTC connections.
 type WebRTCConfig struct {
-	STUNServers []string
-	TURNServers []TURNServer
-	IsSender    bool
-	OnStatus    StatusCallback
-	OnLog       func(string)
+	STUNServers    []string
+	TURNServers    []TURNServer
+	IsSender       bool
+	PeerClientType string // "cli", "browser", or "" — used to disable features incompatible with browsers
+	OnStatus       StatusCallback
+	OnLog          func(string)
 }
 
 // TURNServer describes a TURN relay server with credentials.
@@ -83,7 +85,22 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 		})
 	}
 
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
+	// Tune the SCTP transport for high-throughput bulk transfers.
+	se := webrtc.SettingEngine{}
+	se.SetSCTPMaxMessageSize(sctpMaxMsgSize)
+	// Increase the receive buffer from the 1 MB default so the receiver
+	// can advertise a larger window, preventing the sender's congestion
+	// window from being capped by the receiver's RWND.
+	se.SetSCTPMaxReceiveBufferSize(8 * 1024 * 1024) // 8 MB
+	// Skip SCTP checksums — DTLS already provides integrity, so the
+	// per-packet CRC32c is redundant overhead. Only enable for CLI↔CLI
+	// connections; browsers may not support RFC 8261 zero-checksum.
+	if cfg.PeerClientType != "browser" {
+		se.EnableSCTPZeroChecksum(true)
+	}
+	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+
+	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: iceServers,
 	})
 	if err != nil {
@@ -403,12 +420,18 @@ func (c *WebRTCConn) Read(p []byte) (int, error) {
 	}
 }
 
+// BufferedAmount returns the number of bytes queued in the DataChannel's
+// send buffer that have not yet been transmitted to the peer.
+func (c *WebRTCConn) BufferedAmount() uint64 {
+	return c.dc.BufferedAmount()
+}
+
 func (c *WebRTCConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
 	// WebRTC DataChannel has a max message size. Send in chunks.
-	const maxMsg = 64 * 1024 // 64 KiB
+	const maxMsg = sctpMaxMsgSize
 	total := 0
 	for len(p) > 0 {
 		chunk := p

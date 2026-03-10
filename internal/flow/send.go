@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/zyno-io/sp2p/internal/conn"
@@ -27,6 +28,7 @@ type SendConfig struct {
 	RelayOK       bool               // Allow TURN relay without prompting
 	ClientVersion string             // Client version for update check
 	CompressLevel int                // zstd compression level (0=disabled, 1-9)
+	Transport     string             // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
 }
 
 // Send runs the complete send orchestration.
@@ -138,7 +140,11 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 				h.OnVerbose(fmt.Sprintf("peer joined (clientType=%s)", peerClientType))
 				h.OnPhaseChanged(PhasePeerJoined)
 				h.OnPhaseChanged(PhaseKeyExchange)
-				if err := sigClient.Send(ctx, signal.TypeCrypto, signal.CryptoExchange{PublicKey: kp.Public}); err != nil {
+				ce := signal.CryptoExchange{PublicKey: kp.Public}
+				if cfg.Transport == conn.TransportAuto && meta.Size >= tcpPreferThreshold {
+					ce.PreferTCP = true
+				}
+				if err := sigClient.Send(ctx, signal.TypeCrypto, ce); err != nil {
 					return fmt.Errorf("sending public key: %w", err)
 				}
 			case signal.TypeCrypto:
@@ -175,7 +181,16 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	h.OnPhaseChanged(PhaseP2PConnecting)
 	stunServers, _ := iceServersToConn(iceServers)
 	h.OnVerbose(fmt.Sprintf("starting P2P connection with %d STUN servers", len(stunServers)))
-	onStatus := func(s conn.MethodStatus) { h.OnConnectionStatus(s) }
+	var connMethodMu sync.Mutex
+	var connMethod string
+	onStatus := func(s conn.MethodStatus) {
+		if s.State == "connected" {
+			connMethodMu.Lock()
+			connMethod = s.Method
+			connMethodMu.Unlock()
+		}
+		h.OnConnectionStatus(s)
+	}
 	onLog := func(msg string) { h.OnVerbose(msg) }
 
 	// Pre-subscribe to relay-retry, relay-denied, and peer-left before
@@ -209,9 +224,14 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 		IsSender:       true,
 		STUNServers:    stunServers,
 		PeerClientType: peerClientType,
+		Transport:      cfg.Transport,
 		OnStatus:       onStatus,
 		OnLog:          onLog,
 		DevMode:        cfg.ClientVersion == "dev",
+	}
+	if cfg.Transport == conn.TransportAuto && meta.Size >= tcpPreferThreshold {
+		connCfg.TCPPreferWait = tcpPreferWait
+		h.OnVerbose(fmt.Sprintf("large transfer (%d bytes) — TCP preferred, will wait %v for TCP if WebRTC connects first", meta.Size, tcpPreferWait))
 	}
 	p2pConn, err := conn.Establish(attemptCtx, connCfg)
 	attemptCancel()
@@ -224,7 +244,10 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 		return fmt.Errorf("peer disconnected")
 	default:
 	}
-	if err != nil && turnAvailable {
+	if err != nil && turnAvailable && cfg.Transport != conn.TransportTCP {
+		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.
+		connCfg.Transport = conn.TransportWebRTC
+		connCfg.TCPPreferWait = 0
 		p2pConn, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
 	}
 	if err != nil {
@@ -232,6 +255,15 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	}
 	defer p2pConn.Close()
 	h.OnPhaseChanged(PhaseP2PConnected)
+
+	// If a large file ended up on WebRTC despite the TCP preference window,
+	// suggest the user force TCP next time.
+	connMethodMu.Lock()
+	method := connMethod
+	connMethodMu.Unlock()
+	if cfg.Transport == conn.TransportAuto && method == "WebRTC" && meta.Size >= tcpPreferThreshold {
+		h.OnVerbose("tip: for faster throughput, use -transport tcp (WebRTC is limited by SCTP congestion control)")
+	}
 
 	// Key confirmation.
 	h.OnVerbose("performing key confirmation over P2P channel")

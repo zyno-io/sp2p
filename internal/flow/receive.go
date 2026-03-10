@@ -27,6 +27,7 @@ type ReceiveConfig struct {
 	Writer        io.Writer // Alternative: write to this instead of OutputDir (e.g., stdout)
 	RelayOK       bool      // Allow TURN relay without prompting
 	ClientVersion string    // Client version for update check
+	Transport     string    // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
 }
 
 // ReceiveResult holds the outcome of a receive flow.
@@ -88,6 +89,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 
 	// Wait for sender's public key and Welcome.
 	var senderPub []byte
+	var senderPreferTCP bool
 	var iceServers []signal.ICEServer
 	var turnAvailable bool
 	var peerClientType string
@@ -115,6 +117,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 					return nil, fmt.Errorf("parsing crypto: %w", err)
 				}
 				senderPub = ce.PublicKey
+				senderPreferTCP = ce.PreferTCP
 			case signal.TypePeerLeft:
 				h.OnError("Sender disconnected")
 				return nil, fmt.Errorf("peer disconnected")
@@ -186,9 +189,14 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		IsSender:       false,
 		STUNServers:    stunServers,
 		PeerClientType: peerClientType,
+		Transport:      cfg.Transport,
 		OnStatus:       onStatus,
 		OnLog:          onLog,
 		DevMode:        cfg.ClientVersion == "dev",
+	}
+	if senderPreferTCP && cfg.Transport == conn.TransportAuto {
+		connCfg.TCPPreferWait = tcpPreferWait
+		h.OnVerbose(fmt.Sprintf("sender indicated large transfer — TCP preferred, will wait %v for TCP if WebRTC connects first", tcpPreferWait))
 	}
 	p2pConn, err := conn.Establish(attemptCtx, connCfg)
 	attemptCancel()
@@ -201,7 +209,10 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		return nil, fmt.Errorf("peer disconnected")
 	default:
 	}
-	if err != nil && turnAvailable {
+	if err != nil && turnAvailable && cfg.Transport != conn.TransportTCP {
+		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.
+		connCfg.Transport = conn.TransportWebRTC
+		connCfg.TCPPreferWait = 0
 		p2pConn, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
 	}
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/zyno-io/sp2p/internal/cli"
 	"github.com/zyno-io/sp2p/internal/config"
+	"github.com/zyno-io/sp2p/internal/conn"
 )
 
 var version = "dev"
@@ -99,6 +100,11 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 	base := fs.String("url", baseURL, "public base URL for sharing links (env: SP2P_URL)")
 	name := fs.String("name", "", "filename for stdin streams")
 	compress := fs.Int("compress", compressDefault, "zstd compression level (0=disabled, 1-9)")
+	transportDefault := cfg.Transport
+	if transportDefault == "" {
+		transportDefault = "auto"
+	}
+	transport := fs.String("transport", transportDefault, "connection method: auto, tcp, webrtc")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
 	fs.Usage = func() {
@@ -116,6 +122,11 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 		return fmt.Errorf("compress must be 0-9, got %d", *compress)
 	}
 
+	transportMode, err := parseTransport(*transport)
+	if err != nil {
+		return err
+	}
+
 	// If no explicit base URL, derive from the server URL.
 	shareBase := *base
 	if shareBase == "" {
@@ -128,6 +139,7 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 		Paths:         fs.Args(),
 		Name:          *name,
 		CompressLevel: *compress,
+		Transport:     transportMode,
 		RelayOK:       *allowRelay,
 		Verbose:       *verbose,
 		ClientVersion: version,
@@ -144,6 +156,11 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 	server := fs.String("server", serverURL, "signaling server URL (env: SP2P_SERVER)")
 	outputDir := fs.String("output", outputDefault, "output directory")
 	stdout := fs.Bool("stdout", false, "write to stdout instead of file")
+	transportDefault := cfg.Transport
+	if transportDefault == "" {
+		transportDefault = "auto"
+	}
+	transport := fs.String("transport", transportDefault, "connection method: auto, tcp, webrtc")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
 	fs.Usage = func() {
@@ -157,11 +174,17 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 		os.Exit(1)
 	}
 
+	transportMode, err := parseTransport(*transport)
+	if err != nil {
+		return err
+	}
+
 	return cli.Receive(ctx, cli.ReceiveConfig{
 		ServerURL:     deriveWSURL(*server),
 		Code:          fs.Arg(0),
 		OutputDir:     *outputDir,
 		Stdout:        *stdout,
+		Transport:     transportMode,
 		RelayOK:       *allowRelay,
 		Verbose:       *verbose,
 		ClientVersion: version,
@@ -205,6 +228,21 @@ func deriveBaseURL(serverURL string) string {
 	base := strings.Replace(serverURL, "wss://", "https://", 1)
 	base = strings.Replace(base, "ws://", "http://", 1)
 	return strings.TrimSuffix(base, "/ws")
+}
+
+// parseTransport validates and normalizes the -transport flag value,
+// returning the corresponding conn.Transport* constant.
+func parseTransport(s string) (string, error) {
+	switch strings.ToLower(s) {
+	case "", "auto":
+		return conn.TransportAuto, nil
+	case "tcp":
+		return conn.TransportTCP, nil
+	case "webrtc":
+		return conn.TransportWebRTC, nil
+	default:
+		return "", fmt.Errorf("transport must be auto, tcp, or webrtc, got %q", s)
+	}
 }
 
 func envOr(key, fallback string) string {

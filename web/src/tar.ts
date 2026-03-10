@@ -79,7 +79,7 @@ export function createTar(files: File[]): { totalSize: number; stream: () => Asy
       // Emit file data in chunks.
       let fileOffset = 0;
       while (fileOffset < file.size) {
-        const end = Math.min(fileOffset + 64 * 1024, file.size);
+        const end = Math.min(fileOffset + 256 * 1024, file.size);
         const blob = file.slice(fileOffset, end);
         const data = new Uint8Array(await blob.arrayBuffer());
         yield { chunk: data, offset };

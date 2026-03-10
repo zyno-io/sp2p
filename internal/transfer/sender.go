@@ -10,9 +10,12 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"golang.org/x/sync/errgroup"
 )
 
 // Sender sends files over a FrameReadWriter (encrypted or plaintext).
@@ -21,6 +24,7 @@ type Sender struct {
 	meta        *Metadata
 	idleTimeout time.Duration
 	deadliner   DeadlineSetter
+	buffered    BufferedAmounter
 	totalBytes  uint64
 	chunkCount  uint64
 	hash        hash.Hash
@@ -34,9 +38,14 @@ func NewSender(frw FrameReadWriter, meta *Metadata) *Sender {
 
 // SetIdleTimeout configures a per-operation idle timeout.
 // The deadline is reset before each read/write operation.
+// If conn also implements BufferedAmounter, sender progress will be
+// adjusted to reflect actual transmission rather than local buffering.
 func (s *Sender) SetIdleTimeout(d DeadlineSetter, timeout time.Duration) {
 	s.deadliner = d
 	s.idleTimeout = timeout
+	if ba, ok := d.(BufferedAmounter); ok {
+		s.buffered = ba
+	}
 }
 
 func (s *Sender) resetDeadline() {
@@ -84,8 +93,64 @@ func (s *Sender) SetCompression(level int) error {
 func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSent uint64)) error {
 	defer s.clearDeadline()
 
-	// Watch for context cancellation and force-expire the connection deadline
-	// so that any blocked I/O returns immediately.
+	// Set compression in metadata if enabled.
+	if s.compressor != nil {
+		s.meta.Compression = "zstd"
+	}
+
+	// Send data in chunks using a pipeline: the producer goroutine reads,
+	// hashes, and compresses while the consumer writes to the network.
+	type preparedChunk struct {
+		data     []byte // compressed (or raw) chunk ready to encrypt+send
+		rawBytes uint64 // uncompressed byte count for progress tracking
+		poolBuf  []byte // original read buffer to return to pool (may differ from data if compressed)
+	}
+
+	const pipelineDepth = 8
+	chunkCh := make(chan preparedChunk, pipelineDepth)
+
+	// Pool of read buffers to avoid per-chunk allocations and GC pressure.
+	// Safety: when compression is disabled, the buffer is kept alive via
+	// preparedChunk.poolBuf and returned to the pool only after the
+	// downstream consumer (encrypt worker or writer) has finished with it.
+	// When compression is enabled, EncodeAll copies the data, so the buffer
+	// is returned immediately.
+	bufPool := sync.Pool{New: func() any { return make([]byte, MaxChunkSize) }}
+
+	eg, egCtx := errgroup.WithContext(ctx)
+
+	// closeReader closes r (if it implements io.Closer) exactly once,
+	// unblocking a producer stuck in r.Read() on a blocking source
+	// (pipe, stdin). Safe for concurrent calls.
+	var closeOnce sync.Once
+	closeReader := func() {
+		closeOnce.Do(func() {
+			if rc, ok := r.(io.Closer); ok {
+				rc.Close()
+			}
+		})
+	}
+
+	// writeErrMu guards writeErr, which is set by the consumer and
+	// read by the producer and the post-Wait error path.
+	var writeErrMu sync.Mutex
+	var writeErr error
+	setWriteErr := func(err error) {
+		writeErrMu.Lock()
+		writeErr = err
+		writeErrMu.Unlock()
+	}
+	getWriteErr := func() error {
+		writeErrMu.Lock()
+		defer writeErrMu.Unlock()
+		return writeErr
+	}
+
+	// Watch for context cancellation and force-expire the connection
+	// deadline so that any blocked I/O returns immediately. Also close
+	// the reader to unblock a producer stuck in r.Read(). This must
+	// start before WriteMetadata so that a stalled metadata write is
+	// also unblocked by ctx cancellation.
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -94,14 +159,10 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 			if s.deadliner != nil {
 				s.deadliner.SetDeadline(time.Now())
 			}
+			closeReader()
 		case <-done:
 		}
 	}()
-
-	// Set compression in metadata if enabled.
-	if s.compressor != nil {
-		s.meta.Compression = "zstd"
-	}
 
 	// Send metadata.
 	s.resetDeadline()
@@ -109,34 +170,242 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 		return s.wrapCtxErr(ctx, fmt.Errorf("sending metadata: %w", err))
 	}
 
-	// Send data in chunks.
-	buf := make([]byte, MaxChunkSize)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			chunk := buf[:n]
-			// Hash and count uncompressed bytes.
-			s.hash.Write(chunk)
-			s.totalBytes += uint64(n)
-			s.chunkCount++
-			// Compress if enabled.
-			if s.compressor != nil {
-				chunk = s.compressor.EncodeAll(chunk, nil)
+	// Stage 1 — Reader: read → hash → compress.
+	eg.Go(func() error {
+		defer close(chunkCh)
+		for {
+			buf := bufPool.Get().([]byte)
+			n, err := r.Read(buf)
+			if n > 0 {
+				chunk := buf[:n]
+				s.hash.Write(chunk)
+				s.totalBytes += uint64(n)
+				s.chunkCount++
+				prepared := preparedChunk{rawBytes: uint64(n), poolBuf: buf}
+				if s.compressor != nil {
+					prepared.data = s.compressor.EncodeAll(chunk, nil)
+					bufPool.Put(buf) // return read buffer; compressed data is separate
+					prepared.poolBuf = nil
+				} else {
+					prepared.data = chunk
+				}
+				select {
+				case chunkCh <- prepared:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+			} else {
+				bufPool.Put(buf)
 			}
-			s.resetDeadline()
-			if writeErr := WriteData(s.frw, chunk); writeErr != nil {
-				return s.wrapCtxErr(ctx, fmt.Errorf("sending data chunk: %w", writeErr))
+			if err == io.EOF {
+				return nil
 			}
-			if onProgress != nil {
-				onProgress(s.totalBytes)
+			if err != nil {
+				// If a downstream stage already failed with a write error,
+				// return it instead of the read-side error (which was
+				// caused by closing r to unblock this goroutine).
+				if wErr := getWriteErr(); wErr != nil {
+					return wErr
+				}
+				return fmt.Errorf("reading input: %w", err)
 			}
 		}
-		if err == io.EOF {
-			break
+	})
+
+	// adjustProgress converts total raw bytes and wire bytes into an
+	// adjusted progress value that subtracts data still buffered locally
+	// (e.g. in the WebRTC DataChannel). This makes the sender's reported
+	// progress match what the receiver has actually received.
+	adjustProgress := func(rawTotal, wireTotal uint64) uint64 {
+		if s.buffered == nil || wireTotal == 0 {
+			return rawTotal
 		}
-		if err != nil {
-			return s.wrapCtxErr(ctx, fmt.Errorf("reading input: %w", err))
+		buffered := s.buffered.BufferedAmount()
+		if buffered >= wireTotal {
+			return 0
 		}
+		// Convert buffered wire bytes to equivalent raw bytes using
+		// the cumulative raw/wire ratio (accounts for compression).
+		bufferedRaw := buffered * rawTotal / wireTotal
+		if bufferedRaw >= rawTotal {
+			return 0
+		}
+		return rawTotal - bufferedRaw
+	}
+
+	// When the FrameReadWriter supports parallel frame preparation,
+	// fan out compression + encryption to N worker goroutines. Frames
+	// are reassembled in order using per-chunk "future" channels.
+	//
+	// Pipeline:
+	//   Reader (1):   read → hash → compress → reserve nonce → dispatch
+	//   Workers (N):  encrypt (parallel, out of order)
+	//   Writer (1):   consume futures in order → write to network
+	//
+	// Falls back to a single-threaded encrypt stage (FramePreparer)
+	// or a 2-stage pipeline (plain FrameReadWriter).
+	var progressBytes uint64
+	var wireBytes uint64
+
+	type wireFrame struct {
+		data     []byte // encrypted, wire-ready frame
+		rawBytes uint64 // uncompressed byte count for progress
+	}
+
+	if pp, ok := s.frw.(ParallelFramePreparer); ok {
+		type workItem struct {
+			chunk    preparedChunk
+			seq      uint64
+			resultCh chan<- wireFrame
+		}
+
+		numWorkers := runtime.GOMAXPROCS(0)
+		if numWorkers < 2 {
+			numWorkers = 2
+		}
+		workCh := make(chan workItem, numWorkers)
+		futureCh := make(chan (<-chan wireFrame), pipelineDepth)
+
+		// Dispatcher: reserve nonces in order, fan out to workers,
+		// send result futures to writer in order.
+		eg.Go(func() error {
+			defer close(futureCh)
+			defer close(workCh)
+			for chunk := range chunkCh {
+				seq, err := pp.ReserveWriteSeq()
+				if err != nil {
+					return err
+				}
+				ch := make(chan wireFrame, 1)
+				// Send future to writer first (maintains order).
+				select {
+				case futureCh <- ch:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+				// Send work to a worker.
+				select {
+				case workCh <- workItem{chunk: chunk, seq: seq, resultCh: ch}:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+			}
+			return nil
+		})
+
+		// Workers: encrypt in parallel. Compression (if any) was already
+		// done by the reader stage, so data is ready to encrypt.
+		for i := 0; i < numWorkers; i++ {
+			eg.Go(func() error {
+				for work := range workCh {
+					frame, err := pp.PrepareFrameAt(MsgData, work.chunk.data, work.seq)
+					// Return read buffer after encryption has copied the data.
+					if work.chunk.poolBuf != nil {
+						bufPool.Put(work.chunk.poolBuf)
+					}
+					if err != nil {
+						setWriteErr(fmt.Errorf("encrypting data chunk: %w", err))
+						closeReader()
+						return getWriteErr()
+					}
+					work.resultCh <- wireFrame{data: frame, rawBytes: work.chunk.rawBytes}
+				}
+				return nil
+			})
+		}
+
+		// Writer: consume futures in nonce order → write to network.
+		eg.Go(func() error {
+			for future := range futureCh {
+				var frame wireFrame
+				select {
+				case frame = <-future:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+				s.resetDeadline()
+				if err := pp.WriteRawFrame(frame.data); err != nil {
+					setWriteErr(fmt.Errorf("sending data chunk: %w", err))
+					closeReader()
+					return getWriteErr()
+				}
+				progressBytes += frame.rawBytes
+				wireBytes += uint64(len(frame.data))
+				if onProgress != nil {
+					onProgress(adjustProgress(progressBytes, wireBytes))
+				}
+			}
+			return nil
+		})
+	} else if preparer, ok := s.frw.(FramePreparer); ok {
+		// 3-stage fallback: single encrypt goroutine.
+		frameCh := make(chan wireFrame, pipelineDepth)
+
+		eg.Go(func() error {
+			defer close(frameCh)
+			for chunk := range chunkCh {
+				frame, err := preparer.PrepareFrame(MsgData, chunk.data)
+				if chunk.poolBuf != nil {
+					bufPool.Put(chunk.poolBuf)
+				}
+				if err != nil {
+					setWriteErr(fmt.Errorf("encrypting data chunk: %w", err))
+					closeReader()
+					return getWriteErr()
+				}
+				select {
+				case frameCh <- wireFrame{data: frame, rawBytes: chunk.rawBytes}:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+			}
+			return nil
+		})
+
+		eg.Go(func() error {
+			for frame := range frameCh {
+				s.resetDeadline()
+				if err := preparer.WriteRawFrame(frame.data); err != nil {
+					setWriteErr(fmt.Errorf("sending data chunk: %w", err))
+					closeReader()
+					return getWriteErr()
+				}
+				progressBytes += frame.rawBytes
+				wireBytes += uint64(len(frame.data))
+				if onProgress != nil {
+					onProgress(adjustProgress(progressBytes, wireBytes))
+				}
+			}
+			return nil
+		})
+	} else {
+		// 2-stage fallback: consumer does encrypt + write via WriteFrame.
+		eg.Go(func() error {
+			for chunk := range chunkCh {
+				s.resetDeadline()
+				if err := WriteData(s.frw, chunk.data); err != nil {
+					setWriteErr(fmt.Errorf("sending data chunk: %w", err))
+					closeReader()
+					return getWriteErr()
+				}
+				if chunk.poolBuf != nil {
+					bufPool.Put(chunk.poolBuf)
+				}
+				progressBytes += chunk.rawBytes
+				if onProgress != nil {
+					onProgress(adjustProgress(progressBytes, progressBytes))
+				}
+			}
+			return nil
+		})
+	}
+
+	if err := eg.Wait(); err != nil {
+		// Prefer the write error over a read-side error from closing r.
+		if wErr := getWriteErr(); wErr != nil {
+			return s.wrapCtxErr(ctx, wErr)
+		}
+		return s.wrapCtxErr(ctx, err)
 	}
 
 	// Send done with integrity checksum.

@@ -11,6 +11,8 @@ stats.json
 # Web
 web/node_modules/
 web/dist/
+web/.pw-state.json
+web/test-results/
 
 # OS
 .DS_Store

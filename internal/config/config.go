@@ -19,6 +19,7 @@ type Config struct {
 	Server     string `yaml:"server"`
 	URL        string `yaml:"url"`
 	Compress   *int   `yaml:"compress"`
+	Transport  string `yaml:"transport"`
 	AllowRelay bool   `yaml:"allow-relay"`
 	Output     string `yaml:"output"`
 	Verbose    bool   `yaml:"verbose"`
@@ -49,6 +50,14 @@ func Load() (Config, error) {
 	// Validate compress range.
 	if cfg.Compress != nil && (*cfg.Compress < 0 || *cfg.Compress > 9) {
 		return Config{}, fmt.Errorf("parsing %s: compress must be 0-9, got %d", path, *cfg.Compress)
+	}
+
+	// Validate transport if specified.
+	switch cfg.Transport {
+	case "", "auto", "tcp", "webrtc":
+		// valid
+	default:
+		return Config{}, fmt.Errorf("parsing %s: transport must be auto, tcp, or webrtc, got %q", path, cfg.Transport)
 	}
 
 	// Expand ~ in output path.

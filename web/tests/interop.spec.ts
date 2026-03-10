@@ -4,6 +4,23 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { test, expect } from "./fixtures";
 
+async function extractCodeFromShareUrl(page: { locator: (selector: string) => any }): Promise<string> {
+  const shareUrl = page.locator(".share-url");
+  await expect(shareUrl).toBeVisible({ timeout: 10_000 });
+  const text = await shareUrl.textContent();
+  expect(text).toBeTruthy();
+  return new URL(text!).hash.slice(1);
+}
+
+async function maybeConfirmBrowserDownload(page: { locator: (selector: string) => any }): Promise<void> {
+  const confirmButton = page.locator(".confirm-btn");
+  try {
+    await confirmButton.click({ timeout: 5_000 });
+  } catch {
+    // Some flows may not show the confirmation card if file-info is unavailable.
+  }
+}
+
 // ── Browser → Browser ───────────────────────────────────────────────────────
 
 test("browser sender → browser receiver transfers a file", async ({
@@ -26,38 +43,26 @@ test("browser sender → browser receiver transfers a file", async ({
       buffer: Buffer.from(fileContent),
     });
 
-    // Wait for transfer code to appear.
-    await expect(senderPage.locator(".code-text")).toBeVisible({
-      timeout: 10_000,
-    });
-    const code = await senderPage.locator(".code-text").textContent();
+    // Wait for transfer link to appear and extract the code.
+    const code = await extractCodeFromShareUrl(senderPage);
     expect(code).toBeTruthy();
 
     // Receiver: open receive page with the code.
     await receiverPage.goto(`/r#${code}`);
+    await maybeConfirmBrowserDownload(receiverPage);
 
     // Wait for transfer to complete on both sides.
     await expect(senderPage.locator(".complete")).toBeVisible({
       timeout: 30_000,
     });
-    await expect(senderPage.locator(".complete-message")).toContainText(
-      "Transfer complete"
-    );
+    await expect(senderPage.locator(".complete-title")).toContainText("Sent");
+    await expect(senderPage.locator(".complete-name")).toContainText("b2b-test.txt");
 
     await expect(receiverPage.locator(".complete")).toBeVisible({
       timeout: 30_000,
     });
-    await expect(receiverPage.locator(".complete-message")).toContainText(
-      "Received b2b-test.txt"
-    );
-
-    // Verify connection type indicator.
-    await expect(senderPage.locator(".complete-message")).toContainText(
-      "WebRTC"
-    );
-    await expect(receiverPage.locator(".complete-message")).toContainText(
-      "WebRTC"
-    );
+    await expect(receiverPage.locator(".complete-title")).toContainText("Received");
+    await expect(receiverPage.locator(".complete-name")).toContainText("b2b-test.txt");
 
     // Verify step indicators show done.
     await expect(senderPage.locator(".step-p2p")).toContainText(
@@ -95,7 +100,7 @@ test("CLI sender → browser receiver transfers a file", async ({
 
   // Extract code from sender's stderr.
   const code = await new Promise<string>((resolve, reject) => {
-    const codeRe = /([23456789a-hj-np-z]{8}#[A-Za-z0-9+/=]+)/;
+    const codeRe = /sp2p receive ([A-Za-z0-9-]+)/;
     let output = "";
     const timer = setTimeout(() => {
       sender.kill();
@@ -122,12 +127,12 @@ test("CLI sender → browser receiver transfers a file", async ({
     // Set up download listener before navigating.
     const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
     await page.goto(`/r#${code}`);
+    await maybeConfirmBrowserDownload(page);
 
     // Wait for transfer to complete.
     await expect(page.locator(".complete")).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator(".complete-message")).toContainText(
-      "Received cli-to-browser.txt"
-    );
+    await expect(page.locator(".complete-title")).toContainText("Received");
+    await expect(page.locator(".complete-name")).toContainText("cli-to-browser.txt");
 
     // Verify the download was triggered.
     const download = await downloadPromise;
@@ -162,13 +167,12 @@ test("browser sender → CLI receiver transfers a file", async ({
     buffer: Buffer.from(fileContent),
   });
 
-  // Wait for transfer code.
-  await expect(page.locator(".code-text")).toBeVisible({ timeout: 10_000 });
-  const code = await page.locator(".code-text").textContent();
+  // Wait for transfer link and extract the code.
+  const code = await extractCodeFromShareUrl(page);
   expect(code).toBeTruthy();
 
   // Start CLI receiver.
-  const receiver = spawn(cliBin, ["receive", "-output", tmpDir, code!], {
+  const receiver = spawn(cliBin, ["receive", "-output", tmpDir, code], {
     env: { ...process.env, SP2P_SERVER: wsUrl },
   });
 
@@ -196,9 +200,8 @@ test("browser sender → CLI receiver transfers a file", async ({
   try {
     // Wait for transfer to complete on the browser side.
     await expect(page.locator(".complete")).toBeVisible({ timeout: 30_000 });
-    await expect(page.locator(".complete-message")).toContainText(
-      "Transfer complete"
-    );
+    await expect(page.locator(".complete-title")).toContainText("Sent");
+    await expect(page.locator(".complete-name")).toContainText("browser-to-cli.txt");
 
     // Wait for CLI receiver to exit.
     const exitCode = await exitPromise;

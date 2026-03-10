@@ -98,9 +98,11 @@ func encryptFrameRaw(key []byte, msgType byte, seq uint64, plaintext []byte) []b
 		panic(err)
 	}
 
-	nonce := buildNonce(seq)
-	aad := buildAAD(msgType, seq)
-	ciphertext := aead.Seal(nil, nonce, plaintext, aad)
+	var nonce [NonceSize]byte
+	buildNonce(nonce[:], seq)
+	var aad [10]byte
+	buildAAD(aad[:], msgType, seq)
+	ciphertext := aead.Seal(nil, nonce[:], plaintext, aad[:])
 
 	framePayloadLen := 1 + 8 + len(ciphertext)
 	frame := make([]byte, 4+framePayloadLen)

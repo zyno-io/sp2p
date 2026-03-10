@@ -14,12 +14,12 @@ export const MSG_DONE = 0x04;
 export const MSG_COMPLETE = 0x05;
 export const MSG_ERROR = 0x06;
 
-export const MAX_CHUNK_SIZE = 64 * 1024;
-export const MAX_FRAME_SIZE = 256 * 1024; // Must match Go's MaxFrameSize
+export const MAX_CHUNK_SIZE = 256 * 1024;
+export const MAX_FRAME_SIZE = 512 * 1024; // Must match Go's MaxFrameSize
 // In-memory receive limit for browsers without File System Access API.
 const MAX_RECEIVE_SIZE = 4 * 1024 * 1024 * 1024; // 4 GB
 
-const SEND_HIGH_WATER = 1 * 1024 * 1024; // 1 MB buffered amount threshold
+const SEND_HIGH_WATER = 8 * 1024 * 1024; // 8 MB buffered amount threshold
 const MAX_QUEUE_BYTES = 8 * 1024 * 1024; // 8 MB max queued receive data
 
 export interface Metadata {

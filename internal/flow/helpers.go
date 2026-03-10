@@ -18,6 +18,17 @@ import (
 	"github.com/zyno-io/sp2p/internal/transfer"
 )
 
+const (
+	// tcpPreferThreshold is the file size above which auto mode prefers TCP
+	// over WebRTC. SCTP congestion control in pion limits WebRTC throughput
+	// to ~3-15 MB/s, while OS-stack TCP easily does 50-100+ MB/s.
+	tcpPreferThreshold = 64 * 1024 * 1024 // 64 MiB
+
+	// tcpPreferWait is how long to hold a WebRTC connection to let TCP
+	// (via UPnP or direct) catch up before accepting WebRTC.
+	tcpPreferWait = 6 * time.Second
+)
+
 // iceServersToConn converts signal ICE servers to conn STUN/TURN server lists.
 // If the server provides no ICE servers, falls back to default STUN servers.
 func iceServersToConn(servers []signal.ICEServer) ([]string, []conn.TURNServer) {

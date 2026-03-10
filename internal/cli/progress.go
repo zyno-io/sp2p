@@ -167,7 +167,9 @@ func (p *Progress) ResetMethods() {
 func (p *Progress) UpdateMethod(status conn.MethodStatus) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if status.State == "connected" && p.connectedVia == "" {
+	// Unconditionally overwrite so the TCP preference window can re-announce
+	// TCP as the winner after an earlier WebRTC "connected" event.
+	if status.State == "connected" {
 		p.connectedVia = status.Method
 	}
 	// Only update the display list while still connecting.

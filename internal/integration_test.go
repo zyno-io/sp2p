@@ -663,8 +663,8 @@ func TestTransferContextCancel(t *testing.T) {
 	rStream, _ := crypto.NewEncryptedStream(rConn, sKeys.ReceiverToSender, sKeys.SenderToReceiver)
 
 	// Use a large reader that will take a long time to transfer.
-	largeReader := io.LimitReader(&zeroReader{}, 100*1024*1024) // 100 MB of zeros
-	meta := &transfer.Metadata{Name: "big.dat", Size: 100 * 1024 * 1024}
+	largeReader := io.LimitReader(&zeroReader{}, 1024*1024*1024) // 1 GB — must be large enough that the pipeline can't finish in 100ms
+	meta := &transfer.Metadata{Name: "big.dat", Size: 1024 * 1024 * 1024}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -715,8 +715,8 @@ func TestConnectionDropMidTransfer(t *testing.T) {
 	sStream, _ := crypto.NewEncryptedStream(sConn, sKeys.SenderToReceiver, sKeys.ReceiverToSender)
 	rStream, _ := crypto.NewEncryptedStream(rConn, sKeys.ReceiverToSender, sKeys.SenderToReceiver)
 
-	largeReader := io.LimitReader(&zeroReader{}, 100*1024*1024)
-	meta := &transfer.Metadata{Name: "drop.dat", Size: 100 * 1024 * 1024}
+	largeReader := io.LimitReader(&zeroReader{}, 1024*1024*1024) // 1 GB — must be large enough that the pipeline can't finish in 100ms
+	meta := &transfer.Metadata{Name: "drop.dat", Size: 1024 * 1024 * 1024}
 
 	errCh := make(chan error, 2)
 

@@ -22,6 +22,7 @@ type SendConfig struct {
 	Verbose       bool     // Enable verbose diagnostic output
 	ClientVersion string   // Client version for update check
 	CompressLevel int      // zstd compression level (0=disabled, 1-9)
+	Transport     string   // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
 }
 
 // Send performs the send flow.
@@ -52,6 +53,7 @@ func Send(ctx context.Context, cfg SendConfig) error {
 		RelayOK:       cfg.RelayOK,
 		ClientVersion: cfg.ClientVersion,
 		CompressLevel: cfg.CompressLevel,
+		Transport:     cfg.Transport,
 	}, handler)
 }
 

@@ -63,56 +63,119 @@ func NewEncryptedStream(raw io.ReadWriter, writeKey, readKey []byte) (*Encrypted
 	}, nil
 }
 
-// buildNonce creates a 96-bit nonce from a sequential counter.
-func buildNonce(counter uint64) []byte {
-	nonce := make([]byte, NonceSize)
-	binary.BigEndian.PutUint64(nonce[4:], counter)
-	return nonce
+// buildNonce writes a 96-bit nonce from a sequential counter into dst.
+func buildNonce(dst []byte, counter uint64) {
+	_ = dst[NonceSize-1] // bounds check hint
+	dst[0] = 0
+	dst[1] = 0
+	dst[2] = 0
+	dst[3] = 0
+	binary.BigEndian.PutUint64(dst[4:], counter)
 }
 
-// buildAAD constructs Additional Authenticated Data: type || seq || version.
-func buildAAD(msgType byte, seq uint64) []byte {
-	aad := make([]byte, 10)
-	aad[0] = msgType
-	binary.BigEndian.PutUint64(aad[1:9], seq)
-	aad[9] = 1 // protocol version
-	return aad
+// buildAAD writes Additional Authenticated Data (type || seq || version) into dst.
+func buildAAD(dst []byte, msgType byte, seq uint64) {
+	_ = dst[9] // bounds check hint
+	dst[0] = msgType
+	binary.BigEndian.PutUint64(dst[1:9], seq)
+	dst[9] = 1 // protocol version
 }
 
-// WriteFrame encrypts and writes a framed message.
-func (s *EncryptedStream) WriteFrame(msgType byte, data []byte) error {
+// PrepareFrame encrypts a message and returns the complete wire-format frame
+// without writing it. The returned bytes can later be written with WriteRawFrame.
+// This enables pipelining encryption and I/O in separate goroutines.
+// PrepareFrame is safe for concurrent use; it serializes nonce assignment internally.
+func (s *EncryptedStream) PrepareFrame(msgType byte, data []byte) ([]byte, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
 	seq := s.writeNonce
 	if seq >= 1<<32 {
-		return fmt.Errorf("nonce counter exhausted — transfer too large")
+		return nil, fmt.Errorf("nonce counter exhausted — transfer too large")
 	}
 
-	nonce := buildNonce(seq)
-	aad := buildAAD(msgType, seq)
+	var nonce [NonceSize]byte
+	buildNonce(nonce[:], seq)
+	var aad [10]byte
+	buildAAD(aad[:], msgType, seq)
 
-	// Encrypt only the data payload; msg type is in cleartext header + AAD.
-	ciphertext := s.writeAEAD.Seal(nil, nonce, data, aad)
-	s.writeNonce++
-
-	// Frame: [4 len] [1 type] [8 seq] [ciphertext]
-	framePayloadLen := 1 + 8 + len(ciphertext)
+	// Frame layout: [4 len] [1 type] [8 seq] [ciphertext]
+	// Encrypt directly into the frame buffer to avoid a separate
+	// ciphertext allocation and copy.
+	overhead := s.writeAEAD.Overhead()
+	ciphertextLen := len(data) + overhead
+	framePayloadLen := 1 + 8 + ciphertextLen
 	if framePayloadLen > transfer.MaxFrameSize {
-		return fmt.Errorf("encrypted frame too large: %d", framePayloadLen)
+		return nil, fmt.Errorf("encrypted frame too large: %d", framePayloadLen)
 	}
 
-	// Build the full frame in one buffer to minimize writes.
-	frame := make([]byte, 4+framePayloadLen)
+	frame := make([]byte, 13, 4+framePayloadLen)
 	binary.BigEndian.PutUint32(frame[0:4], uint32(framePayloadLen))
 	frame[4] = msgType
 	binary.BigEndian.PutUint64(frame[5:13], seq)
-	copy(frame[13:], ciphertext)
+	// Seal appends ciphertext to frame[13:13], extending to full capacity.
+	frame = s.writeAEAD.Seal(frame, nonce[:], data, aad[:])
 
-	if _, err := writeAll(s.raw, frame); err != nil {
+	s.writeNonce++
+	return frame, nil
+}
+
+// ReserveWriteSeq reserves and returns the next write sequence number.
+// The caller can then use PrepareFrameAt to encrypt a frame with this
+// sequence number from any goroutine. Nonces must be reserved in order.
+func (s *EncryptedStream) ReserveWriteSeq() (uint64, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	seq := s.writeNonce
+	if seq >= 1<<32 {
+		return 0, fmt.Errorf("nonce counter exhausted — transfer too large")
+	}
+	s.writeNonce++
+	return seq, nil
+}
+
+// PrepareFrameAt encrypts a frame using a pre-reserved sequence number.
+// Unlike PrepareFrame, this is safe for concurrent use with different
+// sequence numbers — multiple goroutines can encrypt in parallel.
+// This relies on cipher.AEAD.Seal being stateless and goroutine-safe,
+// which holds for Go's standard library AES-GCM implementation (the only
+// AEAD used here). This is NOT a general cipher.AEAD guarantee.
+// Callers must ensure frames are written in sequence order via WriteRawFrame.
+func (s *EncryptedStream) PrepareFrameAt(msgType byte, data []byte, seq uint64) ([]byte, error) {
+	var nonce [NonceSize]byte
+	buildNonce(nonce[:], seq)
+	var aad [10]byte
+	buildAAD(aad[:], msgType, seq)
+
+	overhead := s.writeAEAD.Overhead()
+	ciphertextLen := len(data) + overhead
+	framePayloadLen := 1 + 8 + ciphertextLen
+	if framePayloadLen > transfer.MaxFrameSize {
+		return nil, fmt.Errorf("encrypted frame too large: %d", framePayloadLen)
+	}
+
+	frame := make([]byte, 13, 4+framePayloadLen)
+	binary.BigEndian.PutUint32(frame[0:4], uint32(framePayloadLen))
+	frame[4] = msgType
+	binary.BigEndian.PutUint64(frame[5:13], seq)
+	frame = s.writeAEAD.Seal(frame, nonce[:], data, aad[:])
+
+	return frame, nil
+}
+
+// WriteRawFrame writes a pre-built frame (from PrepareFrame) to the underlying connection.
+func (s *EncryptedStream) WriteRawFrame(frame []byte) error {
+	_, err := writeAll(s.raw, frame)
+	return err
+}
+
+// WriteFrame encrypts and writes a framed message.
+func (s *EncryptedStream) WriteFrame(msgType byte, data []byte) error {
+	frame, err := s.PrepareFrame(msgType, data)
+	if err != nil {
 		return err
 	}
-	return nil
+	return s.WriteRawFrame(frame)
 }
 
 // ReadFrame reads and decrypts a framed message.
@@ -156,10 +219,12 @@ func (s *EncryptedStream) ReadFrame() (byte, []byte, error) {
 	}
 
 	// Reconstruct nonce and AAD.
-	nonce := buildNonce(seq)
-	aad := buildAAD(msgType, seq)
+	var nonce [NonceSize]byte
+	buildNonce(nonce[:], seq)
+	var aad [10]byte
+	buildAAD(aad[:], msgType, seq)
 
-	plaintext, err := s.readAEAD.Open(nil, nonce, ciphertext, aad)
+	plaintext, err := s.readAEAD.Open(nil, nonce[:], ciphertext, aad[:])
 	if err != nil {
 		return 0, nil, fmt.Errorf("data integrity check failed — connection may be compromised: %w", err)
 	}

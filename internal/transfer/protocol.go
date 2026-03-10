@@ -21,10 +21,10 @@ const (
 )
 
 const (
-	// MaxChunkSize is the maximum data chunk size (64 KiB).
-	MaxChunkSize = 64 * 1024
-	// MaxFrameSize is the maximum frame payload size (256 KiB, accounts for encryption overhead).
-	MaxFrameSize = 256 * 1024
+	// MaxChunkSize is the maximum data chunk size (256 KiB).
+	MaxChunkSize = 256 * 1024
+	// MaxFrameSize is the maximum frame payload size (512 KiB, accounts for encryption overhead).
+	MaxFrameSize = 512 * 1024
 	// MaxControlSize is the maximum size for non-data frames (4 KiB).
 	MaxControlSize = 4 * 1024
 	// FrameHeaderSize is the 4-byte length prefix.
@@ -66,6 +66,35 @@ type TransferError struct {
 type FrameReadWriter interface {
 	WriteFrame(msgType byte, data []byte) error
 	ReadFrame() (msgType byte, data []byte, err error)
+}
+
+// FramePreparer is an optional interface for FrameReadWriters that can
+// separate frame preparation (e.g. encryption) from the actual write.
+// This enables pipelining: a producer can prepare frames while the
+// writer goroutine flushes previously prepared frames to the network.
+type FramePreparer interface {
+	PrepareFrame(msgType byte, data []byte) ([]byte, error)
+	WriteRawFrame(frame []byte) error
+}
+
+// ParallelFramePreparer extends FramePreparer with methods for parallel
+// encryption. ReserveWriteSeq assigns sequential nonces, and PrepareFrameAt
+// encrypts using a pre-assigned nonce. Multiple goroutines can call
+// PrepareFrameAt concurrently with different sequence numbers, allowing
+// N-way parallel compression + encryption. Frames must still be written
+// in sequence order via WriteRawFrame.
+type ParallelFramePreparer interface {
+	FramePreparer
+	ReserveWriteSeq() (uint64, error)
+	PrepareFrameAt(msgType byte, data []byte, seq uint64) ([]byte, error)
+}
+
+// BufferedAmounter is implemented by connections that can report how many
+// bytes are queued in their send buffer but not yet transmitted. This is
+// used to adjust sender progress so it reflects actual transmission rather
+// than local buffering.
+type BufferedAmounter interface {
+	BufferedAmount() uint64
 }
 
 // DeadlineSetter is implemented by connections that support idle deadlines.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,13 @@ type MethodStatus struct {
 // StatusCallback is called when a connection method changes state.
 type StatusCallback func(MethodStatus)
 
+// Transport mode constants for ConnectConfig.Transport.
+const (
+	TransportAuto   = ""       // Race both TCP and WebRTC (default)
+	TransportTCP    = "tcp"    // TCP only (direct/UPnP)
+	TransportWebRTC = "webrtc" // WebRTC only
+)
+
 // ConnectConfig holds configuration for establishing a P2P connection.
 type ConnectConfig struct {
 	SignalClient   *signal.Client
@@ -36,6 +44,8 @@ type ConnectConfig struct {
 	STUNServers    []string
 	TURNServers    []TURNServer
 	PeerClientType string         // "cli", "browser", or "" — used to skip TCP for browsers
+	Transport      string         // TransportAuto, TransportTCP, or TransportWebRTC
+	TCPPreferWait  time.Duration  // in auto mode, hold a WebRTC win this long to let TCP catch up
 	DevMode        bool           // when true, allow dialing loopback/link-local addresses
 	OnStatus       StatusCallback
 	OnLog          func(string) // verbose diagnostic logging (nil = disabled)
@@ -66,29 +76,74 @@ func establish(ctx context.Context, cfg ConnectConfig) (P2PConn, error) {
 		err    error
 	}
 
-	// Skip TCP when the peer is a browser (browsers can't do raw TCP).
-	skipTCP := cfg.PeerClientType == "browser"
+	// Determine which methods to attempt based on transport mode and peer type.
+	skipTCP := cfg.PeerClientType == "browser" || cfg.Transport == TransportWebRTC
+	skipWebRTC := cfg.Transport == TransportTCP
+
 	methodCount := 2
 	if skipTCP {
-		methodCount = 1
-		logVerbose(cfg.OnLog, "peer is browser, skipping TCP — WebRTC only (isSender=%v)", cfg.IsSender)
-	} else {
+		methodCount--
+	}
+	if skipWebRTC {
+		methodCount--
+	}
+	if methodCount == 0 {
+		return nil, fmt.Errorf("no connection methods available (transport=%q, peer=%q)", cfg.Transport, cfg.PeerClientType)
+	}
+
+	switch {
+	case skipTCP && skipWebRTC:
+		// unreachable due to check above
+	case skipTCP:
+		logVerbose(cfg.OnLog, "using WebRTC only (transport=%s, isSender=%v)", cfg.Transport, cfg.IsSender)
+	case skipWebRTC:
+		logVerbose(cfg.OnLog, "using TCP only (transport=%s, isSender=%v)", cfg.Transport, cfg.IsSender)
+	default:
 		logVerbose(cfg.OnLog, "starting connection race: WebRTC + TCP (isSender=%v)", cfg.IsSender)
 	}
 
 	results := make(chan result, methodCount)
 
-	// Method 1: WebRTC (always attempted).
-	go func() {
-		conn, err := EstablishWebRTC(ctx, cfg.SignalClient, WebRTCConfig{
-			STUNServers: cfg.STUNServers,
-			TURNServers: cfg.TURNServers,
-			IsSender:    cfg.IsSender,
-			OnStatus:    cfg.OnStatus,
-			OnLog:       cfg.OnLog,
-		})
-		results <- result{conn: conn, method: "WebRTC", err: err}
-	}()
+	// When TCP preference is active, intercept OnStatus to detect UPnP
+	// mapping success. This lets the preference window restart its timer
+	// when UPnP maps a port, giving the remote peer time to dial it.
+	preferTCP := cfg.TCPPreferWait > 0 && !skipTCP && !skipWebRTC
+	var upnpMapped chan struct{}
+	onStatus := cfg.OnStatus
+	if preferTCP {
+		upnpMapped = make(chan struct{}, 1)
+		origOnStatus := cfg.OnStatus
+		onStatus = func(s MethodStatus) {
+			if s.Method == "TCP" && strings.HasPrefix(s.Detail, "UPnP mapped ") {
+				select {
+				case upnpMapped <- struct{}{}:
+				default:
+				}
+			}
+			if origOnStatus != nil {
+				origOnStatus(s)
+			}
+		}
+		// Use the wrapped callback for TCP.
+		cfg.OnStatus = onStatus
+	}
+
+	// Method 1: WebRTC.
+	if !skipWebRTC {
+		go func() {
+			conn, err := EstablishWebRTC(ctx, cfg.SignalClient, WebRTCConfig{
+				STUNServers:    cfg.STUNServers,
+				TURNServers:    cfg.TURNServers,
+				IsSender:       cfg.IsSender,
+				PeerClientType: cfg.PeerClientType,
+				OnStatus:       onStatus,
+				OnLog:          cfg.OnLog,
+			})
+			results <- result{conn: conn, method: "WebRTC", err: err}
+		}()
+	} else if onStatus != nil {
+		onStatus(MethodStatus{Method: "WebRTC", State: "skipped", Detail: "transport=" + cfg.Transport})
+	}
 
 	// Method 2: Symmetric TCP (LAN + UPnP, both sides listen and connect).
 	if !skipTCP {
@@ -96,11 +151,34 @@ func establish(ctx context.Context, cfg ConnectConfig) (P2PConn, error) {
 			conn, err := tryTCP(ctx, cfg)
 			results <- result{conn: conn, method: "TCP", err: err}
 		}()
-	} else if cfg.OnStatus != nil {
-		cfg.OnStatus(MethodStatus{Method: "TCP", State: "skipped", Detail: "peer is browser"})
+	} else if onStatus != nil {
+		detail := "peer is browser"
+		if cfg.Transport == TransportWebRTC {
+			detail = "transport=" + cfg.Transport
+		}
+		onStatus(MethodStatus{Method: "TCP", State: "skipped", Detail: detail})
 	}
 
-	// Collect results — first success wins.
+	// drainLosers closes connections from losing methods in the background.
+	drainLosers := func(n int) {
+		go func() {
+			for range n {
+				res := <-results
+				if res.err == nil && res.conn != nil {
+					res.conn.Close()
+				}
+			}
+		}()
+	}
+
+	// Collect results — first success wins, with optional TCP preference.
+	// When TCPPreferWait > 0 and WebRTC wins first, hold the WebRTC
+	// connection for up to TCPPreferWait to give TCP (e.g. UPnP) time
+	// to connect. If TCP arrives within the window, it wins. If not,
+	// WebRTC is used. This avoids the SCTP throughput ceiling on large
+	// transfers while adding no delay when TCP wins naturally.
+	// If UPnP mapping succeeds during the window, the timer restarts
+	// so the remote peer has time to dial the newly mapped address.
 	var firstErr error
 	remaining := methodCount
 
@@ -109,17 +187,62 @@ func establish(ctx context.Context, cfg ConnectConfig) (P2PConn, error) {
 		case r := <-results:
 			remaining--
 			if r.err == nil && r.conn != nil {
-				logVerbose(cfg.OnLog, "%s won the connection race", r.method)
-				// Winner! Cancel other attempts and close losers in background.
-				cancel()
-				go func(n int) {
-					for i := 0; i < n; i++ {
-						res := <-results
-						if res.err == nil && res.conn != nil {
-							res.conn.Close()
+				// If TCP preference is active and WebRTC won, hold it
+				// briefly to see if TCP catches up.
+				if preferTCP && r.method == "WebRTC" && remaining > 0 {
+					logVerbose(cfg.OnLog, "WebRTC connected first; waiting %v for TCP (large transfer preference)", cfg.TCPPreferWait)
+					timer := time.NewTimer(cfg.TCPPreferWait)
+					waiting := true
+					for waiting {
+						select {
+						case tcpResult := <-results:
+							timer.Stop()
+							remaining--
+							waiting = false
+							if tcpResult.err == nil && tcpResult.conn != nil {
+								logVerbose(cfg.OnLog, "TCP connected during preference window — using TCP")
+								// Re-announce TCP as the winner so the UI
+								// overwrites the earlier WebRTC "connected".
+								if onStatus != nil {
+									onStatus(MethodStatus{Method: "TCP", State: "connected", Detail: "preferred over WebRTC"})
+								}
+								cancel()
+								r.conn.Close() // close WebRTC
+								drainLosers(remaining)
+								return tcpResult.conn, nil
+							}
+							// TCP failed; fall through to use WebRTC.
+							logVerbose(cfg.OnLog, "TCP failed during preference window — using WebRTC")
+						case <-upnpMapped:
+							// UPnP just mapped a port — restart the timer so the
+							// remote peer has time to dial the new external address.
+							// timer.Stop()==false means the timer already fired; drain
+							// timer.C before resetting. This is safe because upnpMapped
+							// is buffered(1) with a single consumer, so there's no risk
+							// of a concurrent drain.
+							if !timer.Stop() {
+								<-timer.C
+							}
+							timer.Reset(cfg.TCPPreferWait)
+							logVerbose(cfg.OnLog, "UPnP mapped — restarting TCP preference timer (%v)", cfg.TCPPreferWait)
+						case <-timer.C:
+							logVerbose(cfg.OnLog, "TCP preference window expired — using WebRTC")
+							waiting = false
+						case <-ctx.Done():
+							timer.Stop()
+							r.conn.Close()
+							drainLosers(remaining)
+							if firstErr != nil {
+								return nil, firstErr
+							}
+							return nil, ctx.Err()
 						}
 					}
-				}(remaining)
+				} else {
+					logVerbose(cfg.OnLog, "%s won the connection race", r.method)
+				}
+				cancel()
+				drainLosers(remaining)
 				return r.conn, nil
 			}
 			if r.err != nil {
@@ -129,15 +252,7 @@ func establish(ctx context.Context, cfg ConnectConfig) (P2PConn, error) {
 				firstErr = r.err
 			}
 		case <-ctx.Done():
-			// Drain remaining goroutines in background to clean up.
-			go func(n int) {
-				for i := 0; i < n; i++ {
-					res := <-results
-					if res.err == nil && res.conn != nil {
-						res.conn.Close()
-					}
-				}
-			}(remaining)
+			drainLosers(remaining)
 			if firstErr != nil {
 				return nil, firstErr
 			}

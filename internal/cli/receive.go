@@ -19,6 +19,7 @@ type ReceiveConfig struct {
 	RelayOK       bool   // Allow TURN relay without prompting
 	Verbose       bool   // Enable verbose diagnostic output
 	ClientVersion string // Client version for update check
+	Transport     string // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
 }
 
 // Receive performs the receive flow.
@@ -33,6 +34,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 		OutputDir:     cfg.OutputDir,
 		RelayOK:       cfg.RelayOK,
 		ClientVersion: cfg.ClientVersion,
+		Transport:     cfg.Transport,
 	}
 	if cfg.Stdout {
 		flowCfg.Writer = os.Stdout

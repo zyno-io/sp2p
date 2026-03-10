@@ -17,6 +17,9 @@ Secure peer-to-peer data transfer. End-to-end encrypted. Send files, folders, an
 - [Architecture Overview](#architecture-overview)
   - [Connection Flow](#connection-flow)
   - [P2P Connection Strategies](#p2p-connection-strategies)
+    - [Transport Selection](#transport-selection)
+    - [TCP Preference for Large Transfers](#tcp-preference-for-large-transfers)
+    - [Why TCP is Preferred](#why-tcp-is-preferred)
   - [Transfer Protocol](#transfer-protocol)
 - [Security Model](#security-model)
   - [Key Exchange](#key-exchange)
@@ -126,6 +129,7 @@ sp2p send [flags] <file|folder|...|->
 | `-name` | | Filename for stdin streams |
 | `-compress` | `3` | zstd compression level (0=disabled, 1-9) |
 | `-allow-relay` | `false` | Allow TURN relay without prompting (see [TURN Relay](#turn-relay)) |
+| `-transport` | `auto` | Transport mode: `auto`, `tcp`, or `webrtc` |
 | `-v` | `false` | Verbose diagnostic output |
 
 Send a file, a folder, multiple files, or pipe from stdin:
@@ -150,6 +154,7 @@ sp2p receive [flags] <CODE>
 | `-output` | `.` | Output directory |
 | `-stdout` | `false` | Write to stdout instead of file |
 | `-allow-relay` | `false` | Allow TURN relay without prompting (see [TURN Relay](#turn-relay)) |
+| `-transport` | `auto` | Transport mode: `auto`, `tcp`, or `webrtc` |
 | `-v` | `false` | Verbose diagnostic output |
 
 ```bash
@@ -187,6 +192,9 @@ compress: 3
 
 # Allow TURN relay without prompting
 allow-relay: false
+
+# Transport mode (auto, tcp, webrtc)
+transport: auto
 
 # Default output directory for received files
 output: ~/Downloads
@@ -324,10 +332,12 @@ Sender                    Server                   Receiver
   |                         |                         |
   |------- crypto --------->|-------> crypto -------->|
   |<------ crypto ----------|<------- crypto ---------|
-  |   [X25519 public key exchange via signaling]      |
+  |   [X25519 key exchange; sender includes           |
+  |    PreferTCP hint for large transfers]             |
   |                         |                         |
   |============ P2P connection (race) ================|
-  |  WebRTC / Symmetric TCP — first wins               |
+  |  WebRTC / Symmetric TCP — first wins              |
+  |  (TCP preferred for large transfers; see below)   |
   |                         |                         |
   |====== key confirmation over raw P2P channel ======|
   |                         |                         |
@@ -339,8 +349,46 @@ Sender                    Server                   Receiver
 
 Two methods race in parallel — the first to succeed wins:
 
-1. **WebRTC** — Uses ICE (STUN/TURN) to traverse NATs. Works in most network configurations.
-2. **Symmetric TCP** — Both peers listen on a random TCP port and trickle LAN addresses via signaling. Each peer filters out loopback and link-local addresses, capped at 8 dial addresses. In background, each peer attempts a UPnP port mapping and sends the external address on success. First successfully handshaken TCP connection wins. Fast on local networks.
+1. **Symmetric TCP** — Both peers listen on a random TCP port and trickle LAN addresses via signaling. Each peer filters out loopback and link-local addresses, capped at 8 dial addresses. In background, each peer attempts a UPnP port mapping and sends the external address on success. First successfully handshaken TCP connection wins. Uses the OS TCP stack (cubic/BBR congestion control), achieving full link speed on most networks.
+2. **WebRTC** — Uses ICE (STUN/TURN) to traverse NATs. Works in most network configurations, including symmetric NATs where TCP cannot connect. Required when one peer is a browser. WebRTC data channels run over SCTP/DTLS, which uses its own congestion control — see [Why TCP is preferred](#why-tcp-is-preferred) below.
+
+#### Transport Selection
+
+The `-transport` flag controls which methods are attempted:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` (default) | Race both TCP and WebRTC. For large transfers (≥64 MiB), prefer TCP — see below. |
+| `tcp` | TCP only. Fails if no direct/UPnP path exists. |
+| `webrtc` | WebRTC only. Useful when TCP is blocked or for debugging. |
+
+Mismatched modes between sender and receiver work correctly — for example, a sender using `-transport tcp` will only attempt TCP, while a receiver on `auto` will race both but naturally converge on TCP since the sender never produces a WebRTC offer.
+
+#### TCP Preference for Large Transfers
+
+In `auto` mode, when the file size is ≥64 MiB, SP2P prefers TCP over WebRTC. The sender signals this preference to the receiver during the key exchange, and both sides apply the same logic:
+
+1. Both methods still race simultaneously.
+2. If TCP wins first, it is used immediately (no change from normal behavior).
+3. If WebRTC wins first, the connection is held for up to **6 seconds** to give TCP time to connect (e.g., waiting for a UPnP port mapping to complete and for the remote peer to dial it).
+4. If UPnP mapping succeeds during the wait, the timer **restarts** — giving the remote peer a fresh window to reach the newly mapped address.
+5. If TCP connects within the window, it wins and the WebRTC connection is closed. If the window expires without TCP, WebRTC is used.
+
+On LAN, TCP almost always wins instantly, so the preference window never triggers. On WAN without UPnP or behind symmetric NAT, TCP will fail and WebRTC is used after the window — adding at most 6 seconds of delay, which is negligible compared to the minutes a large transfer takes over WebRTC's slower transport.
+
+#### Why TCP is Preferred
+
+WebRTC data channels use SCTP (Stream Control Transmission Protocol) tunneled over DTLS/UDP. While SCTP is reliable and works well for signaling and small messages, the implementation in [pion/webrtc](https://github.com/pion/webrtc) has throughput limitations that become significant for bulk transfers:
+
+- **200ms delayed SACK timer** — acknowledgements are held for 200ms regardless of RTT, throttling congestion window growth
+- **TCP Reno congestion control** — the congestion window halves on any packet loss and grows linearly (1 MSS per RTT), recovering slowly
+- **Small initial congestion window** — starts at ~5 KB and grows conservatively
+
+In practice, these factors cap WebRTC throughput at roughly **3–15 MB/s** depending on network conditions. A 70ms RTT link (e.g., US coast-to-coast) typically sees ~3–5 MB/s.
+
+Direct TCP uses the OS kernel's TCP stack, which implements modern congestion control (cubic, BBR) with optimized buffer management. The same link easily achieves **50–100+ MB/s** — an order of magnitude faster.
+
+For a 1 GB file at 5 MB/s (WebRTC) vs 50 MB/s (TCP): **3 minutes vs 20 seconds**.
 
 ### Transfer Protocol
 
@@ -349,7 +397,7 @@ The transfer uses a framed binary protocol over the encrypted stream:
 | Message | Type | Description |
 |---------|------|-------------|
 | Metadata | `0x01` | JSON with filename, size, MIME type, folder/stream flags |
-| Data | `0x02` | File data chunk (up to 64 KiB) |
+| Data | `0x02` | File data chunk (up to 256 KiB) |
 | Done | `0x04` | Sender signals transfer complete with totals + SHA-256 |
 | Complete | `0x05` | Receiver confirms receipt with verified totals + SHA-256 |
 | Error | `0x06` | Error message from either side |
