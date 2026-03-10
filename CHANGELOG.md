@@ -4,6 +4,19 @@ All notable changes to SP2P are documented here.
 
 This project uses [Semantic Versioning](https://semver.org/). During early development (0.x), minor versions may contain breaking changes.
 
+## [0.2.0] - 2026-03-10
+
+### Added
+- Multi-stream parallel transfers
+- Protocol v2: heartbeat/cancel frames, signaling closes after P2P established
+- Transport selection with TCP preference for large transfers, pipelined sender
+- Streaming folder extraction on receive, eliminating 2x disk usage
+- Configurable session limits via env vars and flags
+- Platform-aware update notifications in CLI
+
+### Fixed
+- Chocolatey package metadata (author, title, icon, release notes URL)
+
 ## [0.1.1-server] - 2026-03-05
 
 Server-only patch release.
@@ -36,6 +49,7 @@ Initial public release.
 - Homebrew, Scoop, AUR, Chocolatey, and WinGet packaging
 - Man pages for `sp2p` and `sp2p-server`
 
+[0.2.0]: https://github.com/zyno-io/sp2p/compare/v0.1.1-server...v0.2.0
 [0.1.1-server]: https://github.com/zyno-io/sp2p/compare/v0.1.1-cli-windows...v0.1.1-server
 [0.1.1-cli-windows]: https://github.com/zyno-io/sp2p/compare/v0.1.0...v0.1.1-cli-windows
 [0.1.0]: https://github.com/zyno-io/sp2p/releases/tag/v0.1.0
