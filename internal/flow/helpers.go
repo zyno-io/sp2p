@@ -63,7 +63,7 @@ func iceServersToConn(servers []signal.ICEServer) ([]string, []conn.TURNServer) 
 // the relay retry with the peer via signaling, receives TURN credentials
 // from the server, and retries the connection.
 // peerWantsRelay is closed if the peer already signaled relay-retry (consumed from relayCh).
-func retryWithRelay(ctx context.Context, sigClient *signal.Client, relayCh chan *signal.Envelope, deniedCh chan *signal.Envelope, peerWantsRelay <-chan struct{}, relayOK bool, h Handler, cfg conn.ConnectConfig) (conn.P2PConn, error) {
+func retryWithRelay(ctx context.Context, sigClient *signal.Client, relayCh chan *signal.Envelope, deniedCh chan *signal.Envelope, peerWantsRelay <-chan struct{}, relayOK bool, h Handler, cfg conn.ConnectConfig) (*conn.EstablishResult, error) {
 	h.OnVerbose("direct connection failed, attempting TURN relay fallback")
 
 	// Subscribe to server-delivered TURN credentials.
@@ -171,6 +171,13 @@ func safeRename(tmpPath, name, dir string) (string, error) {
 	}
 
 	return "", fmt.Errorf("could not find available filename for %s", name)
+}
+
+// logVerbose calls f with a formatted message if f is non-nil.
+func logVerbose(f func(string), msg string, args ...any) {
+	if f != nil {
+		f(fmt.Sprintf(msg, args...))
+	}
 }
 
 // PrepareInput prepares the file/folder/stdin for sending.

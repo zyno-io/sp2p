@@ -23,6 +23,7 @@ type Config struct {
 	AllowRelay bool   `yaml:"allow-relay"`
 	Output     string `yaml:"output"`
 	Verbose    bool   `yaml:"verbose"`
+	Parallel   *int   `yaml:"parallel"` // parallel TCP connections: 0=auto (RTT-based), 1=single, 2-6=force count
 }
 
 // Load reads configuration from $XDG_CONFIG_HOME/sp2p/config.yaml
@@ -50,6 +51,11 @@ func Load() (Config, error) {
 	// Validate compress range.
 	if cfg.Compress != nil && (*cfg.Compress < 0 || *cfg.Compress > 9) {
 		return Config{}, fmt.Errorf("parsing %s: compress must be 0-9, got %d", path, *cfg.Compress)
+	}
+
+	// Validate parallel range.
+	if cfg.Parallel != nil && (*cfg.Parallel < 0 || *cfg.Parallel > 6) {
+		return Config{}, fmt.Errorf("parsing %s: parallel must be 0-6, got %d", path, *cfg.Parallel)
 	}
 
 	// Validate transport if specified.

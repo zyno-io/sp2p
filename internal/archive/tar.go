@@ -255,8 +255,6 @@ func tarInfoDir(dir string, info *TarInfo) error {
 }
 
 const (
-	// maxExtractSize is the maximum total bytes that can be extracted from a tar archive (10 GB).
-	maxExtractSize = 10 * 1024 * 1024 * 1024
 	// maxEntries is the maximum number of entries in a tar archive.
 	maxEntries = 100_000
 	// maxPathLen is the maximum length of a tar entry path.
@@ -276,7 +274,6 @@ type StagedExtraction struct {
 // Call Commit() on the result to finalize, or Rollback() to clean up.
 func Extract(r io.Reader, destDir string) (*StagedExtraction, error) {
 	tr := tar.NewReader(r)
-	var totalWritten int64
 
 	absDest, err := filepath.Abs(destDir)
 	if err != nil {
@@ -359,14 +356,8 @@ func Extract(r io.Reader, destDir string) (*StagedExtraction, error) {
 				staged.Rollback()
 				return nil, err
 			}
-			remaining := maxExtractSize - totalWritten
-			n, copyErr := io.Copy(f, io.LimitReader(tr, remaining+1))
+			_, copyErr := io.Copy(f, tr)
 			closeErr := f.Close()
-			totalWritten += n
-			if totalWritten > maxExtractSize {
-				staged.Rollback()
-				return nil, fmt.Errorf("tar extraction exceeds maximum size (%d bytes)", maxExtractSize)
-			}
 			if copyErr != nil {
 				staged.Rollback()
 				return nil, copyErr

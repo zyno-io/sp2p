@@ -61,7 +61,8 @@ type Progress struct {
 	mu           sync.Mutex
 	phase        Phase
 	methods      []conn.MethodStatus
-	connectedVia string // connection method that won the race
+	connectedVia    string // connection method that won the race
+	parallelStreams int    // number of parallel TCP streams (0 = not parallel)
 	fileName     string
 	fileSize     uint64
 	fileCount    int
@@ -153,6 +154,19 @@ func (p *Progress) SetError(msg string) {
 	p.phase = PhaseError
 	p.errMsg = msg
 	p.render()
+}
+
+// SetParallelStreams records the number of parallel TCP streams and prints
+// the stream count as permanent output.
+func (p *Progress) SetParallelStreams(count int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.parallelStreams = count
+	if count > 1 {
+		p.clearEphemeral()
+		fmt.Fprintf(p.out, "  Using %d parallel streams\n", count)
+		p.render()
+	}
 }
 
 // ResetMethods clears all method statuses for a fresh display on retry.

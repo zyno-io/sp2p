@@ -49,6 +49,28 @@ func GenerateKeyPair() (*KeyPair, error) {
 	return &KeyPair{Private: priv, Public: pub}, nil
 }
 
+// ComputeSharedSecret performs X25519 DH and returns the raw shared secret.
+// This is the same computation as the first step of DeriveKeys, exposed
+// separately so callers can use it for deriving parallel stream keys.
+func ComputeSharedSecret(myPrivate, theirPublic []byte) ([]byte, error) {
+	shared, err := curve25519.X25519(myPrivate, theirPublic)
+	if err != nil {
+		return nil, fmt.Errorf("X25519 failed: %w", err)
+	}
+
+	allZero := true
+	for _, b := range shared {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return nil, fmt.Errorf("invalid DH shared secret (low-order point)")
+	}
+	return shared, nil
+}
+
 // DeriveKeys performs X25519 DH and derives all session keys using HKDF.
 //
 // Parameters:

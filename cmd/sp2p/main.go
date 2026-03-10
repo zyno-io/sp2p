@@ -105,6 +105,11 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 		transportDefault = "auto"
 	}
 	transport := fs.String("transport", transportDefault, "connection method: auto, tcp, webrtc")
+	parallelDefault := 0
+	if cfg.Parallel != nil {
+		parallelDefault = *cfg.Parallel
+	}
+	parallel := fs.Int("parallel", parallelDefault, "parallel TCP connections: 0=auto, 1=single, 2-6=force count")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
 	fs.Usage = func() {
@@ -120,6 +125,10 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 
 	if *compress < 0 || *compress > 9 {
 		return fmt.Errorf("compress must be 0-9, got %d", *compress)
+	}
+
+	if *parallel < 0 || *parallel > 6 {
+		return fmt.Errorf("parallel must be 0-6, got %d", *parallel)
 	}
 
 	transportMode, err := parseTransport(*transport)
@@ -140,6 +149,7 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 		Name:          *name,
 		CompressLevel: *compress,
 		Transport:     transportMode,
+		Parallel:      *parallel,
 		RelayOK:       *allowRelay,
 		Verbose:       *verbose,
 		ClientVersion: version,
@@ -161,6 +171,11 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 		transportDefault = "auto"
 	}
 	transport := fs.String("transport", transportDefault, "connection method: auto, tcp, webrtc")
+	parallelDefault := 0
+	if cfg.Parallel != nil {
+		parallelDefault = *cfg.Parallel
+	}
+	parallel := fs.Int("parallel", parallelDefault, "parallel TCP connections: 0=auto, 1=single, 2-6=force count")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
 	fs.Usage = func() {
@@ -174,6 +189,10 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 		os.Exit(1)
 	}
 
+	if *parallel < 0 || *parallel > 6 {
+		return fmt.Errorf("parallel must be 0-6, got %d", *parallel)
+	}
+
 	transportMode, err := parseTransport(*transport)
 	if err != nil {
 		return err
@@ -185,6 +204,7 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 		OutputDir:     *outputDir,
 		Stdout:        *stdout,
 		Transport:     transportMode,
+		Parallel:      *parallel,
 		RelayOK:       *allowRelay,
 		Verbose:       *verbose,
 		ClientVersion: version,

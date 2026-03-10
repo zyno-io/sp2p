@@ -12,14 +12,16 @@ import (
 
 // Message types for the transfer protocol.
 const (
-	MsgMetadata  = 0x01
-	MsgData      = 0x02
-	MsgDone      = 0x04
-	MsgComplete  = 0x05
-	MsgError     = 0x06
-	MsgFinAck    = 0x07
-	MsgHeartbeat = 0x08
-	MsgCancel    = 0x09
+	MsgMetadata      = 0x01
+	MsgData          = 0x02
+	MsgDone          = 0x04
+	MsgComplete      = 0x05
+	MsgError         = 0x06
+	MsgFinAck        = 0x07
+	MsgHeartbeat     = 0x08
+	MsgCancel        = 0x09
+	MsgParallelProbe = 0x0A // RTT probe: sender sends, receiver echoes
+	MsgParallelReady = 0x0B // Parallel count negotiation frame
 )
 
 // Cancel reason codes.

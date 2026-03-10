@@ -102,8 +102,9 @@ type Candidate struct {
 
 // CryptoExchange carries a DH public key for the key exchange.
 type CryptoExchange struct {
-	PublicKey []byte `json:"publicKey"`           // 32-byte X25519 public key
-	PreferTCP bool   `json:"preferTCP,omitempty"` // hint: prefer TCP for large transfers
+	PublicKey   []byte `json:"publicKey"`              // 32-byte X25519 public key
+	PreferTCP   bool   `json:"preferTCP,omitempty"`    // hint: prefer TCP for large transfers
+	ParallelTCP bool   `json:"parallelTCP,omitempty"`  // capability: supports parallel TCP connections
 }
 
 // DirectEndpoint carries direct connection addresses for TCP.

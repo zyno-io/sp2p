@@ -99,6 +99,10 @@ func (h *cliHandler) OnError(message string) {
 	h.progress.SetError(message)
 }
 
+func (h *cliHandler) OnParallelStreams(count int) {
+	h.progress.SetParallelStreams(count)
+}
+
 func (h *cliHandler) OnVerbose(msg string) {
 	h.progress.Log(msg)
 }

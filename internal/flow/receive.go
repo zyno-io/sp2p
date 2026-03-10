@@ -28,6 +28,7 @@ type ReceiveConfig struct {
 	RelayOK       bool      // Allow TURN relay without prompting
 	ClientVersion string    // Client version for update check
 	Transport     string    // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
+	Parallel      int       // parallel TCP connections: 0=auto, 1=single, 2-6=force count
 }
 
 // ReceiveResult holds the outcome of a receive flow.
@@ -83,13 +84,21 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		return nil, err
 	}
 	h.OnPhaseChanged(PhaseKeyExchange)
-	if err := sigClient.Send(ctx, signal.TypeCrypto, signal.CryptoExchange{PublicKey: kp.Public}); err != nil {
+	// Advertise ParallelTCP unless explicitly disabled (parallel=1).
+	// The sender will only echo it back for CLI-to-CLI transfers (after
+	// seeing PeerJoined with clientType), so browser receivers will never
+	// enter parallel negotiation.
+	if err := sigClient.Send(ctx, signal.TypeCrypto, signal.CryptoExchange{
+		PublicKey:   kp.Public,
+		ParallelTCP: cfg.Parallel != 1,
+	}); err != nil {
 		return nil, fmt.Errorf("sending public key: %w", err)
 	}
 
 	// Wait for sender's public key and Welcome.
 	var senderPub []byte
 	var senderPreferTCP bool
+	var senderParallelTCP bool
 	var iceServers []signal.ICEServer
 	var turnAvailable bool
 	var peerClientType string
@@ -118,6 +127,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 				}
 				senderPub = ce.PublicKey
 				senderPreferTCP = ce.PreferTCP
+				senderParallelTCP = ce.ParallelTCP
 			case signal.TypePeerLeft:
 				h.OnError("Sender disconnected")
 				return nil, fmt.Errorf("peer disconnected")
@@ -198,12 +208,15 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		connCfg.TCPPreferWait = tcpPreferWait
 		h.OnVerbose(fmt.Sprintf("sender indicated large transfer — TCP preferred, will wait %v for TCP if WebRTC connects first", tcpPreferWait))
 	}
-	p2pConn, err := conn.Establish(attemptCtx, connCfg)
+	estResult, err := conn.Establish(attemptCtx, connCfg)
 	attemptCancel()
 	select {
 	case <-peerLeft:
-		if p2pConn != nil {
-			p2pConn.Close()
+		if estResult != nil {
+			estResult.Conn.Close()
+			if estResult.TCPResult != nil && estResult.TCPResult.Cleanup != nil {
+				estResult.TCPResult.Cleanup()
+			}
 		}
 		h.OnError("Sender disconnected")
 		return nil, fmt.Errorf("peer disconnected")
@@ -213,12 +226,17 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.
 		connCfg.Transport = conn.TransportWebRTC
 		connCfg.TCPPreferWait = 0
-		p2pConn, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
+		estResult, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
 	}
 	if err != nil {
 		return nil, err
 	}
+	p2pConn := estResult.Conn
 	defer p2pConn.Close()
+	// Ensure TCP resources (listener, UPnP) are cleaned up.
+	if estResult.TCPResult != nil && estResult.TCPResult.Cleanup != nil {
+		defer estResult.TCPResult.Cleanup()
+	}
 	h.OnPhaseChanged(PhaseP2PConnected)
 
 	// Key confirmation.
@@ -236,6 +254,36 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		return nil, err
 	}
 
+	// Parallel TCP negotiation: if both sides support it and TCP won.
+	// The receiver echoes RTT probes and exchanges counts with the sender.
+	var frw transfer.FrameReadWriter = encStream
+	var deadliner transfer.DeadlineSetter = p2pConn
+	var multiStream *transfer.MultiStream
+	canParallel := senderParallelTCP && estResult.TCPResult != nil && cfg.Parallel != 1
+	if canParallel {
+		h.OnVerbose("negotiating parallel TCP connections")
+		sharedSecret, ssErr := crypto.ComputeSharedSecret(kp.Private, senderPub)
+		if ssErr != nil {
+			h.OnVerbose(fmt.Sprintf("shared secret computation failed: %v — using single connection", ssErr))
+		} else {
+			pfrw, pd, negErr := negotiateReceiver(ctx, encStream, p2pConn, estResult.TCPResult,
+				sharedSecret, seedRaw, cfg.Parallel,
+				sessionID, senderPub, kp.Public,
+				func(msg string) { h.OnVerbose(msg) })
+			if negErr != nil {
+				h.OnVerbose(fmt.Sprintf("parallel negotiation failed: %v — using single connection", negErr))
+			} else {
+				frw = pfrw
+				deadliner = pd
+				if ms, ok := pfrw.(*transfer.MultiStream); ok {
+					multiStream = ms
+					h.OnParallelStreams(ms.StreamCount())
+					defer ms.Close()
+				}
+			}
+		}
+	}
+
 	// Close signaling — no longer needed after P2P + key confirmation.
 	h.OnVerbose("closing signaling connection (P2P established)")
 	sigClient.Close()
@@ -250,7 +298,11 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	go func() {
 		select {
 		case <-hb.Done():
-			p2pConn.Close()
+			if multiStream != nil {
+				multiStream.Close() // also closes p2pConn (conns[0])
+			} else {
+				p2pConn.Close()
+			}
 		case <-transferDone:
 		}
 	}()
@@ -260,8 +312,8 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	h.OnPhaseChanged(PhaseTransferring)
 	pr, pw := io.Pipe()
 
-	receiver := transfer.NewReceiver(encStream)
-	receiver.SetIdleTimeout(p2pConn, 2*time.Minute)
+	receiver := transfer.NewReceiver(frw)
+	receiver.SetIdleTimeout(deadliner, 2*time.Minute)
 	receiver.SetHeartbeat(hb)
 
 	// Channel to learn metadata before consuming the pipe.
@@ -343,9 +395,9 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	// Send cancel if we errored out (best-effort).
 	if result.err != nil {
 		if ctx.Err() != nil {
-			transfer.WriteCancel(encStream, transfer.CancelUserAbort)
+			transfer.WriteCancel(frw, transfer.CancelUserAbort)
 		} else {
-			transfer.WriteCancel(encStream, transfer.CancelError)
+			transfer.WriteCancel(frw, transfer.CancelError)
 		}
 		if tmpPath != "" {
 			os.Remove(tmpPath)
@@ -357,7 +409,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		return nil, result.err
 	}
 	if copyErr != nil {
-		transfer.WriteCancel(encStream, transfer.CancelError)
+		transfer.WriteCancel(frw, transfer.CancelError)
 		if tmpPath != "" {
 			os.Remove(tmpPath)
 		}
