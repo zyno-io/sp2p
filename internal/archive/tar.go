@@ -265,22 +265,28 @@ const (
 	maxPathDepth = 100
 )
 
-// Untar extracts a tar stream to a directory.
-// It validates all paths for safety (no absolute paths, no traversal).
-// Extraction uses a private temp directory to prevent TOCTOU races.
-func Untar(r io.Reader, destDir string) error {
+// StagedExtraction holds a completed extraction in a staging directory.
+// Call Commit to move files to the final destination, or Rollback to clean up.
+type StagedExtraction struct {
+	StagingDir string // temp dir containing extracted files
+	DestDir    string // final destination (absolute, symlinks resolved)
+}
+
+// Extract reads a tar stream into a staging directory without moving to dest.
+// Call Commit() on the result to finalize, or Rollback() to clean up.
+func Extract(r io.Reader, destDir string) (*StagedExtraction, error) {
 	tr := tar.NewReader(r)
 	var totalWritten int64
 
 	absDest, err := filepath.Abs(destDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// Resolve symlinks in destDir itself so comparisons work on systems
 	// where temp directories are behind symlinks (e.g. macOS /var -> /private/var).
 	absDest, err = filepath.EvalSymlinks(absDest)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Extract into a private temp directory to prevent TOCTOU races.
@@ -288,9 +294,10 @@ func Untar(r io.Reader, destDir string) error {
 	// eliminating symlink-based attacks between check and use.
 	tmpDir, err := os.MkdirTemp(absDest, ".sp2p-extract-*")
 	if err != nil {
-		return fmt.Errorf("creating temp extraction dir: %w", err)
+		return nil, fmt.Errorf("creating temp extraction dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir) // clean up on error; on success, contents are moved out
+
+	staged := &StagedExtraction{StagingDir: tmpDir, DestDir: absDest}
 
 	var entryCount int
 
@@ -300,23 +307,28 @@ func Untar(r io.Reader, destDir string) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("reading tar: %w", err)
+			staged.Rollback()
+			return nil, fmt.Errorf("reading tar: %w", err)
 		}
 
 		entryCount++
 		if entryCount > maxEntries {
-			return fmt.Errorf("tar archive exceeds maximum entry count (%d)", maxEntries)
+			staged.Rollback()
+			return nil, fmt.Errorf("tar archive exceeds maximum entry count (%d)", maxEntries)
 		}
 
 		// Security validation.
 		if err := validateTarPath(header.Name); err != nil {
-			return fmt.Errorf("unsafe tar entry: %w", err)
+			staged.Rollback()
+			return nil, fmt.Errorf("unsafe tar entry: %w", err)
 		}
 		if len(header.Name) > maxPathLen {
-			return fmt.Errorf("tar entry path too long: %d bytes (max %d)", len(header.Name), maxPathLen)
+			staged.Rollback()
+			return nil, fmt.Errorf("tar entry path too long: %d bytes (max %d)", len(header.Name), maxPathLen)
 		}
 		if pathDepth(header.Name) > maxPathDepth {
-			return fmt.Errorf("tar entry path too deep: %q (max depth %d)", header.Name, maxPathDepth)
+			staged.Rollback()
+			return nil, fmt.Errorf("tar entry path too deep: %q (max depth %d)", header.Name, maxPathDepth)
 		}
 
 		// Build target inside the private temp dir.
@@ -324,37 +336,44 @@ func Untar(r io.Reader, destDir string) error {
 
 		// Verify the target is within tmpDir.
 		if !strings.HasPrefix(target, tmpDir+string(os.PathSeparator)) && target != tmpDir {
-			return fmt.Errorf("tar entry %q escapes destination directory", header.Name)
+			staged.Rollback()
+			return nil, fmt.Errorf("tar entry %q escapes destination directory", header.Name)
 		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
+				staged.Rollback()
+				return nil, err
 			}
 		case tar.TypeReg:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
+				staged.Rollback()
+				return nil, err
 			}
 			// Sanitize file mode: strip setuid/setgid/sticky bits, cap at 0755.
 			mode := os.FileMode(header.Mode) & 0o755
 			// O_EXCL prevents following symlinks and ensures exclusive creation.
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_EXCL, mode)
 			if err != nil {
-				return err
+				staged.Rollback()
+				return nil, err
 			}
 			remaining := maxExtractSize - totalWritten
 			n, copyErr := io.Copy(f, io.LimitReader(tr, remaining+1))
 			closeErr := f.Close()
 			totalWritten += n
 			if totalWritten > maxExtractSize {
-				return fmt.Errorf("tar extraction exceeds maximum size (%d bytes)", maxExtractSize)
+				staged.Rollback()
+				return nil, fmt.Errorf("tar extraction exceeds maximum size (%d bytes)", maxExtractSize)
 			}
 			if copyErr != nil {
-				return copyErr
+				staged.Rollback()
+				return nil, copyErr
 			}
 			if closeErr != nil {
-				return fmt.Errorf("closing %s: %w", header.Name, closeErr)
+				staged.Rollback()
+				return nil, fmt.Errorf("closing %s: %w", header.Name, closeErr)
 			}
 		default:
 			// Skip symlinks, hardlinks, devices, etc.
@@ -362,14 +381,18 @@ func Untar(r io.Reader, destDir string) error {
 		}
 	}
 
-	// Move extracted contents from temp dir to destination.
-	entries, err := os.ReadDir(tmpDir)
+	return staged, nil
+}
+
+// Commit moves extracted files from staging to destination.
+func (s *StagedExtraction) Commit() error {
+	entries, err := os.ReadDir(s.StagingDir)
 	if err != nil {
 		return fmt.Errorf("reading extracted entries: %w", err)
 	}
 	for _, entry := range entries {
-		src := filepath.Join(tmpDir, entry.Name())
-		dst := filepath.Join(absDest, entry.Name())
+		src := filepath.Join(s.StagingDir, entry.Name())
+		dst := filepath.Join(s.DestDir, entry.Name())
 		// Refuse to overwrite existing paths in the destination.
 		if _, err := os.Lstat(dst); err == nil {
 			return fmt.Errorf("refusing to overwrite existing path: %s", entry.Name())
@@ -378,7 +401,28 @@ func Untar(r io.Reader, destDir string) error {
 			return fmt.Errorf("moving %s to destination: %w", entry.Name(), err)
 		}
 	}
+	// Remove the now-empty staging dir.
+	os.Remove(s.StagingDir)
+	return nil
+}
 
+// Rollback removes the staging directory and all its contents.
+func (s *StagedExtraction) Rollback() {
+	os.RemoveAll(s.StagingDir)
+}
+
+// Untar extracts a tar stream to a directory.
+// It validates all paths for safety (no absolute paths, no traversal).
+// Extraction uses a private temp directory to prevent TOCTOU races.
+func Untar(r io.Reader, destDir string) error {
+	staged, err := Extract(r, destDir)
+	if err != nil {
+		return err
+	}
+	if err := staged.Commit(); err != nil {
+		staged.Rollback()
+		return err
+	}
 	return nil
 }
 

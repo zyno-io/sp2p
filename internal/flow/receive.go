@@ -263,7 +263,11 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	receiver := transfer.NewReceiver(encStream)
 	receiver.SetIdleTimeout(p2pConn, 2*time.Minute)
 	receiver.SetHeartbeat(hb)
+
+	// Channel to learn metadata before consuming the pipe.
+	metaCh := make(chan *transfer.Metadata, 1)
 	receiver.OnMetadata = func(meta *transfer.Metadata) {
+		metaCh <- meta
 		h.OnMetadata(meta)
 	}
 
@@ -271,13 +275,13 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		meta *transfer.Metadata
 		err  error
 	}
-	recvCh := make(chan recvResult, 1)
+	errCh := make(chan recvResult, 1)
 	go func() {
 		meta, err := receiver.Receive(ctx, pw, func(recv uint64) {
 			h.OnProgress(recv)
 		})
 		pw.CloseWithError(err)
-		recvCh <- recvResult{meta, err}
+		errCh <- recvResult{meta, err}
 	}()
 
 	// Write output.
@@ -286,13 +290,36 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		outDir = "."
 	}
 
+	// Wait for metadata to decide consumption strategy.
+	var meta *transfer.Metadata
+	select {
+	case meta = <-metaCh:
+	case res := <-errCh:
+		// Receiver failed before sending metadata.
+		if res.err != nil {
+			h.OnError(res.err.Error())
+			return nil, res.err
+		}
+		// Unexpected: completed with no error but no metadata either.
+		return nil, fmt.Errorf("transfer completed without metadata")
+	case <-ctx.Done():
+		// Close the pipe so the receiver goroutine unblocks and exits.
+		pr.CloseWithError(ctx.Err())
+		return nil, ctx.Err()
+	}
+
 	var tmpPath string
+	var staged *archive.StagedExtraction
 	var copyErr error
+
 	if cfg.Writer != nil {
 		// Caller-provided writer (e.g., stdout).
 		_, copyErr = io.Copy(cfg.Writer, pr)
+	} else if meta.IsFolder {
+		// Stream tar directly into staging directory — no temp file needed.
+		staged, copyErr = archive.Extract(pr, outDir)
 	} else {
-		// Write to temp file.
+		// Single file: write to temp file.
 		tmpFile, ferr := os.CreateTemp(outDir, "sp2p-recv-*")
 		if ferr != nil {
 			pr.CloseWithError(ferr)
@@ -312,7 +339,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		pr.Close()
 	}
 
-	result := <-recvCh
+	result := <-errCh
 	// Send cancel if we errored out (best-effort).
 	if result.err != nil {
 		if ctx.Err() != nil {
@@ -323,6 +350,9 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		if tmpPath != "" {
 			os.Remove(tmpPath)
 		}
+		if staged != nil {
+			staged.Rollback()
+		}
 		h.OnError(result.err.Error())
 		return nil, result.err
 	}
@@ -331,10 +361,12 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		if tmpPath != "" {
 			os.Remove(tmpPath)
 		}
+		if staged != nil {
+			staged.Rollback()
+		}
 		return nil, fmt.Errorf("writing output: %w", copyErr)
 	}
 
-	meta := result.meta
 	totalBytes, _ := receiver.Stats()
 	duration := time.Since(startTime)
 
@@ -344,31 +376,22 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		meta.Name = "received-file"
 	}
 
-	// Handle file output (temp file → final location).
+	// Handle file output → final location.
 	var savedPath string
-	if tmpPath != "" {
-		if meta.IsFolder {
-			f, err := os.Open(tmpPath)
-			if err != nil {
-				os.Remove(tmpPath)
-				return nil, fmt.Errorf("opening temp file for untar: %w", err)
-			}
-			if err := archive.Untar(f, outDir); err != nil {
-				f.Close()
-				os.Remove(tmpPath)
-				return nil, fmt.Errorf("extracting folder: %w", err)
-			}
-			f.Close()
-			os.Remove(tmpPath)
-			savedPath = filepath.Join(outDir, meta.Name)
-		} else {
-			sp, err := safeRename(tmpPath, meta.Name, outDir)
-			if err != nil {
-				os.Remove(tmpPath)
-				return nil, fmt.Errorf("renaming output: %w", err)
-			}
-			savedPath = sp
+	if staged != nil {
+		// Folder: hash verified, commit from staging to destination.
+		if err := staged.Commit(); err != nil {
+			staged.Rollback()
+			return nil, fmt.Errorf("extracting folder: %w", err)
 		}
+		savedPath = filepath.Join(outDir, meta.Name)
+	} else if tmpPath != "" {
+		sp, err := safeRename(tmpPath, meta.Name, outDir)
+		if err != nil {
+			os.Remove(tmpPath)
+			return nil, fmt.Errorf("renaming output: %w", err)
+		}
+		savedPath = sp
 	}
 
 	h.OnPhaseChanged(PhaseDone)
