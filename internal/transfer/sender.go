@@ -24,6 +24,7 @@ type Sender struct {
 	meta        *Metadata
 	idleTimeout time.Duration
 	deadliner   DeadlineSetter
+	heartbeat   *Heartbeat
 	buffered    BufferedAmounter
 	totalBytes  uint64
 	chunkCount  uint64
@@ -57,6 +58,17 @@ func (s *Sender) resetDeadline() {
 func (s *Sender) clearDeadline() {
 	if s.deadliner != nil {
 		s.deadliner.SetDeadline(time.Time{})
+	}
+}
+
+// SetHeartbeat registers a heartbeat that will be touched on every received frame.
+func (s *Sender) SetHeartbeat(hb *Heartbeat) {
+	s.heartbeat = hb
+}
+
+func (s *Sender) touchHeartbeat() {
+	if s.heartbeat != nil {
+		s.heartbeat.Touch()
 	}
 }
 
@@ -419,11 +431,26 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 		return s.wrapCtxErr(ctx, fmt.Errorf("sending done: %w", err))
 	}
 
-	// Wait for complete.
-	s.resetDeadline()
-	msgType, data, err := s.frw.ReadFrame()
-	if err != nil {
-		return s.wrapCtxErr(ctx, fmt.Errorf("waiting for complete: %w", err))
+	// Wait for complete, skipping incoming heartbeats.
+	// The receiver sends Complete promptly after verification, so this
+	// wait is brief. The idle timeout covers pathological delays.
+	var msgType byte
+	var data []byte
+	var err error
+	for {
+		s.resetDeadline()
+		msgType, data, err = s.frw.ReadFrame()
+		if err != nil {
+			return s.wrapCtxErr(ctx, fmt.Errorf("waiting for complete: %w", err))
+		}
+		s.touchHeartbeat()
+		if msgType == MsgHeartbeat {
+			continue
+		}
+		if msgType == MsgCancel {
+			return fmt.Errorf("peer cancelled transfer")
+		}
+		break
 	}
 
 	switch msgType {

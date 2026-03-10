@@ -465,32 +465,40 @@ async function initSend(): Promise<void> {
       );
       const transport = new DataChannelTransport(dc, enc, extraBuffered);
 
-      // Close PeerConnection if signaling drops — unblocks transfer I/O.
-      const closePcOnSignalLoss = () => pc?.close();
-      sigClient.on("_closed", closePcOnSignalLoss);
-      sigClient.on("_error", closePcOnSignalLoss);
+      // Close signaling — no longer needed after P2P + key confirmation.
+      log("closing signaling connection (P2P established)");
+      sigClient.close();
+
+      // Start heartbeat for peer liveness detection over P2P.
+      transport.startHeartbeat(() => pc?.close());
+
+      // Best-effort cancel on tab close.
+      const onBeforeUnload = () => { transport.sendCancel(); };
+      window.addEventListener("beforeunload", onBeforeUnload);
 
       const startTime = Date.now();
       let sentBytes: number;
 
       log(`starting transfer: ${isSingleFile ? file.name : files.length + " files"} (${formatBytes(totalSize)})`);
-      if (isSingleFile) {
-        await sendFile(transport, file, (bytesSent) => {
-          updateProgress(progressBar, progressInfo, bytesSent, file.size, startTime);
-        });
-        sentBytes = file.size;
-      } else {
-        sentBytes = await sendFiles(transport, files, "sp2p-received-folder.tgz", (bytesSent) => {
-          updateProgress(progressBar, progressInfo, bytesSent, totalSize, startTime);
-        });
+      try {
+        if (isSingleFile) {
+          await sendFile(transport, file, (bytesSent) => {
+            updateProgress(progressBar, progressInfo, bytesSent, file.size, startTime);
+          });
+          sentBytes = file.size;
+        } else {
+          sentBytes = await sendFiles(transport, files, "sp2p-received-folder.tgz", (bytesSent) => {
+            updateProgress(progressBar, progressInfo, bytesSent, totalSize, startTime);
+          });
+        }
+      } finally {
+        transport.stopHeartbeat();
+        window.removeEventListener("beforeunload", onBeforeUnload);
       }
 
       setStepStatus($(".step-transfer"), "done");
       hide(progressContainer);
       log(`transfer complete: ${formatBytes(sentBytes)} sent`);
-
-      // Report completion to server for stats (best-effort).
-      try { sigClient.send("transfer-complete", { bytesTransferred: sentBytes }); } catch {}
 
       // Done.
       hide(stepsContainer);
@@ -748,40 +756,54 @@ async function initReceive(): Promise<void> {
     );
     const transport = new DataChannelTransport(dc, enc, extraBuffered);
 
-    // Close PeerConnection if signaling drops — unblocks transfer I/O.
-    const closePcOnSignalLoss = () => pc?.close();
-    sigClient.on("_closed", closePcOnSignalLoss);
-    sigClient.on("_error", closePcOnSignalLoss);
+    // Close signaling — no longer needed after P2P + key confirmation.
+    log("closing signaling connection (P2P established)");
+    sigClient.close();
+
+    // Start heartbeat for peer liveness detection over P2P.
+    transport.startHeartbeat(() => pc?.close());
+
+    // Best-effort cancel on tab close.
+    const onBeforeUnload = () => { transport.sendCancel(); };
+    window.addEventListener("beforeunload", onBeforeUnload);
 
     const startTime = Date.now();
     let totalSize = 0;
     let fileCount = 0;
-    const { meta, blob, totalBytes: receivedBytes } = await receiveFile(
-      transport,
-      (bytesRecv, fileMeta) => {
-        if (fileMeta) {
-          totalSize = fileMeta.size;
-          fileCount = fileMeta.fileCount || 0;
+    let result: { meta: any; blob: Blob | null; totalBytes: number };
+    try {
+      result = await receiveFile(
+        transport,
+        (bytesRecv, fileMeta) => {
+          if (fileMeta) {
+            totalSize = fileMeta.size;
+            fileCount = fileMeta.fileCount || 0;
+          }
+          updateProgress(progressBar, progressInfo, bytesRecv, totalSize, startTime, fileCount);
+        },
+        async (fileMeta) => {
+          // Try File System Access API for streaming large files to disk.
+          if (!("showSaveFilePicker" in window)) return null;
+          try {
+            const handle = await (window as any).showSaveFilePicker({
+              suggestedName: fileMeta.name,
+            });
+            const writable = await handle.createWritable();
+            return {
+              write: (chunk: Uint8Array) => writable.write(chunk),
+              close: () => writable.close(),
+            };
+          } catch {
+            return null; // user cancelled or API blocked — fall back to in-memory
+          }
         }
-        updateProgress(progressBar, progressInfo, bytesRecv, totalSize, startTime, fileCount);
-      },
-      async (fileMeta) => {
-        // Try File System Access API for streaming large files to disk.
-        if (!("showSaveFilePicker" in window)) return null;
-        try {
-          const handle = await (window as any).showSaveFilePicker({
-            suggestedName: fileMeta.name,
-          });
-          const writable = await handle.createWritable();
-          return {
-            write: (chunk: Uint8Array) => writable.write(chunk),
-            close: () => writable.close(),
-          };
-        } catch {
-          return null; // user cancelled or API blocked — fall back to in-memory
-        }
-      }
-    );
+      );
+    } finally {
+      transport.stopHeartbeat();
+      window.removeEventListener("beforeunload", onBeforeUnload);
+    }
+
+    const { meta, blob, totalBytes: receivedBytes } = result;
 
     setStepStatus($(".step-transfer"), "done");
     hide(progressContainer);

@@ -20,6 +20,7 @@ type Receiver struct {
 	frw          FrameReadWriter
 	idleTimeout  time.Duration
 	deadliner    DeadlineSetter
+	heartbeat    *Heartbeat
 	totalBytes   uint64
 	chunkCount   uint64
 	hash         hash.Hash
@@ -39,6 +40,11 @@ func (recv *Receiver) SetIdleTimeout(d DeadlineSetter, timeout time.Duration) {
 	recv.idleTimeout = timeout
 }
 
+// SetHeartbeat registers a heartbeat that will be touched on every received frame.
+func (recv *Receiver) SetHeartbeat(hb *Heartbeat) {
+	recv.heartbeat = hb
+}
+
 func (recv *Receiver) resetDeadline() {
 	if recv.deadliner != nil && recv.idleTimeout > 0 {
 		recv.deadliner.SetDeadline(time.Now().Add(recv.idleTimeout))
@@ -48,6 +54,12 @@ func (recv *Receiver) resetDeadline() {
 func (recv *Receiver) clearDeadline() {
 	if recv.deadliner != nil {
 		recv.deadliner.SetDeadline(time.Time{})
+	}
+}
+
+func (recv *Receiver) touchHeartbeat() {
+	if recv.heartbeat != nil {
+		recv.heartbeat.Touch()
 	}
 }
 
@@ -78,6 +90,7 @@ func (recv *Receiver) Receive(ctx context.Context, w io.Writer, onProgress func(
 	if err != nil {
 		return nil, recv.wrapCtxErr(ctx, fmt.Errorf("reading metadata: %w", err))
 	}
+	recv.touchHeartbeat()
 	if msgType != MsgMetadata {
 		return nil, fmt.Errorf("expected metadata (0x%02x), got 0x%02x", MsgMetadata, msgType)
 	}
@@ -111,8 +124,15 @@ func (recv *Receiver) Receive(ctx context.Context, w io.Writer, onProgress func(
 		if err != nil {
 			return nil, recv.wrapCtxErr(ctx, fmt.Errorf("reading frame: %w", err))
 		}
+		recv.touchHeartbeat()
 
 		switch msgType {
+		case MsgHeartbeat:
+			continue // silently discard; Touch() already called above
+
+		case MsgCancel:
+			return nil, fmt.Errorf("peer cancelled transfer")
+
 		case MsgData:
 			// Decompress if compression is enabled.
 			if recv.decompressor != nil {
@@ -178,8 +198,14 @@ func (recv *Receiver) Receive(ctx context.Context, w io.Writer, onProgress func(
 			}
 			// Wait for the sender's FinAck so we don't tear down the
 			// connection before it reads our Complete message.
-			recv.resetDeadline()
-			recv.frw.ReadFrame() // best-effort, ignore errors
+			// Skip heartbeats; accept any other frame as implicit ack.
+			for {
+				recv.resetDeadline()
+				ackType, _, ackErr := recv.frw.ReadFrame()
+				if ackErr != nil || ackType != MsgHeartbeat {
+					break
+				}
+			}
 			return &meta, nil
 
 		case MsgError:

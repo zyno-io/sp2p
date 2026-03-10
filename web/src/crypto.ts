@@ -263,6 +263,27 @@ export class EncryptedChannel {
     const seq = seqHi * 0x100000000 + seqLo;
     const ciphertext = payload.subarray(9);
 
+    // Cancel frames (0x09) may arrive with a sequence gap when the peer's
+    // pipeline reserved nonces for data frames that were never written.
+    // Decrypt using the frame's own seq and return without advancing readSeq.
+    // Must match MSG_CANCEL in transfer.ts; duplicated here to avoid circular imports.
+    const MSG_CANCEL = 0x09;
+    if (msgType === MSG_CANCEL && seq >= this.readSeq && seq < 0x100000000) {
+      const nonce = buildNonce(seq);
+      const aad = buildAAD(msgType, seq);
+      const plaintext = new Uint8Array(
+        await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv: nonce, additionalData: aad },
+          this.readKey,
+          ciphertext
+        )
+      );
+      // Advance past the gap so a stale readSeq can't accept a replay
+      // if any caller ever reads again after cancel (defensive hardening).
+      this.readSeq = seq + 1;
+      return { msgType, data: plaintext };
+    }
+
     if (seq !== this.readSeq) {
       throw new Error(
         `Sequence mismatch: got ${seq}, expected ${this.readSeq}`

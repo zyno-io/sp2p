@@ -12,12 +12,20 @@ import (
 
 // Message types for the transfer protocol.
 const (
-	MsgMetadata = 0x01
-	MsgData     = 0x02
-	MsgDone     = 0x04
-	MsgComplete = 0x05
-	MsgError    = 0x06
-	MsgFinAck   = 0x07
+	MsgMetadata  = 0x01
+	MsgData      = 0x02
+	MsgDone      = 0x04
+	MsgComplete  = 0x05
+	MsgError     = 0x06
+	MsgFinAck    = 0x07
+	MsgHeartbeat = 0x08
+	MsgCancel    = 0x09
+)
+
+// Cancel reason codes.
+const (
+	CancelUserAbort byte = 0x01 // User cancelled (Ctrl+C, tab close)
+	CancelError     byte = 0x02 // Internal error
 )
 
 const (
@@ -202,4 +210,12 @@ func WriteError(frw FrameReadWriter, message string) error {
 		return err
 	}
 	return frw.WriteFrame(MsgError, data)
+}
+
+func WriteCancel(frw FrameReadWriter, reason byte) error {
+	return frw.WriteFrame(MsgCancel, []byte{reason})
+}
+
+func WriteHeartbeat(frw FrameReadWriter) error {
+	return frw.WriteFrame(MsgHeartbeat, nil)
 }

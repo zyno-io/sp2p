@@ -4,7 +4,8 @@ package signal
 
 import "encoding/json"
 
-const ProtocolVersion = 1
+const ProtocolVersion = 2
+const MinProtocolVersion = 1
 
 // Message types exchanged over the signaling WebSocket.
 const (

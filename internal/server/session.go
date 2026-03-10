@@ -38,6 +38,7 @@ type Session struct {
 	ID               string
 	IP               string // client IP for rate limiting
 	SenderClientType string // "cli", "browser", or ""
+	SenderVersion    int    // protocol version from hello
 	CreatedAt        time.Time
 	LastSeen         time.Time
 	Sender           *websocket.Conn

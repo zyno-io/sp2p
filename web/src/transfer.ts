@@ -13,6 +13,13 @@ export const MSG_DATA = 0x02;
 export const MSG_DONE = 0x04;
 export const MSG_COMPLETE = 0x05;
 export const MSG_ERROR = 0x06;
+export const MSG_FINACK = 0x07;
+export const MSG_HEARTBEAT = 0x08;
+export const MSG_CANCEL = 0x09;
+
+// Cancel reason codes.
+export const CANCEL_USER_ABORT = 0x01;
+export const CANCEL_ERROR = 0x02;
 
 export const MAX_CHUNK_SIZE = 256 * 1024;
 export const MAX_FRAME_SIZE = 512 * 1024; // Must match Go's MaxFrameSize
@@ -73,6 +80,9 @@ export class DataChannelTransport {
 
     dc.onmessage = (event) => {
       if (this.fatalError) return; // stop accumulating after error
+      // Touch heartbeat on every inbound packet, not just when readFrame()
+      // is called, so senders (which don't read during transfer) stay alive.
+      this.lastRecvTime = Date.now();
       const data = new Uint8Array(event.data);
       // Append to buffer and try to parse frames.
       const combined = new Uint8Array(this.recvBuffer.length + data.length);
@@ -203,17 +213,30 @@ export class DataChannelTransport {
     });
   }
 
-  // Send an encrypted frame.
+  // Send an encrypted frame. Writes are serialized through a promise chain
+  // to prevent nonce reordering when heartbeat timer fires mid-await.
   async sendFrame(msgType: number, data: Uint8Array): Promise<void> {
-    const frame = await this.enc.encryptFrame(msgType, data);
-    await this.waitForBufferDrain();
-    this.dc.send(frame);
+    const p = this.writeQueue.then(async () => {
+      const frame = await this.enc.encryptFrame(msgType, data);
+      await this.waitForBufferDrain();
+      this.dc.send(frame);
+      // Successful write proves the connection is alive.
+      this.lastRecvTime = Date.now();
+    });
+    this.writeQueue = p.catch(() => {}); // prevent unhandled rejection on chain
+    return p;
   }
 
-  // Read and decrypt a frame.
+  // Read and decrypt a frame, skipping heartbeats and surfacing cancels.
   async readFrame(): Promise<{ msgType: number; data: Uint8Array }> {
-    const payload = await this.nextFrame();
-    return this.enc.decryptFrame(payload);
+    while (true) {
+      const payload = await this.nextFrame();
+      const frame = await this.enc.decryptFrame(payload);
+      this.touchHeartbeat();
+      if (frame.msgType === MSG_HEARTBEAT) continue;
+      if (frame.msgType === MSG_CANCEL) throw new Error("Peer cancelled transfer");
+      return frame;
+    }
   }
 
   // Send metadata.
@@ -243,6 +266,51 @@ export class DataChannelTransport {
   async sendError(message: string): Promise<void> {
     const json = new TextEncoder().encode(JSON.stringify({ message }));
     await this.sendFrame(MSG_ERROR, json);
+  }
+
+  // Send cancel frame (best-effort).
+  async sendCancel(reason: number = CANCEL_USER_ABORT): Promise<void> {
+    try {
+      await this.sendFrame(MSG_CANCEL, new Uint8Array([reason]));
+    } catch {
+      // DataChannel may already be closed.
+    }
+  }
+
+  // Send heartbeat frame.
+  async sendHeartbeat(): Promise<void> {
+    await this.sendFrame(MSG_HEARTBEAT, new Uint8Array(0));
+  }
+
+  private writeQueue: Promise<void> = Promise.resolve();
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastRecvTime = Date.now();
+
+  // Start sending periodic heartbeats and tracking peer liveness.
+  startHeartbeat(onTimeout: () => void, interval = 5000, timeout = 15000): void {
+    this.lastRecvTime = Date.now();
+    this.heartbeatTimer = setInterval(() => {
+      // Send heartbeat (best-effort).
+      this.sendHeartbeat().catch(() => {});
+      // Check peer liveness.
+      if (Date.now() - this.lastRecvTime > timeout) {
+        this.stopHeartbeat();
+        onTimeout();
+      }
+    }, interval);
+  }
+
+  // Stop heartbeat timer.
+  stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  // Touch the heartbeat tracker — call on every received frame.
+  touchHeartbeat(): void {
+    this.lastRecvTime = Date.now();
   }
 }
 
@@ -299,6 +367,8 @@ export async function sendFile(
     if (complete.sha256 !== sha256) {
       throw new Error("Integrity mismatch: SHA-256 does not match");
     }
+    // FinAck so the receiver knows we got Complete before tearing down.
+    try { await transport.sendFrame(MSG_FINACK, new Uint8Array(0)); } catch {}
   } else if (msgType === MSG_ERROR) {
     const err = JSON.parse(new TextDecoder().decode(data));
     throw new Error(`Receiver error: ${err.message}`);
@@ -375,6 +445,8 @@ export async function sendFiles(
     if (complete.sha256 !== sha256) {
       throw new Error("Integrity mismatch: SHA-256 does not match");
     }
+    // FinAck so the receiver knows we got Complete before tearing down.
+    try { await transport.sendFrame(MSG_FINACK, new Uint8Array(0)); } catch {}
   } else if (msgType === MSG_ERROR) {
     const err = JSON.parse(new TextDecoder().decode(data));
     throw new Error(`Receiver error: ${err.message}`);
@@ -452,8 +524,10 @@ export async function receiveFile(
         await transport.sendError("Integrity check failed: SHA-256 mismatch");
         throw new Error("Integrity check failed: SHA-256 mismatch");
       }
-      // Send complete.
+      // Send complete and wait for FinAck so we don't tear down
+      // the connection before the sender reads our Complete.
       await transport.sendComplete(totalBytes, chunkCount, recvSha256);
+      try { await transport.readFrame(); } catch {} // best-effort FinAck wait
       if (writer) {
         await writer.close();
         return { meta, blob: null, totalBytes };

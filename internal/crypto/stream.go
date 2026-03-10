@@ -213,7 +213,28 @@ func (s *EncryptedStream) ReadFrame() (byte, []byte, error) {
 	seq := binary.BigEndian.Uint64(payload[1:9])
 	ciphertext := payload[9:]
 
-	// Verify sequence order.
+	// Cancel frames may arrive with a sequence gap when the sender's
+	// parallel pipeline reserved nonces for data frames that were never
+	// written (e.g. Ctrl+C during transfer). Since cancel is a terminal
+	// signal, we decrypt it using the frame's own sequence number and
+	// skip the strict ordering check. The AEAD still authenticates the
+	// frame was produced by the legitimate peer.
+	if msgType == transfer.MsgCancel && seq >= s.readNonce && seq < 1<<32 {
+		var nonce [NonceSize]byte
+		buildNonce(nonce[:], seq)
+		var aad [10]byte
+		buildAAD(aad[:], msgType, seq)
+		plaintext, err := s.readAEAD.Open(nil, nonce[:], ciphertext, aad[:])
+		if err != nil {
+			return 0, nil, fmt.Errorf("data integrity check failed — connection may be compromised: %w", err)
+		}
+		// Advance past the gap so a stale readNonce can't accept a replay
+		// if any caller ever reads again after cancel (defensive hardening).
+		s.readNonce = seq + 1
+		return msgType, plaintext, nil
+	}
+
+	// Verify sequence order for all other frame types.
 	if seq != s.readNonce {
 		return 0, nil, fmt.Errorf("sequence mismatch: got %d, expected %d (possible replay/reorder)", seq, s.readNonce)
 	}

@@ -280,21 +280,22 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 		return err
 	}
 
-	// Monitor signaling connection — if the peer disconnects unexpectedly,
-	// close the P2P connection to unblock any in-progress Read/Write.
-	// A short grace period avoids racing with normal transfer completion
-	// (peer may close signaling right after sending the final ack).
+	// Close signaling — no longer needed after P2P + key confirmation.
+	h.OnVerbose("closing signaling connection (P2P established)")
+	sigClient.Close()
+
+	// Start heartbeat for peer liveness detection over P2P.
+	hb := transfer.StartHeartbeat()
+	defer hb.Stop()
+
+	// Monitor heartbeat timeout — close P2P to unblock transfer I/O.
 	transferDone := make(chan struct{})
+	defer close(transferDone)
 	go func() {
 		select {
-		case <-sigClient.Done():
-			select {
-			case <-transferDone:
-			case <-time.After(2 * time.Second):
-				p2pConn.Close()
-			}
+		case <-hb.Done():
+			p2pConn.Close()
 		case <-transferDone:
-		case <-ctx.Done():
 		}
 	}()
 
@@ -304,33 +305,32 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	h.OnPhaseChanged(PhaseTransferring)
 	sender := transfer.NewSender(encStream, meta)
 	sender.SetIdleTimeout(p2pConn, 2*time.Minute)
+	sender.SetHeartbeat(hb)
 	if cfg.CompressLevel > 0 {
 		if err := sender.SetCompression(cfg.CompressLevel); err != nil {
 			return fmt.Errorf("setting compression: %w", err)
 		}
 		h.OnVerbose(fmt.Sprintf("compression enabled (zstd, level %d)", cfg.CompressLevel))
 	}
-	if err := sender.Send(ctx, cfg.Reader, func(sent uint64) {
+	sendErr := sender.Send(ctx, cfg.Reader, func(sent uint64) {
+		hb.Touch() // successful writes prove the connection is alive
 		h.OnProgress(sent)
-	}); err != nil {
-		close(transferDone)
-		select {
-		case <-sigClient.Done():
-			return fmt.Errorf("peer disconnected")
-		default:
-		}
-		h.OnError(err.Error())
-		return err
-	}
-	close(transferDone)
-
-	totalBytes, _ := sender.Stats()
-
-	// Report completion (best-effort).
-	sigClient.Send(ctx, signal.TypeTransferComplete, signal.TransferComplete{
-		BytesTransferred: totalBytes,
 	})
 
+	// Send cancel if we errored out (best-effort). The cancel frame may
+	// have a sequence gap from reserved-but-unwritten pipeline nonces,
+	// but the receiver's ReadFrame handles this for MsgCancel specifically.
+	if sendErr != nil {
+		if ctx.Err() != nil {
+			transfer.WriteCancel(encStream, transfer.CancelUserAbort)
+		} else {
+			transfer.WriteCancel(encStream, transfer.CancelError)
+		}
+		h.OnError(sendErr.Error())
+		return sendErr
+	}
+
+	totalBytes, _ := sender.Stats()
 	duration := time.Since(startTime)
 	h.OnPhaseChanged(PhaseDone)
 	h.OnComplete(totalBytes, duration)

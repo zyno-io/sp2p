@@ -236,21 +236,22 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		return nil, err
 	}
 
-	// Monitor signaling connection — if the peer disconnects unexpectedly,
-	// close the P2P connection to unblock any in-progress Read/Write.
-	// A short grace period avoids racing with normal transfer completion
-	// (peer may close signaling right after sending the final ack).
+	// Close signaling — no longer needed after P2P + key confirmation.
+	h.OnVerbose("closing signaling connection (P2P established)")
+	sigClient.Close()
+
+	// Start heartbeat for peer liveness detection over P2P.
+	hb := transfer.StartHeartbeat()
+	defer hb.Stop()
+
+	// Monitor heartbeat timeout — close P2P to unblock transfer I/O.
 	transferDone := make(chan struct{})
+	defer close(transferDone)
 	go func() {
 		select {
-		case <-sigClient.Done():
-			select {
-			case <-transferDone:
-			case <-time.After(2 * time.Second):
-				p2pConn.Close()
-			}
+		case <-hb.Done():
+			p2pConn.Close()
 		case <-transferDone:
-		case <-ctx.Done():
 		}
 	}()
 
@@ -261,6 +262,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 
 	receiver := transfer.NewReceiver(encStream)
 	receiver.SetIdleTimeout(p2pConn, 2*time.Minute)
+	receiver.SetHeartbeat(hb)
 	receiver.OnMetadata = func(meta *transfer.Metadata) {
 		h.OnMetadata(meta)
 	}
@@ -311,20 +313,21 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	}
 
 	result := <-recvCh
-	close(transferDone)
+	// Send cancel if we errored out (best-effort).
 	if result.err != nil {
+		if ctx.Err() != nil {
+			transfer.WriteCancel(encStream, transfer.CancelUserAbort)
+		} else {
+			transfer.WriteCancel(encStream, transfer.CancelError)
+		}
 		if tmpPath != "" {
 			os.Remove(tmpPath)
-		}
-		select {
-		case <-sigClient.Done():
-			return nil, fmt.Errorf("peer disconnected")
-		default:
 		}
 		h.OnError(result.err.Error())
 		return nil, result.err
 	}
 	if copyErr != nil {
+		transfer.WriteCancel(encStream, transfer.CancelError)
 		if tmpPath != "" {
 			os.Remove(tmpPath)
 		}

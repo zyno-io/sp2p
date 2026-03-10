@@ -95,7 +95,7 @@ func (h *SignalHandler) handleSender(ctx context.Context, conn *websocket.Conn, 
 		sendError(ctx, conn, signal.ErrCodeInvalidMessage, "invalid hello payload")
 		return
 	}
-	if hello.Version != signal.ProtocolVersion {
+	if hello.Version < signal.MinProtocolVersion || hello.Version > signal.ProtocolVersion {
 		sendError(ctx, conn, signal.ErrCodeVersionMismatch, "unsupported protocol version")
 		return
 	}
@@ -112,6 +112,7 @@ func (h *SignalHandler) handleSender(ctx context.Context, conn *websocket.Conn, 
 		return
 	}
 	session.SenderClientType = hello.ClientType
+	session.SenderVersion = hello.Version
 	slog.Info("peer connected", "session", session.ID, "role", "sender", "clientType", hello.ClientType)
 	h.stats.RecordAttempt()
 
@@ -134,7 +135,7 @@ func (h *SignalHandler) handleReceiver(ctx context.Context, conn *websocket.Conn
 		sendError(ctx, conn, signal.ErrCodeInvalidMessage, "invalid join payload")
 		return
 	}
-	if join.Version != signal.ProtocolVersion {
+	if join.Version < signal.MinProtocolVersion || join.Version > signal.ProtocolVersion {
 		sendError(ctx, conn, signal.ErrCodeVersionMismatch, "unsupported protocol version")
 		return
 	}
@@ -146,6 +147,13 @@ func (h *SignalHandler) handleReceiver(ctx context.Context, conn *websocket.Conn
 		} else {
 			sendError(ctx, conn, signal.ErrCodeSessionNotFound, "transfer session not found")
 		}
+		return
+	}
+
+	// Reject version mismatch between sender and receiver — v1 and v2
+	// clients use incompatible transfer protocols and cannot interoperate.
+	if join.Version != session.SenderVersion {
+		sendError(ctx, conn, signal.ErrCodeVersionMismatch, "protocol version mismatch with sender")
 		return
 	}
 	slog.Info("peer connected", "session", session.ID, "role", "receiver", "clientType", join.ClientType)
