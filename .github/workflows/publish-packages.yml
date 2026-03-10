@@ -283,17 +283,19 @@ jobs:
             <metadata>
               <id>sp2p</id>
               <version>$version</version>
-              <title>sp2p</title>
-              <authors>Zyno-IO</authors>
+              <title>SP2P - Secure P2P File Transfer</title>
+              <authors>Zyno Consulting</authors>
               <owners>zyno-io</owners>
+              <iconUrl>https://raw.githubusercontent.com/zyno-io/sp2p/main/web/icon.png</iconUrl>
               <requireLicenseAcceptance>false</requireLicenseAcceptance>
               <licenseUrl>https://github.com/zyno-io/sp2p/blob/main/LICENSE</licenseUrl>
               <projectUrl>https://sp2p.io</projectUrl>
               <projectSourceUrl>https://github.com/zyno-io/sp2p</projectSourceUrl>
+              <packageSourceUrl>https://github.com/zyno-io/sp2p/tree/main/.github/workflows</packageSourceUrl>
               <bugTrackerUrl>https://github.com/zyno-io/sp2p/issues</bugTrackerUrl>
               <description>Secure peer-to-peer file transfer. End-to-end encrypted, file data flows directly between peers via WebRTC.</description>
               <summary>Secure peer-to-peer file transfer</summary>
-              <releaseNotes>$base</releaseNotes>
+              <releaseNotes>https://github.com/$($env:REPO)/releases/tag/$($env:TAG)</releaseNotes>
               <tags>file-transfer p2p webrtc cli security encryption</tags>
             </metadata>
           </package>
