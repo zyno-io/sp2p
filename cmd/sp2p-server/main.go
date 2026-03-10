@@ -40,6 +40,8 @@ func main() {
 	tlsKey := flag.String("tls-key", envOr("SP2P_TLS_KEY", ""), "TLS private key file (env: SP2P_TLS_KEY)")
 	acme := flag.Bool("acme", envBool("SP2P_ACME"), "enable ACME auto-certificates, domain derived from --base-url (env: SP2P_ACME)")
 	acmeEmail := flag.String("acme-email", envOr("SP2P_ACME_EMAIL", ""), "contact email for ACME (env: SP2P_ACME_EMAIL)")
+	maxSessions := flag.Int("max-sessions", envInt("SP2P_MAX_SESSIONS", 0), "global session cap, 0 = default 1000 (env: SP2P_MAX_SESSIONS)")
+	maxSessionsPerIP := flag.Int("max-sessions-per-ip", envInt("SP2P_MAX_SESSIONS_PER_IP", 0), "per-IP session cap, 0 = default 10 (env: SP2P_MAX_SESSIONS_PER_IP)")
 	configDir := flag.String("config-dir", envOr("SP2P_CONFIG_DIR", defaultConfigDir()), "directory for persistent data like ACME certs (env: SP2P_CONFIG_DIR)")
 	flag.Parse()
 
@@ -124,20 +126,22 @@ func main() {
 
 	webFS := sp2p.WebFS
 	srv, err := server.New(server.Config{
-		Addr:        *addr,
-		BaseURL:     *baseURL,
-		WebFS:       &webFS,
-		Version:     version,
-		BuildTime:   buildTime,
-		STUNServers: stunServers,
-		StaticTURN:  staticTURN,
-		TURNGen:     turnGen,
-		TrustProxy:  *trustProxy,
-		TLSCert:     *tlsCert,
-		TLSKey:      *tlsKey,
-		ACME:        *acme,
-		ACMEEmail:   *acmeEmail,
-		ConfigDir:   *configDir,
+		Addr:             *addr,
+		BaseURL:          *baseURL,
+		WebFS:            &webFS,
+		Version:          version,
+		BuildTime:        buildTime,
+		STUNServers:      stunServers,
+		StaticTURN:       staticTURN,
+		TURNGen:          turnGen,
+		MaxSessions:      *maxSessions,
+		MaxSessionsPerIP: *maxSessionsPerIP,
+		TrustProxy:       *trustProxy,
+		TLSCert:          *tlsCert,
+		TLSKey:           *tlsKey,
+		ACME:             *acme,
+		ACMEEmail:        *acmeEmail,
+		ConfigDir:        *configDir,
 	})
 	if err != nil {
 		slog.Error("server init failed", "err", err)
@@ -173,6 +177,15 @@ func defaultConfigDir() string {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return fallback
 }

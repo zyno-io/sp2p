@@ -382,7 +382,7 @@ func TestSignal_BidirectionalRelay(t *testing.T) {
 // ── SessionManager tests ────────────────────────────────────────────────────
 
 func TestSessionManager_CreateAndGet(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "127.0.0.1")
@@ -400,7 +400,7 @@ func TestSessionManager_CreateAndGet(t *testing.T) {
 }
 
 func TestSessionManager_JoinNonexistent(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	if _, err := sm.Join("nope", nil); err == nil {
@@ -434,7 +434,7 @@ func TestSessionManager_JoinFull(t *testing.T) {
 }
 
 func TestSessionManager_Remove(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "127.0.0.1")
@@ -449,7 +449,7 @@ func TestSessionManager_Remove(t *testing.T) {
 }
 
 func TestSessionManager_Touch(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "127.0.0.1")
@@ -468,7 +468,7 @@ func TestSessionManager_Touch(t *testing.T) {
 
 func TestSessionManager_IDAlphabet(t *testing.T) {
 	// Verify all generated IDs use only the expected alphabet.
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	for i := 0; i < 100; i++ {
@@ -485,7 +485,7 @@ func TestSessionManager_IDAlphabet(t *testing.T) {
 }
 
 func TestSessionManager_UniqueIDs(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	seen := make(map[string]bool)
@@ -502,11 +502,11 @@ func TestSessionManager_UniqueIDs(t *testing.T) {
 }
 
 func TestSessionManager_PerIPLimit(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	// Create sessions up to the per-IP limit.
-	for i := 0; i < maxSessionsPerIP; i++ {
+	for i := 0; i < DefaultMaxSessionsPerIP; i++ {
 		_, err := sm.Create(nil, "10.0.0.1")
 		if err != nil {
 			t.Fatalf("session %d should be allowed: %v", i, err)
@@ -527,11 +527,11 @@ func TestSessionManager_PerIPLimit(t *testing.T) {
 }
 
 func TestSessionManager_PerIPLimitReleasedOnRemove(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	var sessions []*Session
-	for i := 0; i < maxSessionsPerIP; i++ {
+	for i := 0; i < DefaultMaxSessionsPerIP; i++ {
 		s, err := sm.Create(nil, "10.0.0.1")
 		if err != nil {
 			t.Fatal(err)
@@ -554,11 +554,11 @@ func TestSessionManager_PerIPLimitReleasedOnRemove(t *testing.T) {
 }
 
 func TestSessionManager_GlobalLimit(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	// Fill up to global limit.
-	for i := 0; i < maxTotalSessions; i++ {
+	for i := 0; i < DefaultMaxTotalSessions; i++ {
 		_, err := sm.Create(nil, fmt.Sprintf("10.%d.%d.%d", i/(256*256), (i/256)%256, i%256))
 		if err != nil {
 			t.Fatalf("session %d should be allowed: %v", i, err)
@@ -937,7 +937,7 @@ func TestBootstrap_BinaryRedirectWithResolver(t *testing.T) {
 
 func TestSignalHandler_TrustProxyForSessionIP(t *testing.T) {
 	// Verify that NewSignalHandler accepts the trustProxy parameter.
-	sessions := NewSessionManager()
+	sessions := NewSessionManager(0, 0)
 	defer sessions.Stop()
 	stats := NewStatsTracker("")
 	defer stats.Stop()

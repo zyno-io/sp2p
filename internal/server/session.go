@@ -15,12 +15,12 @@ import (
 )
 
 const (
-	sessionIDLength  = 8
-	sessionMaxAge    = 1 * time.Hour
-	sessionIdleMax   = 5 * time.Minute
-	reapInterval     = 30 * time.Second
-	maxSessionsPerIP = 10   // max concurrent sessions per client IP
-	maxTotalSessions = 1000 // global session cap
+	sessionIDLength         = 8
+	sessionMaxAge           = 1 * time.Hour
+	sessionIdleMax          = 5 * time.Minute
+	reapInterval            = 30 * time.Second
+	DefaultMaxSessionsPerIP = 10   // max concurrent sessions per client IP
+	DefaultMaxTotalSessions = 1000 // global session cap
 )
 
 var (
@@ -90,19 +90,30 @@ func (s *Session) SetFileInfo(data string) {
 
 // SessionManager manages in-memory signaling sessions.
 type SessionManager struct {
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	ipCounts map[string]int // per-IP active session count
-	done     chan struct{}
-	stopOnce sync.Once
+	mu               sync.RWMutex
+	sessions         map[string]*Session
+	ipCounts         map[string]int // per-IP active session count
+	maxTotalSessions int
+	maxSessionsPerIP int
+	done             chan struct{}
+	stopOnce         sync.Once
 }
 
 // NewSessionManager creates a new session manager and starts the reaper.
-func NewSessionManager() *SessionManager {
+// Pass 0 for either limit to use the default.
+func NewSessionManager(maxTotal, maxPerIP int) *SessionManager {
+	if maxTotal <= 0 {
+		maxTotal = DefaultMaxTotalSessions
+	}
+	if maxPerIP <= 0 {
+		maxPerIP = DefaultMaxSessionsPerIP
+	}
 	sm := &SessionManager{
-		sessions: make(map[string]*Session),
-		ipCounts: make(map[string]int),
-		done:     make(chan struct{}),
+		sessions:         make(map[string]*Session),
+		ipCounts:         make(map[string]int),
+		maxTotalSessions: maxTotal,
+		maxSessionsPerIP: maxPerIP,
+		done:             make(chan struct{}),
 	}
 	go sm.reapLoop()
 	return sm
@@ -114,10 +125,10 @@ func (sm *SessionManager) Create(sender *websocket.Conn, ip string) (*Session, e
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	if len(sm.sessions) >= maxTotalSessions {
+	if len(sm.sessions) >= sm.maxTotalSessions {
 		return nil, ErrTooManySessions
 	}
-	if sm.ipCounts[ip] >= maxSessionsPerIP {
+	if sm.ipCounts[ip] >= sm.maxSessionsPerIP {
 		return nil, ErrTooManySessionsForIP
 	}
 

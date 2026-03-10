@@ -18,7 +18,7 @@ func dummyConn() *websocket.Conn {
 }
 
 func TestSession_CreateAndGetFields(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "10.0.0.1")
@@ -42,7 +42,7 @@ func TestSession_CreateAndGetFields(t *testing.T) {
 }
 
 func TestSession_JoinAndReceiver(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "10.0.0.1")
@@ -74,7 +74,7 @@ func TestSession_JoinAndReceiver(t *testing.T) {
 }
 
 func TestSession_JoinNonexistent(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	_, err := sm.Join("nonexistent", nil)
@@ -84,7 +84,7 @@ func TestSession_JoinNonexistent(t *testing.T) {
 }
 
 func TestSession_JoinTwice(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "10.0.0.1")
@@ -103,7 +103,7 @@ func TestSession_JoinTwice(t *testing.T) {
 }
 
 func TestSession_RemoveDecrementsIP(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "10.0.0.1")
@@ -117,9 +117,9 @@ func TestSession_RemoveDecrementsIP(t *testing.T) {
 		t.Fatal("Get should return nil after Remove")
 	}
 
-	// IP count should be decremented: creating maxSessionsPerIP sessions
+	// IP count should be decremented: creating DefaultMaxSessionsPerIP sessions
 	// for the same IP should succeed since the original was removed.
-	for i := 0; i < maxSessionsPerIP; i++ {
+	for i := 0; i < DefaultMaxSessionsPerIP; i++ {
 		if _, err := sm.Create(nil, "10.0.0.1"); err != nil {
 			t.Fatalf("Create after Remove (iter %d): unexpected error: %v", i, err)
 		}
@@ -127,11 +127,11 @@ func TestSession_RemoveDecrementsIP(t *testing.T) {
 }
 
 func TestSession_PerIPLimit(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	ip := "192.168.1.1"
-	for i := 0; i < maxSessionsPerIP; i++ {
+	for i := 0; i < DefaultMaxSessionsPerIP; i++ {
 		if _, err := sm.Create(nil, ip); err != nil {
 			t.Fatalf("Create %d: unexpected error: %v", i, err)
 		}
@@ -149,7 +149,7 @@ func TestSession_PerIPLimit(t *testing.T) {
 }
 
 func TestSession_FileInfo(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "10.0.0.1")
@@ -169,7 +169,7 @@ func TestSession_FileInfo(t *testing.T) {
 }
 
 func TestSession_TouchUpdatesLastSeen(t *testing.T) {
-	sm := NewSessionManager()
+	sm := NewSessionManager(0, 0)
 	defer sm.Stop()
 
 	s, err := sm.Create(nil, "10.0.0.1")

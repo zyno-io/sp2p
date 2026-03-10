@@ -26,6 +26,8 @@ type Config struct {
 	STUNServers []signal.ICEServer       // STUN servers to advertise to clients (optional)
 	StaticTURN  []signal.ICEServer       // static TURN servers with fixed credentials (optional)
 	TURNGen     *TURNCredentialGenerator // ephemeral TURN credential generator (optional, mutually exclusive with StaticTURN)
+	MaxSessions      int  // global session cap (0 = default 1000)
+	MaxSessionsPerIP int  // per-IP session cap (0 = default 10)
 	TrustProxy bool               // trust X-Forwarded-For for rate limiting (set when behind a reverse proxy)
 	TLSCert    string             // path to TLS certificate file (optional)
 	TLSKey     string             // path to TLS private key file (optional)
@@ -48,7 +50,7 @@ type Server struct {
 
 // New creates a new signaling server.
 func New(cfg Config) (*Server, error) {
-	sessions := NewSessionManager()
+	sessions := NewSessionManager(cfg.MaxSessions, cfg.MaxSessionsPerIP)
 
 	// Build the WebSocket URL from BaseURL.
 	wsURL := cfg.BaseURL
