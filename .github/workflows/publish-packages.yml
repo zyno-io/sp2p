@@ -294,6 +294,7 @@ jobs:
             git clone ssh://aur@aur.archlinux.org/sp2p-bin.git aur-repo
           cp PKGBUILD .SRCINFO LICENSE aur-repo/
           cd aur-repo
+          git config core.sshCommand "ssh -F /dev/null -i $SSH_DIR/aur -o IdentitiesOnly=yes -o UserKnownHostsFile=$SSH_DIR/known_hosts -o StrictHostKeyChecking=yes"
           git config user.name "Zyno Consulting"
           git config user.email "oss@zyno.io"
           git add PKGBUILD .SRCINFO LICENSE
