@@ -278,6 +278,7 @@ jobs:
           SSH_DIR="$(mktemp -d)"
           trap 'rm -rf "$SSH_DIR"' EXIT
           install -m 700 -d "$SSH_DIR"
+          umask 077
           printf '%s' "$AUR_SSH_PRIVATE_KEY" | tr -d '\r' > "$SSH_DIR/aur"
           if ! ssh-keygen -lf "$SSH_DIR/aur" >/dev/null 2>&1; then
             printf '%s' "$AUR_SSH_PRIVATE_KEY" | base64 -d > "$SSH_DIR/aur" 2>/dev/null || true
