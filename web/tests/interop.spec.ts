@@ -32,8 +32,9 @@ test("browser sender → browser receiver transfers a file", async ({
   const receiverPage = await receiverContext.newPage();
 
   try {
-    // Create test file content.
-    const fileContent = "Browser to browser test content — " + Date.now();
+    // Exercise a full protocol chunk, which may exceed the DataChannel's
+    // negotiated message limit after encryption and framing.
+    const fileContent = Buffer.alloc(256 * 1024, "B");
 
     // Sender: open send page and select file.
     await senderPage.goto("/");
@@ -157,7 +158,9 @@ test("browser sender → CLI receiver transfers a file", async ({
   wsUrl,
 }) => {
   const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-cli-"));
-  const fileContent = "Browser to CLI test — " + Date.now();
+  // A 256 KiB payload becomes larger once SP2P encrypts and frames it.
+  // This verifies that the CLI accepts a complete protocol wire frame.
+  const fileContent = Buffer.alloc(256 * 1024, "B");
 
   // Browser sender: open send page and select file.
   await page.goto("/");
@@ -208,11 +211,8 @@ test("browser sender → CLI receiver transfers a file", async ({
     expect(exitCode).toBe(0);
 
     // Verify received file.
-    const received = readFileSync(
-      join(tmpDir, "browser-to-cli.txt"),
-      "utf-8"
-    );
-    expect(received).toBe(fileContent);
+    const received = readFileSync(join(tmpDir, "browser-to-cli.txt"));
+    expect(received.equals(fileContent)).toBe(true);
   } finally {
     receiver.kill();
   }

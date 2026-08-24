@@ -4,6 +4,16 @@ All notable changes to SP2P are documented here.
 
 This project uses [Semantic Versioning](https://semver.org/). During early development (0.x), minor versions may contain breaking changes.
 
+## [0.3.0] - 2026-08-24
+
+### Fixed
+- Reliable large browser transfers by fragmenting encrypted WebRTC frames to the negotiated SCTP message size.
+- Ordered completion for parallel TCP transfers, preventing a completion signal from overtaking delayed data.
+
+### Changed
+- Updated Go and web dependencies, including Pion WebRTC, Playwright, esbuild, and TypeScript.
+- Updated the web build container to Node.js 24.
+
 ## [0.2.0] - 2026-03-10
 
 ### Added
@@ -49,6 +59,7 @@ Initial public release.
 - Homebrew, Scoop, AUR, Chocolatey, and WinGet packaging
 - Man pages for `sp2p` and `sp2p-server`
 
+[0.3.0]: https://github.com/zyno-io/sp2p/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/zyno-io/sp2p/compare/v0.1.1-server...v0.2.0
 [0.1.1-server]: https://github.com/zyno-io/sp2p/compare/v0.1.1-cli-windows...v0.1.1-server
 [0.1.1-cli-windows]: https://github.com/zyno-io/sp2p/compare/v0.1.0...v0.1.1-cli-windows

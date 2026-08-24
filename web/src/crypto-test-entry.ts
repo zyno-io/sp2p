@@ -14,6 +14,7 @@ import {
   decryptFileInfo,
 } from "./crypto";
 import { SHA256 } from "./sha256";
+import { DataChannelTransport, MSG_DATA } from "./transfer";
 
 (window as any).__cryptoTest = {
   base62Encode,
@@ -26,4 +27,6 @@ import { SHA256 } from "./sha256";
   encryptFileInfo,
   decryptFileInfo,
   SHA256,
+  DataChannelTransport,
+  MSG_DATA,
 };

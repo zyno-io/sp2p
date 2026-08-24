@@ -127,6 +127,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	var receiverPub []byte
 	var peerClientType string
 	var peerParallelTCP bool
+	var peerParallelTCPDoneBarrier bool
 	for receiverPub == nil {
 		select {
 		case env := <-sigClient.Incoming:
@@ -153,6 +154,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 				// peer's CryptoExchange message.
 				if peerClientType == signal.ClientTypeCLI && cfg.Parallel != 1 {
 					ce.ParallelTCP = true
+					ce.ParallelTCPDoneBarrier = true
 				}
 				if err := sigClient.Send(ctx, signal.TypeCrypto, ce); err != nil {
 					return fmt.Errorf("sending public key: %w", err)
@@ -164,6 +166,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 				}
 				receiverPub = ce.PublicKey
 				peerParallelTCP = ce.ParallelTCP
+				peerParallelTCPDoneBarrier = ce.ParallelTCPDoneBarrier
 			case signal.TypePeerLeft:
 				h.OnError("Receiver disconnected")
 				return fmt.Errorf("peer disconnected")
@@ -303,7 +306,10 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	var frw transfer.FrameReadWriter = encStream
 	var deadliner transfer.DeadlineSetter = p2pConn
 	var multiStream *transfer.MultiStream
-	canParallel := peerParallelTCP && estResult.TCPResult != nil && cfg.Parallel != 1
+	canParallel := peerParallelTCP && peerParallelTCPDoneBarrier && estResult.TCPResult != nil && cfg.Parallel != 1
+	if peerParallelTCP && !peerParallelTCPDoneBarrier && cfg.Parallel != 1 {
+		h.OnVerbose("peer does not support ordered parallel TCP completion — using single connection")
+	}
 	if canParallel {
 		h.OnVerbose("negotiating parallel TCP connections")
 		sharedSecret, ssErr := crypto.ComputeSharedSecret(kp.Private, receiverPub)

@@ -26,6 +26,18 @@ type mockFrame struct {
 	data    []byte
 }
 
+// gatedMockFrameRW blocks reads until gate is closed. It simulates a slower
+// secondary TCP stream while allowing the primary stream to continue.
+type gatedMockFrameRW struct {
+	*mockFrameRW
+	gate <-chan struct{}
+}
+
+func (m *gatedMockFrameRW) ReadFrame() (byte, []byte, error) {
+	<-m.gate
+	return m.mockFrameRW.ReadFrame()
+}
+
 func newMockFrameRWPair() (*mockFrameRW, *mockFrameRW) {
 	ch1 := make(chan mockFrame, 64)
 	ch2 := make(chan mockFrame, 64)
@@ -223,6 +235,86 @@ func TestMultiStreamControlAfterData(t *testing.T) {
 	}
 	if msgType != MsgDone {
 		t.Fatalf("expected MsgDone, got 0x%02x", msgType)
+	}
+}
+
+// TestMultiStreamDoneWaitsForSecondaryTail verifies that Done cannot overtake
+// a final data frame that is delayed on a secondary connection.
+func TestMultiStreamDoneWaitsForSecondaryTail(t *testing.T) {
+	senderPrimary, receiverPrimary := newMockFrameRWPair()
+	senderSecondary, receiverSecondary := newMockFrameRWPair()
+	secondaryGate := make(chan struct{})
+	gatedSecondary := &gatedMockFrameRW{
+		mockFrameRW: receiverSecondary,
+		gate:        secondaryGate,
+	}
+
+	msSender := NewMultiStream(
+		[]FrameReadWriter{senderPrimary, senderSecondary},
+		[]MultiStreamConn{senderPrimary, senderSecondary},
+	)
+	msReceiver := NewMultiStream(
+		[]FrameReadWriter{receiverPrimary, gatedSecondary},
+		[]MultiStreamConn{receiverPrimary, gatedSecondary},
+	)
+	defer msSender.Close()
+	defer msReceiver.Close()
+
+	if err := msSender.WriteFrame(MsgData, []byte("first")); err != nil {
+		t.Fatalf("WriteFrame first data: %v", err)
+	}
+	if err := msSender.WriteFrame(MsgData, []byte("second")); err != nil {
+		t.Fatalf("WriteFrame second data: %v", err)
+	}
+	if err := msSender.WriteFrame(MsgDone, []byte(`{"chunkCount":2}`)); err != nil {
+		t.Fatalf("WriteFrame done: %v", err)
+	}
+
+	msgType, data, err := msReceiver.ReadFrame()
+	if err != nil {
+		t.Fatalf("ReadFrame first data: %v", err)
+	}
+	if msgType != MsgData || string(data) != "first" {
+		t.Fatalf("expected first data frame, got 0x%02x %q", msgType, data)
+	}
+
+	resultCh := make(chan mockFrame, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		msgType, data, err := msReceiver.ReadFrame()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		resultCh <- mockFrame{msgType: msgType, data: data}
+	}()
+
+	select {
+	case result := <-resultCh:
+		t.Fatalf("Done overtook secondary data: got 0x%02x %q", result.msgType, result.data)
+	case err := <-errCh:
+		t.Fatalf("ReadFrame before secondary data: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(secondaryGate)
+	select {
+	case result := <-resultCh:
+		if result.msgType != MsgData || string(result.data) != "second" {
+			t.Fatalf("expected delayed data frame, got 0x%02x %q", result.msgType, result.data)
+		}
+	case err := <-errCh:
+		t.Fatalf("ReadFrame delayed data: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("ReadFrame did not return delayed data")
+	}
+
+	msgType, _, err = msReceiver.ReadFrame()
+	if err != nil {
+		t.Fatalf("ReadFrame done: %v", err)
+	}
+	if msgType != MsgDone {
+		t.Fatalf("expected Done after all data, got 0x%02x", msgType)
 	}
 }
 

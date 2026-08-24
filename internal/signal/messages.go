@@ -9,16 +9,16 @@ const MinProtocolVersion = 1
 
 // Message types exchanged over the signaling WebSocket.
 const (
-	TypeHello      = "hello"
-	TypeWelcome    = "welcome"
-	TypeJoin       = "join"
-	TypePeerJoined = "peer-joined"
-	TypeOffer      = "offer"
-	TypeAnswer     = "answer"
-	TypeCandidate  = "candidate"
-	TypeCrypto     = "crypto"
-	TypeDirect     = "direct" // Direct connection endpoint exchange
-	TypeConnected  = "connected"
+	TypeHello            = "hello"
+	TypeWelcome          = "welcome"
+	TypeJoin             = "join"
+	TypePeerJoined       = "peer-joined"
+	TypeOffer            = "offer"
+	TypeAnswer           = "answer"
+	TypeCandidate        = "candidate"
+	TypeCrypto           = "crypto"
+	TypeDirect           = "direct" // Direct connection endpoint exchange
+	TypeConnected        = "connected"
 	TypeRetry            = "retry"             // Signals willingness to retry P2P with swapped roles
 	TypeRelayRetry       = "relay-retry"       // Signals willingness to retry with TURN relay
 	TypeRelayDenied      = "relay-denied"      // Signals that the peer denied TURN relay
@@ -102,9 +102,10 @@ type Candidate struct {
 
 // CryptoExchange carries a DH public key for the key exchange.
 type CryptoExchange struct {
-	PublicKey   []byte `json:"publicKey"`              // 32-byte X25519 public key
-	PreferTCP   bool   `json:"preferTCP,omitempty"`    // hint: prefer TCP for large transfers
-	ParallelTCP bool   `json:"parallelTCP,omitempty"`  // capability: supports parallel TCP connections
+	PublicKey              []byte `json:"publicKey"`                        // 32-byte X25519 public key
+	PreferTCP              bool   `json:"preferTCP,omitempty"`              // hint: prefer TCP for large transfers
+	ParallelTCP            bool   `json:"parallelTCP,omitempty"`            // capability: supports parallel TCP connections
+	ParallelTCPDoneBarrier bool   `json:"parallelTCPDoneBarrier,omitempty"` // supports ordered Done delivery across parallel TCP streams
 }
 
 // DirectEndpoint carries direct connection addresses for TCP.

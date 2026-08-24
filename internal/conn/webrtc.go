@@ -13,12 +13,16 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/zyno-io/sp2p/internal/signal"
+	"github.com/zyno-io/sp2p/internal/transfer"
 )
 
 const (
-	dataChannelLabel  = "sp2p"
-	dataChannelBuffer = 64 * 1024 * 1024  // 64 MB buffered amount
-	sctpMaxMsgSize    = 256 * 1024        // 256 KiB SCTP message size — browser DataChannels typically cap at 256 KiB
+	dataChannelLabel     = "sp2p"
+	dataChannelBuffer    = 64 * 1024 * 1024 // 64 MB buffered amount
+	dataChannelWriteSize = 256 * 1024       // browser-compatible outbound DataChannel message size
+	// Advertise that we accept a complete encrypted protocol frame. The frame
+	// parser still rejects anything larger, so this does not loosen its bound.
+	sctpMaxMsgSize = transfer.MaxFrameSize + transfer.FrameHeaderSize
 )
 
 // WebRTCConfig holds configuration for WebRTC connections.
@@ -430,8 +434,9 @@ func (c *WebRTCConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	// WebRTC DataChannel has a max message size. Send in chunks.
-	const maxMsg = sctpMaxMsgSize
+	// Keep outgoing DataChannel messages browser-compatible. The transfer
+	// protocol's length prefix allows receivers to reassemble these chunks.
+	const maxMsg = dataChannelWriteSize
 	total := 0
 	for len(p) > 0 {
 		chunk := p

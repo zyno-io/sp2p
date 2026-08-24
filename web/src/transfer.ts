@@ -28,6 +28,9 @@ const MAX_RECEIVE_SIZE = 4 * 1024 * 1024 * 1024; // 4 GB
 
 const SEND_HIGH_WATER = 8 * 1024 * 1024; // 8 MB buffered amount threshold
 const MAX_QUEUE_BYTES = 8 * 1024 * 1024; // 8 MB max queued receive data
+// Used only when the browser does not expose RTCSctpTransport.maxMessageSize.
+// This conservative value is supported by all WebRTC DataChannel implementations.
+const FALLBACK_MAX_DATA_CHANNEL_MESSAGE_SIZE = 16 * 1024;
 
 export interface Metadata {
   name: string;
@@ -62,10 +65,25 @@ export class DataChannelTransport {
   private recvReject: ((err: Error) => void) | null = null;
   private recvBuffer: Uint8Array = new Uint8Array(0);
   private fatalError: Error | null = null;
+  private maxDataChannelMessageSize: number;
 
-  constructor(dc: RTCDataChannel, enc: EncryptedChannel, initialData?: Uint8Array[]) {
+  constructor(
+    dc: RTCDataChannel,
+    enc: EncryptedChannel,
+    initialData?: Uint8Array[],
+    maxDataChannelMessageSize?: number
+  ) {
     this.dc = dc;
     this.enc = enc;
+    // A maxMessageSize of zero means the peer did not advertise a limit.
+    // Frames are independently capped by MAX_FRAME_SIZE, so send those whole.
+    if (maxDataChannelMessageSize === 0) {
+      this.maxDataChannelMessageSize = MAX_FRAME_SIZE + 4;
+    } else if (maxDataChannelMessageSize && maxDataChannelMessageSize > 0) {
+      this.maxDataChannelMessageSize = maxDataChannelMessageSize;
+    } else {
+      this.maxDataChannelMessageSize = FALLBACK_MAX_DATA_CHANNEL_MESSAGE_SIZE;
+    }
 
     // Replay any data buffered during key confirmation.
     if (initialData) {
@@ -218,8 +236,15 @@ export class DataChannelTransport {
   async sendFrame(msgType: number, data: Uint8Array): Promise<void> {
     const p = this.writeQueue.then(async () => {
       const frame = await this.enc.encryptFrame(msgType, data);
-      await this.waitForBufferDrain();
-      this.dc.send(frame);
+      // The encrypted wire frame is larger than its plaintext payload and can
+      // therefore exceed SCTP's negotiated max-message-size. DataChannel
+      // messages are transport chunks; the length-prefixed frame is reassembled
+      // by tryParseFrames() on the receiving side.
+      for (let offset = 0; offset < frame.length; offset += this.maxDataChannelMessageSize) {
+        const end = Math.min(offset + this.maxDataChannelMessageSize, frame.length);
+        await this.waitForBufferDrain();
+        this.dc.send(frame.subarray(offset, end));
+      }
       // Successful write proves the connection is alive.
       this.lastRecvTime = Date.now();
     });

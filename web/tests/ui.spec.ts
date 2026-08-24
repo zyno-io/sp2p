@@ -52,15 +52,13 @@ test.describe("Send page", () => {
       buffer: Buffer.from("hello world"),
     });
 
-    // Wait for code to appear (server connection + welcome).
-    await expect(page.locator(".code-text")).toBeVisible({ timeout: 10_000 });
-    const code = await page.locator(".code-text").textContent();
-    expect(code).toMatch(/^[23456789a-hj-np-z]{8}#/);
-
-    // URL should also be shown.
-    await expect(page.locator(".url-text")).toBeVisible();
-    const url = await page.locator(".url-text").textContent();
+    // Wait for the share URL to appear after server registration.
+    const shareURL = page.locator(".share-url");
+    await expect(shareURL).toBeVisible({ timeout: 10_000 });
+    const url = await shareURL.textContent();
+    expect(url).not.toBeNull();
     expect(url).toContain("/r#");
+    expect(url).toMatch(/\/r#[23456789a-hj-np-z]{8}-.+$/);
   });
 });
 
@@ -79,9 +77,9 @@ test.describe("Receive page", () => {
   });
 
   test("shows expected step labels", async ({ page }) => {
-    // Block app.js so the static HTML step labels stay visible
-    // (otherwise JS replaces them with an error before we can check).
-    await page.route("**/app.js", (route) => route.abort());
+    // Block the hashed JavaScript bundle so the static HTML step labels stay
+    // visible (otherwise JS replaces them with an error before we can check).
+    await page.route("**/*.js", (route) => route.abort());
     await page.goto("/r#fakecode#seed");
     await expect(page.locator(".step-connect")).toContainText("Connecting");
     await expect(page.locator(".step-join")).toContainText("Joining");
@@ -98,14 +96,30 @@ test.describe("Health and static assets", () => {
     expect(await resp.text()).toBe("ok");
   });
 
-  test("app.js is served", async ({ request }) => {
-    const resp = await request.get("/app.js");
-    expect(resp.status()).toBe(200);
+  test("built JavaScript asset is served", async ({ request }) => {
+    const indexResponse = await request.get("/", {
+      headers: { Accept: "text/html" },
+    });
+    expect(indexResponse.status()).toBe(200);
+    const html = await indexResponse.text();
+    const scriptMatch = html.match(/<script src="([^"?]+\.js)"><\/script>/);
+    expect(scriptMatch).not.toBeNull();
+
+    const assetResponse = await request.get(`/${scriptMatch![1]}`);
+    expect(assetResponse.status()).toBe(200);
   });
 
-  test("style.css is served", async ({ request }) => {
-    const resp = await request.get("/style.css");
-    expect(resp.status()).toBe(200);
+  test("built stylesheet asset is served", async ({ request }) => {
+    const indexResponse = await request.get("/", {
+      headers: { Accept: "text/html" },
+    });
+    expect(indexResponse.status()).toBe(200);
+    const html = await indexResponse.text();
+    const stylesheetMatch = html.match(/<link rel="stylesheet" href="([^"?]+\.css)">/);
+    expect(stylesheetMatch).not.toBeNull();
+
+    const assetResponse = await request.get(`/${stylesheetMatch![1]}`);
+    expect(assetResponse.status()).toBe(200);
   });
 
   test("unknown path returns 404", async ({ request }) => {

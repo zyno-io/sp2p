@@ -89,8 +89,9 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	// seeing PeerJoined with clientType), so browser receivers will never
 	// enter parallel negotiation.
 	if err := sigClient.Send(ctx, signal.TypeCrypto, signal.CryptoExchange{
-		PublicKey:   kp.Public,
-		ParallelTCP: cfg.Parallel != 1,
+		PublicKey:              kp.Public,
+		ParallelTCP:            cfg.Parallel != 1,
+		ParallelTCPDoneBarrier: cfg.Parallel != 1,
 	}); err != nil {
 		return nil, fmt.Errorf("sending public key: %w", err)
 	}

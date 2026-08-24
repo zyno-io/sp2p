@@ -463,7 +463,12 @@ async function initSend(): Promise<void> {
         keys.senderToReceiver,
         keys.receiverToSender
       );
-      const transport = new DataChannelTransport(dc, enc, extraBuffered);
+      const transport = new DataChannelTransport(
+        dc,
+        enc,
+        extraBuffered,
+        pc.sctp?.maxMessageSize
+      );
 
       // Close signaling — no longer needed after P2P + key confirmation.
       log("closing signaling connection (P2P established)");
@@ -754,7 +759,12 @@ async function initReceive(): Promise<void> {
       keys.receiverToSender,
       keys.senderToReceiver
     );
-    const transport = new DataChannelTransport(dc, enc, extraBuffered);
+    const transport = new DataChannelTransport(
+      dc,
+      enc,
+      extraBuffered,
+      pc.sctp?.maxMessageSize
+    );
 
     // Close signaling — no longer needed after P2P + key confirmation.
     log("closing signaling connection (P2P established)");

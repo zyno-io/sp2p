@@ -5,6 +5,7 @@ package transfer
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -45,9 +46,9 @@ type MultiStream struct {
 	n       int
 
 	// Write side
-	globalSeq atomic.Uint64           // global data frame counter
-	writeMu   sync.Mutex              // protects seqMap
-	seqMap    map[uint64]seqMapping   // global seq → (stream, local nonce)
+	globalSeq atomic.Uint64         // global data frame counter
+	writeMu   sync.Mutex            // protects seqMap
+	seqMap    map[uint64]seqMapping // global seq → (stream, local nonce)
 
 	// Read side
 	reassembly *reassembler
@@ -56,15 +57,16 @@ type MultiStream struct {
 	readErr    atomic.Pointer[error]
 
 	// Control frames from stream 0
-	controlCh      chan controlFrame
-	pendingControl *controlFrame // dequeued but yielded to data; delivered next call
+	controlCh       chan controlFrame
+	pendingControls []controlFrame // queued controls, delivered after any required data barrier
 
 	closeOnce sync.Once
 }
 
 type controlFrame struct {
-	msgType byte
-	data    []byte
+	msgType     byte
+	data        []byte
+	dataBarrier uint64 // data frames that must be reassembled before delivery
 }
 
 // NewMultiStream creates a MultiStream from the given encrypted streams
@@ -126,23 +128,23 @@ func (ms *MultiStream) WriteFrame(msgType byte, data []byte) error {
 // ReadFrame returns frames in order. Control frames are delivered as-is.
 // Data frames are reassembled in global sequence order, with the global
 // sequence prefix stripped. Data frames are always prioritized over control
-// frames to ensure ordering within the data stream.
+// frames to ensure ordering within the data stream. A Done frame is withheld
+// until every preceding data frame has been reassembled, so it cannot overtake
+// a slower secondary TCP stream.
 func (ms *MultiStream) ReadFrame() (byte, []byte, error) {
 	// Always drain buffered data and pending controls before surfacing errors,
 	// so callers see MsgDone/MsgComplete even if a secondary stream errored.
 	if data, ok := ms.reassembly.tryDeliver(); ok {
 		return MsgData, data, nil
 	}
-	if ms.pendingControl != nil {
-		cf := *ms.pendingControl
-		ms.pendingControl = nil
+	if cf, ok := ms.popReadyControl(); ok {
 		return cf.msgType, cf.data, nil
 	}
 	if ep := ms.readErr.Load(); ep != nil {
-		select {
-		case cf := <-ms.controlCh:
-			return cf.msgType, cf.data, nil
-		default:
+		if ms.dequeueControl() {
+			if cf, ok := ms.popReadyControl(); ok {
+				return cf.msgType, cf.data, nil
+			}
 		}
 		return 0, nil, *ep
 	}
@@ -153,10 +155,8 @@ func (ms *MultiStream) ReadFrame() (byte, []byte, error) {
 			return MsgData, data, nil
 		}
 
-		// If we have a pending control frame and no data is ready, deliver it.
-		if ms.pendingControl != nil {
-			cf := *ms.pendingControl
-			ms.pendingControl = nil
+		// If a pending control has passed its data barrier, deliver it.
+		if cf, ok := ms.popReadyControl(); ok {
 			return cf.msgType, cf.data, nil
 		}
 
@@ -171,31 +171,29 @@ func (ms *MultiStream) ReadFrame() (byte, []byte, error) {
 				if data, ok := ms.reassembly.tryDeliver(); ok {
 					return MsgData, data, nil
 				}
+				if ms.dequeueControl() {
+					if cf, ok := ms.popReadyControl(); ok {
+						return cf.msgType, cf.data, nil
+					}
+				}
 				return 0, nil, *ep
 			}
 			continue
 		case cf := <-ms.controlCh:
-			// Control frame arrived. Check if any data frames became
-			// ready in the meantime — deliver data first.
-			if data, ok := ms.reassembly.tryDeliver(); ok {
-				ms.pendingControl = &cf
-				return MsgData, data, nil
-			}
-			return cf.msgType, cf.data, nil
+			ms.enqueueControl(cf)
+			continue
 		case <-ms.readDone:
 			// All readers exited. Drain remaining data frames.
 			if data, ok := ms.reassembly.tryDeliver(); ok {
 				return MsgData, data, nil
 			}
-			if ms.pendingControl != nil {
-				cf := *ms.pendingControl
-				ms.pendingControl = nil
+			if cf, ok := ms.popReadyControl(); ok {
 				return cf.msgType, cf.data, nil
 			}
-			select {
-			case cf := <-ms.controlCh:
-				return cf.msgType, cf.data, nil
-			default:
+			if ms.dequeueControl() {
+				if cf, ok := ms.popReadyControl(); ok {
+					return cf.msgType, cf.data, nil
+				}
 			}
 			if ep := ms.readErr.Load(); ep != nil {
 				return 0, nil, *ep
@@ -203,6 +201,41 @@ func (ms *MultiStream) ReadFrame() (byte, []byte, error) {
 			return 0, nil, fmt.Errorf("all streams closed")
 		}
 	}
+}
+
+// enqueueControl queues a control frame. Cancels are terminal and bypass any
+// pending Done barrier so callers can stop promptly when the peer aborts.
+func (ms *MultiStream) enqueueControl(cf controlFrame) {
+	if cf.msgType == MsgCancel {
+		ms.pendingControls = []controlFrame{cf}
+		return
+	}
+	ms.pendingControls = append(ms.pendingControls, cf)
+}
+
+// dequeueControl queues one immediately available control frame.
+func (ms *MultiStream) dequeueControl() bool {
+	select {
+	case cf := <-ms.controlCh:
+		ms.enqueueControl(cf)
+		return true
+	default:
+		return false
+	}
+}
+
+// popReadyControl returns the next queued control only after all data frames
+// required by its barrier have been delivered to the caller.
+func (ms *MultiStream) popReadyControl() (controlFrame, bool) {
+	if len(ms.pendingControls) == 0 {
+		return controlFrame{}, false
+	}
+	cf := ms.pendingControls[0]
+	if cf.msgType != MsgCancel && ms.reassembly.deliveredCount() < cf.dataBarrier {
+		return controlFrame{}, false
+	}
+	ms.pendingControls = ms.pendingControls[1:]
+	return cf, true
 }
 
 // PrepareFrame implements FramePreparer for MultiStream.
@@ -424,8 +457,9 @@ func (ms *MultiStream) readLoop(ctx context.Context, streamIdx int) {
 		if msgType != MsgData {
 			// Control frame from any stream (should only come from stream 0,
 			// but handle gracefully).
+			cf := controlFrameFor(msgType, data)
 			select {
-			case ms.controlCh <- controlFrame{msgType: msgType, data: data}:
+			case ms.controlCh <- cf:
 			case <-ctx.Done():
 				return
 			}
@@ -449,6 +483,26 @@ func (ms *MultiStream) readLoop(ctx context.Context, streamIdx int) {
 			return
 		}
 	}
+}
+
+// controlFrameFor attaches a reassembly barrier to Done. Done already carries
+// the sender's data chunk count, which is identical to the next global data
+// sequence number after the final chunk. Parsing it here lets a patched
+// receiver safely interoperate with an older parallel sender that did not
+// send an explicit transport barrier.
+func controlFrameFor(msgType byte, data []byte) controlFrame {
+	cf := controlFrame{msgType: msgType, data: data}
+	if msgType != MsgDone {
+		return cf
+	}
+
+	var done struct {
+		ChunkCount uint64 `json:"chunkCount"`
+	}
+	if err := json.Unmarshal(data, &done); err == nil {
+		cf.dataBarrier = done.ChunkCount
+	}
+	return cf
 }
 
 // reassembler buffers out-of-order data frames and delivers them in
@@ -526,6 +580,14 @@ func (r *reassembler) tryDeliver() ([]byte, bool) {
 	default:
 	}
 	return data, true
+}
+
+// deliveredCount returns the number of consecutive data frames already
+// delivered by tryDeliver.
+func (r *reassembler) deliveredCount() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nextSeq
 }
 
 // abort marks the reassembler as failed and signals any waiting readers.

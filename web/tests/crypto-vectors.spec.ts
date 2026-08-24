@@ -310,6 +310,83 @@ test("AES-GCM encrypted frames match Go", async ({ page }) => {
   expect(result).toBe("ok");
 });
 
+test("DataChannel transport fragments encrypted frames at the negotiated limit", async ({ page }) => {
+  await page.goto("/");
+  await loadCryptoBundle(page);
+
+  const result = await page.evaluate(async () => {
+    const { DataChannelTransport, EncryptedChannel, MSG_DATA } =
+      (window as any).__cryptoTest;
+    const sentMessages: Uint8Array[] = [];
+
+    const receiverDC: any = {
+      bufferedAmount: 0,
+      bufferedAmountLowThreshold: 0,
+      addEventListener() {},
+      removeEventListener() {},
+      send() {},
+    };
+    const senderDC: any = {
+      bufferedAmount: 0,
+      bufferedAmountLowThreshold: 0,
+      addEventListener() {},
+      removeEventListener() {},
+      send(data: Uint8Array) {
+        const message = Uint8Array.from(data);
+        sentMessages.push(message);
+        receiverDC.onmessage?.({ data: message.buffer });
+      },
+    };
+
+    const keyMaterial = crypto.getRandomValues(new Uint8Array(32));
+    const key = await crypto.subtle.importKey(
+      "raw",
+      keyMaterial,
+      "AES-GCM",
+      false,
+      ["encrypt", "decrypt"]
+    );
+    const maxMessageSize = 64 * 1024;
+    const sender = new DataChannelTransport(
+      senderDC,
+      new EncryptedChannel(key, key),
+      undefined,
+      maxMessageSize
+    );
+    const receiver = new DataChannelTransport(
+      receiverDC,
+      new EncryptedChannel(key, key),
+      undefined,
+      maxMessageSize
+    );
+    const payload = new Uint8Array(256 * 1024).fill(0x5a);
+
+    await sender.sendData(payload);
+    const received = await receiver.readFrame();
+
+    if (sentMessages.length !== 5) {
+      return `sent ${sentMessages.length} messages, want 5`;
+    }
+    if (sentMessages.some((message) => message.length > maxMessageSize)) {
+      return "sent a message larger than the negotiated limit";
+    }
+    if (received.msgType !== MSG_DATA) {
+      return `received type ${received.msgType}, want ${MSG_DATA}`;
+    }
+    if (received.data.length !== payload.length) {
+      return `received ${received.data.length} bytes, want ${payload.length}`;
+    }
+    for (let i = 0; i < payload.length; i++) {
+      if (received.data[i] !== payload[i]) {
+        return `payload differs at byte ${i}`;
+      }
+    }
+    return "ok";
+  });
+
+  expect(result).toBe("ok");
+});
+
 // ── SHA-256 ───────────────────────────────────────────────────────────────────
 
 test("incremental SHA-256 matches NIST vectors", async ({ page }) => {
