@@ -207,7 +207,7 @@ jobs:
           files-folder-filter: exe
           files-folder-recurse: true
           file-digest: SHA256
-          timestamp-rfc3161: https://timestamp.acs.microsoft.com
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
       - name: Verify, repack, and checksum Windows release artifacts
