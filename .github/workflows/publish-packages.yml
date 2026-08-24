@@ -278,7 +278,14 @@ jobs:
           SSH_DIR="$(mktemp -d)"
           trap 'rm -rf "$SSH_DIR"' EXIT
           install -m 700 -d "$SSH_DIR"
-          printf '%s' "$AUR_SSH_PRIVATE_KEY" > "$SSH_DIR/aur"
+          printf '%s' "$AUR_SSH_PRIVATE_KEY" | tr -d '\r' > "$SSH_DIR/aur"
+          if ! ssh-keygen -lf "$SSH_DIR/aur" >/dev/null 2>&1; then
+            printf '%s' "$AUR_SSH_PRIVATE_KEY" | base64 -d > "$SSH_DIR/aur" 2>/dev/null || true
+          fi
+          if ! ssh-keygen -lf "$SSH_DIR/aur" >/dev/null 2>&1; then
+            printf '%b' "$AUR_SSH_PRIVATE_KEY" | tr -d '\r' > "$SSH_DIR/aur"
+          fi
+          ssh-keygen -lf "$SSH_DIR/aur" >/dev/null
           chmod 600 "$SSH_DIR/aur"
           ssh-keyscan -H aur.archlinux.org > "$SSH_DIR/known_hosts"
 
@@ -370,7 +377,21 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     steps:
+      - name: Check for an existing WinGet pull request
+        id: existing-pr
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          PR_URL=$(gh api 'repos/microsoft/winget-pkgs/pulls?state=open&per_page=100' --jq \
+            '.[] | select(.head.repo.full_name == "zyno-io/winget-pkgs") | select(.head.ref | startswith("zyno-io.sp2p-" + env.VERSION + "-")) | .html_url' | head -n 1)
+          if [ -n "$PR_URL" ]; then
+            echo "WinGet submission already exists: $PR_URL"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Accept Winget fork invitation
+        if: steps.existing-pr.outputs.exists != 'true'
         env:
           GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
@@ -381,6 +402,7 @@ jobs:
           fi
 
       - uses: vedantmgoyal9/winget-releaser@v2
+        if: steps.existing-pr.outputs.exists != 'true'
         with:
           identifier: zyno-io.sp2p
           version: ${{ inputs.version }}
