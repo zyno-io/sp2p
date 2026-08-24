@@ -96,12 +96,6 @@ jobs:
             | tar xz -C /tmp
           sudo mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/
 
-      - name: Install codesigner
-        if: steps.parse.outputs.has_windows == 'true'
-        run: |
-          curl -fsSL -o /tmp/codesigner https://cdn.s24.dev/apps/codesigner/CodeSigner-linux-x64
-          chmod +x /tmp/codesigner
-
       - name: Set up Apple signing credentials
         if: steps.parse.outputs.has_darwin == 'true'
         env:
@@ -119,15 +113,6 @@ jobs:
             /tmp/apple-api-key.p8 \
             -o /tmp/app-store-connect-key.json
           rm /tmp/api-key-raw.json /tmp/apple-api-key.p8
-
-      - uses: docker/setup-buildx-action@v3
-        if: steps.parse.outputs.has_server == 'true'
-      - uses: docker/login-action@v3
-        if: steps.parse.outputs.has_server == 'true'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up APK signing key
         if: steps.parse.outputs.has_cli == 'true' && steps.parse.outputs.has_linux == 'true'
@@ -164,39 +149,137 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD_PATH: /tmp/apple-cert-password
         run: ./scripts/sign-macos.sh
 
-      - name: Sign Windows binaries
-        if: steps.parse.outputs.has_windows == 'true'
-        env:
-          CODESIGNER_PATH: /tmp/codesigner
-          CODESIGNER_AUTH: ${{ secrets.CODESIGNER_AUTH }}
-          CODESIGNER_PSK: ${{ secrets.CODESIGNER_PSK }}
-          CODESIGNER_URL: ${{ secrets.CODESIGNER_URL }}
-        run: ./scripts/sign-windows.sh
-
-      - name: Build Docker image
-        if: steps.parse.outputs.has_server == 'true'
-        run: |
-          VERSION="${{ steps.parse.outputs.clean_version }}"
-          mkdir -p docker-stage/linux/amd64 docker-stage/linux/arm64
-          cp dist/sp2p-server_linux_amd64_v1/sp2p-server docker-stage/linux/amd64/
-          cp dist/sp2p-server_linux_arm64_v8.0/sp2p-server docker-stage/linux/arm64/
-          docker buildx build \
-            --platform linux/amd64,linux/arm64 \
-            -t ghcr.io/zyno-io/sp2p-server:${VERSION} \
-            -t ghcr.io/zyno-io/sp2p-server:latest \
-            -f Dockerfile.goreleaser \
-            docker-stage
-
       - name: Notarize macOS binaries
         if: steps.parse.outputs.has_darwin == 'true'
         env:
           APP_STORE_CONNECT_API_KEY_PATH: /tmp/app-store-connect-key.json
         run: ./scripts/notarize-macos.sh
 
-      - name: Push Docker image
-        if: steps.parse.outputs.has_server == 'true'
+      - name: Upload release artifacts for Windows signing
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-before-windows-signing
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  sign-windows:
+    needs: release
+    runs-on: windows-latest
+    environment: release
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-before-windows-signing
+          path: dist
+
+      - name: Extract Windows release archives
+        if: needs.release.outputs.has_windows == 'true'
+        shell: pwsh
         run: |
-          VERSION="${{ steps.parse.outputs.clean_version }}"
+          $signingRoot = Join-Path $env:GITHUB_WORKSPACE "windows-signing"
+          New-Item -ItemType Directory -Force -Path $signingRoot | Out-Null
+          $archives = Get-ChildItem -Path dist -Filter "*windows*.zip" -File
+          if ($archives.Count -eq 0) {
+            throw "No Windows release archives found."
+          }
+          foreach ($archive in $archives) {
+            $destination = Join-Path $signingRoot $archive.BaseName
+            Expand-Archive -Path $archive.FullName -DestinationPath $destination -Force
+          }
+
+      # This uses the same Azure Artifact Signing account and service principal
+      # as zynormm-agent's Windows GitLab CI job. Configure these release
+      # environment secrets before tagging: AZURE_TENANT_ID, AZURE_CLIENT_ID,
+      # and AZURE_CLIENT_SECRET.
+      - name: Sign Windows binaries with Azure Artifact Signing
+        if: needs.release.outputs.has_windows == 'true'
+        uses: Azure/artifact-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: Signal24
+          certificate-profile-name: zc-distribution
+          files-folder: ${{ github.workspace }}\windows-signing
+          files-folder-filter: exe
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: https://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify, repack, and checksum Windows release artifacts
+        if: needs.release.outputs.has_windows == 'true'
+        shell: pwsh
+        run: |
+          $signingRoot = Join-Path $env:GITHUB_WORKSPACE "windows-signing"
+          $signedBinaries = Get-ChildItem -Path $signingRoot -Filter "*.exe" -File -Recurse
+          if ($signedBinaries.Count -eq 0) {
+            throw "No Windows binaries were available for verification."
+          }
+          foreach ($binary in $signedBinaries) {
+            $signature = Get-AuthenticodeSignature -FilePath $binary.FullName
+            if ($signature.Status -ne "Valid") {
+              throw "Signature verification failed for $($binary.Name): $($signature.Status)"
+            }
+          }
+
+          $archives = Get-ChildItem -Path dist -Filter "*windows*.zip" -File
+          foreach ($archive in $archives) {
+            $source = Join-Path $signingRoot $archive.BaseName
+            Remove-Item -Path $archive.FullName -Force
+            Compress-Archive -Path (Join-Path $source "*") -DestinationPath $archive.FullName -CompressionLevel Optimal
+          }
+          Remove-Item -Path $signingRoot -Recurse -Force
+
+          $releaseFiles = Get-ChildItem -Path dist -File | Where-Object {
+            $_.Name -match '\.(tar\.gz|zip|deb|rpm|apk)$'
+          }
+          $checksums = foreach ($file in $releaseFiles) {
+            $hash = Get-FileHash -Path $file.FullName -Algorithm SHA256
+            "$($hash.Hash.ToLowerInvariant())  ./$($file.Name)"
+          }
+          Set-Content -Path dist/checksums.txt -Value $checksums -Encoding ascii
+
+      - name: Upload signed release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist-signed
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish-release:
+    needs: [release, sign-windows]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download signed release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dist-signed
+          path: dist
+
+      - uses: docker/setup-buildx-action@v3
+        if: needs.release.outputs.has_server == 'true'
+      - uses: docker/login-action@v3
+        if: needs.release.outputs.has_server == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: needs.release.outputs.has_server == 'true'
+        run: |
+          VERSION="${{ needs.release.outputs.clean_version }}"
+          mkdir -p docker-stage/linux/amd64 docker-stage/linux/arm64
+          cp dist/sp2p-server_linux_amd64_v1/sp2p-server docker-stage/linux/amd64/
+          cp dist/sp2p-server_linux_arm64_v8.0/sp2p-server docker-stage/linux/arm64/
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
@@ -208,8 +291,8 @@ jobs:
       - name: Determine release title
         id: title
         run: |
-          SCOPE="${{ steps.parse.outputs.scope }}"
-          CLEAN_TAG="${{ steps.parse.outputs.clean_tag }}"
+          SCOPE="${{ needs.release.outputs.scope }}"
+          CLEAN_TAG="${{ needs.release.outputs.clean_tag }}"
           case "$SCOPE" in
             all)          TITLE="$CLEAN_TAG" ;;
             server)       TITLE="$CLEAN_TAG (Server Only)" ;;
@@ -237,7 +320,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Deploy to server
-        if: steps.parse.outputs.has_server == 'true'
+        if: needs.release.outputs.has_server == 'true'
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
@@ -246,7 +329,7 @@ jobs:
           ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'cd /opt/sp2p && docker compose pull && docker compose up -d'
 
   publish:
-    needs: release
+    needs: [release, publish-release]
     uses: ./.github/workflows/publish-packages.yml
     with:
       tag: ${{ github.ref_name }}
