@@ -280,6 +280,8 @@ jobs:
           mkdir -p docker-stage/linux/amd64 docker-stage/linux/arm64
           cp dist/sp2p-server_linux_amd64_v1/sp2p-server docker-stage/linux/amd64/
           cp dist/sp2p-server_linux_arm64_v8.0/sp2p-server docker-stage/linux/arm64/
+          # GitHub artifact downloads do not preserve executable modes.
+          chmod +x docker-stage/linux/amd64/sp2p-server docker-stage/linux/arm64/sp2p-server
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
             --push \
@@ -312,10 +314,15 @@ jobs:
             exit 1
           fi
           # shellcheck disable=SC2086
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ steps.title.outputs.title }}" \
-            --generate-notes \
-            $ASSETS
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release upload "${{ github.ref_name }}" --clobber $ASSETS
+            gh release edit "${{ github.ref_name }}" --title "${{ steps.title.outputs.title }}"
+          else
+            gh release create "${{ github.ref_name }}" \
+              --title "${{ steps.title.outputs.title }}" \
+              --generate-notes \
+              $ASSETS
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
