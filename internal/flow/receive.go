@@ -42,7 +42,9 @@ type ReceiveResult struct {
 // Receive runs the complete receive orchestration.
 func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult, error) {
 	// Parse transfer code.
-	h.OnVerbose(fmt.Sprintf("parsing transfer code: %s", cfg.Code))
+	// The transfer code is a secret capability. Never include it in verbose
+	// output, which JSON-mode automation may persist or forward elsewhere.
+	h.OnVerbose("parsing transfer code")
 	sessionID, seedEncoded, err := crypto.ParseCode(cfg.Code)
 	if err != nil {
 		h.OnError("Invalid transfer code — check that you copied it correctly")
@@ -227,7 +229,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.
 		connCfg.Transport = conn.TransportWebRTC
 		connCfg.TCPPreferWait = 0
-		estResult, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
+		estResult, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerLeftCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
 	}
 	if err != nil {
 		return nil, err

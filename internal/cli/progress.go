@@ -57,29 +57,29 @@ const (
 
 // Progress displays real-time transfer progress in the terminal.
 type Progress struct {
-	out          io.Writer
-	mu           sync.Mutex
-	phase        Phase
-	methods      []conn.MethodStatus
+	out             io.Writer
+	mu              sync.Mutex
+	phase           Phase
+	methods         []conn.MethodStatus
 	connectedVia    string // connection method that won the race
 	parallelStreams int    // number of parallel TCP streams (0 = not parallel)
-	fileName     string
-	fileSize     uint64
-	fileCount    int
-	bytes        uint64
-	startTime    time.Time
-	ticker       *time.Ticker
-	done         chan struct{}
-	spinIdx      int
-	isSend       bool
-	verbose      bool
-	paused       bool
-	errMsg       string
-	showQR       bool
-	qrURL        string
-	shareCode    string // stored so render() can include share info
-	shareBaseURL string
-	lastLines    int // number of lines in last ephemeral render
+	fileName        string
+	fileSize        uint64
+	fileCount       int
+	bytes           uint64
+	startTime       time.Time
+	ticker          *time.Ticker
+	done            chan struct{}
+	spinIdx         int
+	isSend          bool
+	verbose         bool
+	paused          bool
+	errMsg          string
+	showQR          bool
+	qrURL           string
+	shareCode       string // stored so render() can include share info
+	shareBaseURL    string
+	lastLines       int // number of lines in last ephemeral render
 }
 
 // NewProgress creates a new progress display.
@@ -260,6 +260,10 @@ func (p *Progress) Stop() {
 func (p *Progress) ShowCode(code, baseURL string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Keep the agent handoff prompt in the terminal scrollback. The share block
+	// below is intentionally ephemeral while the sender waits for a receiver.
+	p.clearEphemeral()
+	fmt.Fprintf(p.out, "\n  %s\n\n", agentPrompt(code, baseURL))
 	p.shareCode = code
 	p.shareBaseURL = baseURL
 	p.qrURL = baseURL + "/r#" + code

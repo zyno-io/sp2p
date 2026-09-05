@@ -1,42 +1,10 @@
 name: Publish Packages
 
 on:
-  workflow_call:
-    inputs:
-      tag:
-        required: true
-        type: string
-      version:
-        required: true
-        type: string
-      publish_homebrew:
-        required: false
-        type: boolean
-        default: true
-      publish_scoop:
-        required: false
-        type: boolean
-        default: true
-      publish_aur:
-        required: false
-        type: boolean
-        default: true
-      publish_chocolatey:
-        required: false
-        type: boolean
-        default: true
-      publish_winget:
-        required: false
-        type: boolean
-        default: true
   workflow_dispatch:
     inputs:
       tag:
         description: Release tag to publish
-        required: true
-        type: string
-      version:
-        description: Release version without the v prefix
         required: true
         type: string
       publish_homebrew:
@@ -89,15 +57,34 @@ env:
   REPO: zyno-io/sp2p
 
 jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Validate release tag and derive package version
+        id: version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag must match ^v\\d+\\.\\d+\\.\\d+$ (got '$TAG')"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
   homebrew:
+    needs: validate-release
     if: inputs.publish_homebrew
     runs-on: ubuntu-latest
     environment: release
     steps:
       - name: Update Homebrew tap
         env:
-          TAG: ${{ inputs.tag }}
-          VERSION: ${{ inputs.version }}
+          TAG: ${{ needs.validate-release.outputs.tag }}
+          VERSION: ${{ needs.validate-release.outputs.version }}
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -157,14 +144,15 @@ jobs:
           git push
 
   scoop:
+    needs: validate-release
     if: inputs.publish_scoop
     runs-on: ubuntu-latest
     environment: release
     steps:
       - name: Update Scoop bucket
         env:
-          TAG: ${{ inputs.tag }}
-          VERSION: ${{ inputs.version }}
+          TAG: ${{ needs.validate-release.outputs.tag }}
+          VERSION: ${{ needs.validate-release.outputs.version }}
           BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -220,6 +208,7 @@ jobs:
           git push
 
   aur:
+    needs: validate-release
     if: inputs.publish_aur
     runs-on: ubuntu-latest
     environment: release
@@ -230,8 +219,8 @@ jobs:
 
       - name: Publish to AUR
         env:
-          TAG: ${{ inputs.tag }}
-          VERSION: ${{ inputs.version }}
+          TAG: ${{ needs.validate-release.outputs.tag }}
+          VERSION: ${{ needs.validate-release.outputs.version }}
           AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -303,14 +292,15 @@ jobs:
           git push
 
   chocolatey:
+    needs: validate-release
     if: inputs.publish_chocolatey
     runs-on: windows-latest
     environment: release
     steps:
       - name: Create and push Chocolatey package
         env:
-          TAG: ${{ inputs.tag }}
-          VERSION: ${{ inputs.version }}
+          TAG: ${{ needs.validate-release.outputs.tag }}
+          VERSION: ${{ needs.validate-release.outputs.version }}
           CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: pwsh
@@ -375,6 +365,7 @@ jobs:
           }
 
   winget:
+    needs: validate-release
     if: inputs.publish_winget
     runs-on: ubuntu-latest
     environment: release
@@ -383,7 +374,7 @@ jobs:
         id: existing-pr
         env:
           GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.validate-release.outputs.version }}
         run: |
           PR_URL=$(gh api 'repos/microsoft/winget-pkgs/pulls?state=open&per_page=100' --jq \
             '.[] | select(.head.repo.full_name == "zyno-io/winget-pkgs") | select(.head.ref | startswith("zyno-io.sp2p-" + env.VERSION + "-")) | .html_url' | head -n 1)
@@ -407,9 +398,9 @@ jobs:
         if: steps.existing-pr.outputs.exists != 'true'
         with:
           identifier: zyno-io.sp2p
-          version: ${{ inputs.version }}
+          version: ${{ needs.validate-release.outputs.version }}
           installers-regex: 'sp2p_windows_(amd64|arm64)\.zip$'
-          release-tag: ${{ inputs.tag }}
+          release-tag: ${{ needs.validate-release.outputs.tag }}
           token: ${{ secrets.WINGET_TOKEN }}
 
   # snap:

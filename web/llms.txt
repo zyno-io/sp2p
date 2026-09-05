@@ -1,0 +1,15 @@
+# SP2P
+
+> SP2P is an open-source, end-to-end encrypted peer-to-peer file-transfer service. Agents can use its CLI to send files, receive files, and track transfer state through JSON Lines events.
+
+Use the agent guide for the complete command contract. A transfer code is a secret capability: it lets its holder join the transfer and must not be placed in public logs or shared beyond the intended recipient.
+
+## Agent integration
+
+- [SP2P agent guide](/llm): Commands, JSON event schema, relay consent, status snapshots, and security guidance for sending or receiving a file with an agent.
+- [Full agent guide](/llms-full.txt): The same complete guide in a conventional full-context location.
+
+## Project resources
+
+- [SP2P repository](https://github.com/zyno-io/sp2p): Source code, releases, issue tracker, and complete README.
+- [CLI manual](https://github.com/zyno-io/sp2p/blob/main/man/sp2p.1): Human-readable command reference.

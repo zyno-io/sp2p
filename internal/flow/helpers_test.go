@@ -3,15 +3,127 @@
 package flow
 
 import (
+	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
 	"github.com/zyno-io/sp2p/internal/conn"
 	"github.com/zyno-io/sp2p/internal/signal"
+	"github.com/zyno-io/sp2p/internal/transfer"
 )
+
+type relayPromptTestHandler struct {
+	promptStarted  chan struct{}
+	promptCanceled chan struct{}
+	errors         chan string
+}
+
+func (h *relayPromptTestHandler) OnPhaseChanged(Phase)                 {}
+func (h *relayPromptTestHandler) OnTransferCode(string, string)        {}
+func (h *relayPromptTestHandler) OnConnectionStatus(conn.MethodStatus) {}
+func (h *relayPromptTestHandler) OnConnectionMethodsReset()            {}
+func (h *relayPromptTestHandler) OnMetadata(*transfer.Metadata)        {}
+func (h *relayPromptTestHandler) OnProgress(uint64)                    {}
+func (h *relayPromptTestHandler) OnVerifyCode(string)                  {}
+func (h *relayPromptTestHandler) OnComplete(uint64, time.Duration)     {}
+func (h *relayPromptTestHandler) OnUpdateAvailable(string, string)     {}
+func (h *relayPromptTestHandler) OnParallelStreams(int)                {}
+func (h *relayPromptTestHandler) OnVerbose(string)                     {}
+func (h *relayPromptTestHandler) PromptRelay() bool                    { return false }
+func (h *relayPromptTestHandler) OnError(message string)               { h.errors <- message }
+func (h *relayPromptTestHandler) PromptRelayContext(ctx context.Context) bool {
+	close(h.promptStarted)
+	<-ctx.Done()
+	close(h.promptCanceled)
+	return false
+}
+
+func TestRetryWithRelayCancelsMachinePromptWhenSignalingConnectionCloses(t *testing.T) {
+	handler := &relayPromptTestHandler{
+		promptStarted:  make(chan struct{}),
+		promptCanceled: make(chan struct{}),
+		errors:         make(chan string, 1),
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serverConn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Errorf("accept WebSocket: %v", err)
+			return
+		}
+		defer serverConn.Close(websocket.StatusNormalClosure, "disconnect")
+
+		_, data, err := serverConn.Read(r.Context())
+		if err != nil {
+			t.Errorf("read relay retry: %v", err)
+			return
+		}
+		var request signal.Envelope
+		if err := json.Unmarshal(data, &request); err != nil {
+			t.Errorf("decode relay retry: %v", err)
+			return
+		}
+		if request.Type != signal.TypeRelayRetry {
+			t.Errorf("request type = %q, want %q", request.Type, signal.TypeRelayRetry)
+			return
+		}
+
+		envelope, err := signal.NewEnvelope(signal.TypeTURNCredentials, signal.TURNCredentials{
+			ICEServers: []signal.ICEServer{{URLs: []string{"turn:relay.example.com:3478"}}},
+		})
+		if err != nil {
+			t.Errorf("create TURN credentials: %v", err)
+			return
+		}
+		payload, err := json.Marshal(envelope)
+		if err != nil {
+			t.Errorf("encode TURN credentials: %v", err)
+			return
+		}
+		if err := serverConn.Write(r.Context(), websocket.MessageText, payload); err != nil {
+			t.Errorf("send TURN credentials: %v", err)
+			return
+		}
+		select {
+		case <-handler.promptStarted:
+		case <-time.After(2 * time.Second):
+			t.Error("relay prompt did not start")
+		}
+	}))
+	defer server.Close()
+
+	serverURL := strings.Replace(server.URL, "http://", "ws://", 1)
+	client, err := signal.Connect(context.Background(), serverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	_, err = retryWithRelay(context.Background(), client, make(chan *signal.Envelope), make(chan *signal.Envelope), make(chan *signal.Envelope), make(chan struct{}), false, handler, conn.ConnectConfig{})
+	if err == nil || !strings.Contains(err.Error(), "signaling connection lost") {
+		t.Fatalf("retryWithRelay error = %v, want signaling connection loss", err)
+	}
+	select {
+	case <-handler.promptCanceled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay prompt was not canceled after signaling connection loss")
+	}
+	select {
+	case message := <-handler.errors:
+		if message != "Signaling server disconnected" {
+			t.Fatalf("error message = %q", message)
+		}
+	default:
+		t.Fatal("expected signaling-disconnect error")
+	}
+}
 
 // ── iceServersToConn ─────────────────────────────────────────────────────────
 

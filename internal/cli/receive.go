@@ -21,10 +21,15 @@ type ReceiveConfig struct {
 	ClientVersion string // Client version for update check
 	Transport     string // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
 	Parallel      int    // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	Output        OutputConfig
 }
 
 // Receive performs the receive flow.
 func Receive(ctx context.Context, cfg ReceiveConfig) error {
+	if cfg.Output.isMachine() {
+		return receiveMachine(ctx, cfg)
+	}
+
 	progress := NewProgress(os.Stderr, false, cfg.Verbose)
 	progress.StartTicker()
 	defer progress.Stop()
@@ -56,5 +61,32 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 		}
 	}
 
+	return nil
+}
+
+func receiveMachine(ctx context.Context, cfg ReceiveConfig) error {
+	reporter := newMachineReporter(ctx, cfg.Output, "receive", cfg.Verbose)
+	flowCfg := flow.ReceiveConfig{
+		ServerURL:     cfg.ServerURL,
+		Code:          cfg.Code,
+		OutputDir:     cfg.OutputDir,
+		RelayOK:       cfg.RelayOK,
+		ClientVersion: cfg.ClientVersion,
+		Transport:     cfg.Transport,
+		Parallel:      cfg.Parallel,
+	}
+	if cfg.Stdout {
+		flowCfg.Writer = os.Stdout
+	}
+
+	result, err := flow.Receive(ctx, flowCfg, reporter)
+	savedPath := ""
+	if result != nil {
+		savedPath = result.SavedPath
+	}
+	reporter.finish(err, savedPath)
+	if err != nil {
+		return reportedMachineError(err)
+	}
 	return nil
 }

@@ -24,10 +24,15 @@ type SendConfig struct {
 	CompressLevel int      // zstd compression level (0=disabled, 1-9)
 	Transport     string   // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
 	Parallel      int      // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	Output        OutputConfig
 }
 
 // Send performs the send flow.
 func Send(ctx context.Context, cfg SendConfig) error {
+	if cfg.Output.isMachine() {
+		return sendMachine(ctx, cfg)
+	}
+
 	progress := NewProgress(os.Stderr, true, cfg.Verbose)
 	progress.SetPhase(PhasePreparing)
 	progress.StartTicker()
@@ -57,6 +62,35 @@ func Send(ctx context.Context, cfg SendConfig) error {
 		Transport:     cfg.Transport,
 		Parallel:      cfg.Parallel,
 	}, handler)
+}
+
+func sendMachine(ctx context.Context, cfg SendConfig) error {
+	reporter := newMachineReporter(ctx, cfg.Output, "send", cfg.Verbose)
+	reporter.OnPhaseChanged(flow.Phase("preparing"))
+
+	meta, reader, cleanup, err := flow.PrepareInput(cfg.Paths, cfg.Name)
+	if err != nil {
+		reporter.finish(err, "")
+		return reportedMachineError(err)
+	}
+	defer cleanup()
+
+	err = flow.Send(ctx, flow.SendConfig{
+		ServerURL:     cfg.ServerURL,
+		BaseURL:       cfg.BaseURL,
+		Meta:          meta,
+		Reader:        reader,
+		RelayOK:       cfg.RelayOK,
+		ClientVersion: cfg.ClientVersion,
+		CompressLevel: cfg.CompressLevel,
+		Transport:     cfg.Transport,
+		Parallel:      cfg.Parallel,
+	}, reporter)
+	reporter.finish(err, "")
+	if err != nil {
+		return reportedMachineError(err)
+	}
+	return nil
 }
 
 // promptRelay asks the user whether to allow TURN relay.

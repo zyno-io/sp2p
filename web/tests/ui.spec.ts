@@ -18,6 +18,15 @@ test.describe("Send page", () => {
     await expect(page.locator(".file-input")).toBeHidden();
   });
 
+  test("offers a copyable AI-agent handoff prompt", async ({ page }) => {
+    await page.goto("/");
+    const agentGuide = new URL("/llm", page.url()).href;
+    await expect(page.locator(".agent-section")).toContainText(
+      `Please send [file] using ${agentGuide}`
+    );
+    await expect(page.locator('.agent-section a[href="/llm"]')).toBeVisible();
+  });
+
   test("steps are initially hidden", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".steps")).toBeHidden();
@@ -59,6 +68,10 @@ test.describe("Send page", () => {
     expect(url).not.toBeNull();
     expect(url).toContain("/r#");
     expect(url).toMatch(/\/r#[23456789a-hj-np-z]{8}-.+$/);
+
+    const agentPrompt = page.locator(".share-agent");
+    await expect(agentPrompt).toContainText("AI Agent: Please receive file session");
+    await expect(agentPrompt).toContainText(new URL("/llm", page.url()).href);
   });
 });
 
@@ -136,5 +149,16 @@ test.describe("Health and static assets", () => {
     expect(ct).toContain("text/plain");
     const body = await resp.text();
     expect(body).toContain("#!/bin/sh");
+  });
+
+  test("serves agent documentation as Markdown", async ({ request }) => {
+    for (const path of ["/llm", "/llm.md", "/llms.txt", "/llms-full.txt", "/agents.md"]) {
+      const response = await request.get(path);
+      expect(response.status(), path).toBe(200);
+      expect(response.headers()["content-type"] || "").toContain("text/markdown");
+      const body = await response.text();
+      expect(body).toContain("SP2P");
+      expect(body).not.toContain("{{SP2P_SERVER_URL}}");
+    }
   });
 });

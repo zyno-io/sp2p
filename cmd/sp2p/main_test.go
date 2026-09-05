@@ -3,7 +3,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -78,6 +83,9 @@ func TestReorderArgs(t *testing.T) {
 	fs.Int("compress", 3, "")
 	fs.Bool("allow-relay", false, "")
 	fs.Bool("v", false, "")
+	fs.String("format", "human", "")
+	fs.String("event-output", "stdout", "")
+	fs.String("status-file", "", "")
 
 	tests := []struct {
 		name string
@@ -138,5 +146,121 @@ func TestReorderArgs(t *testing.T) {
 				t.Errorf("reorderArgs(%v) = %q, want %q", tt.args, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRequestedMachineOutput(t *testing.T) {
+	tests := []struct {
+		name            string
+		args            []string
+		wantMachine     bool
+		wantEventOutput string
+	}{
+		{"default", []string{"report.pdf"}, false, "stdout"},
+		{"equals syntax", []string{"-format=json", "report.pdf"}, true, "stdout"},
+		{"separate value and stderr", []string{"report.pdf", "--format", "json", "--event-output", "stderr"}, true, "stderr"},
+		{"positional named format is ignored", []string{"format", "json"}, false, "stdout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			machine, eventOutput := requestedMachineOutput(tt.args)
+			if machine != tt.wantMachine || eventOutput != tt.wantEventOutput {
+				t.Fatalf("requestedMachineOutput(%v) = (%v, %q), want (%v, %q)", tt.args, machine, eventOutput, tt.wantMachine, tt.wantEventOutput)
+			}
+		})
+	}
+}
+
+func TestJSONHelpWritesHumanHelpToStderr(t *testing.T) {
+	if os.Getenv("SP2P_HELP_SUBPROCESS") == "1" {
+		os.Args = []string{"sp2p", "send", "-format", "json", "--help"}
+		main()
+		return
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestJSONHelpWritesHumanHelpToStderr$")
+	command.Env = append(os.Environ(), "SP2P_HELP_SUBPROCESS=1")
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		t.Fatalf("JSON help subprocess: %v\nstderr: %s", err, stderr.String())
+	}
+	if strings.Contains(stdout.String(), `"schema_version"`) {
+		t.Fatalf("JSON help wrote a machine event to stdout: %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Usage: sp2p send") || !strings.Contains(stderr.String(), "-format") {
+		t.Fatalf("JSON help did not write flag help to stderr: %s", stderr.String())
+	}
+}
+
+func TestHumanHelpIsPrintedOnce(t *testing.T) {
+	if os.Getenv("SP2P_HUMAN_HELP_SUBPROCESS") == "1" {
+		os.Args = []string{"sp2p", os.Getenv("SP2P_HELP_COMMAND"), "--help"}
+		main()
+		return
+	}
+
+	for _, commandName := range []string{"send", "receive"} {
+		t.Run(commandName, func(t *testing.T) {
+			command := exec.Command(os.Args[0], "-test.run=^TestHumanHelpIsPrintedOnce$")
+			command.Env = append(os.Environ(), "SP2P_HUMAN_HELP_SUBPROCESS=1", "SP2P_HELP_COMMAND="+commandName)
+			var stderr bytes.Buffer
+			command.Stderr = &stderr
+			if err := command.Run(); err != nil {
+				t.Fatalf("human help subprocess: %v\nstderr: %s", err, stderr.String())
+			}
+			if count := strings.Count(stderr.String(), "Usage: sp2p "+commandName); count != 1 {
+				t.Fatalf("usage count = %d, want 1\nstderr: %s", count, stderr.String())
+			}
+		})
+	}
+}
+
+func TestJSONValidationFailureWritesStatusSnapshot(t *testing.T) {
+	if os.Getenv("SP2P_STATUS_FAILURE_SUBPROCESS") == "1" {
+		os.Args = []string{
+			"sp2p", "send", "-format", "json", "-status-file", os.Getenv("SP2P_STATUS_FILE"),
+		}
+		main()
+		return
+	}
+
+	statusFile := filepath.Join(t.TempDir(), "status.json")
+	command := exec.Command(os.Args[0], "-test.run=^TestJSONValidationFailureWritesStatusSnapshot$")
+	command.Env = append(os.Environ(), "SP2P_STATUS_FAILURE_SUBPROCESS=1", "SP2P_STATUS_FILE="+statusFile)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err == nil {
+		t.Fatal("validation-failure subprocess unexpectedly succeeded")
+	}
+
+	var event struct {
+		Event   string `json:"event"`
+		Outcome string `json:"outcome"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &event); err != nil {
+		t.Fatalf("validation failure did not emit JSON: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	if event.Event != "result" || event.Outcome != "failed" {
+		t.Fatalf("event = %#v, want failed result", event)
+	}
+
+	data, err := os.ReadFile(statusFile)
+	if err != nil {
+		t.Fatalf("read status snapshot: %v", err)
+	}
+	var snapshot struct {
+		Role   string `json:"role"`
+		Result struct {
+			Outcome string `json:"outcome"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatalf("decode status snapshot: %v", err)
+	}
+	if snapshot.Role != "send" || snapshot.Result.Outcome != "failed" {
+		t.Fatalf("snapshot = %#v, want failed send result", snapshot)
 	}
 }

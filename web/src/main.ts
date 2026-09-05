@@ -253,6 +253,10 @@ async function initSend(): Promise<void> {
   const shareWget = $(".share-wget");
   const sharePowershell = $(".share-powershell");
   const shareCli = $(".share-cli");
+  const shareAgent = $(".share-agent");
+  const agentSendPrompt = $(".agent-send-prompt");
+
+  agentSendPrompt.textContent = `Please send [file] using ${location.origin}/llm`;
 
   // Click-to-copy on share boxes.
   for (const box of document.querySelectorAll<HTMLElement>(".copy-box")) {
@@ -349,7 +353,8 @@ async function initSend(): Promise<void> {
       shareCurl.textContent = `curl -f ${origin}/r | sh -s ${code}`;
       shareWget.textContent = `wget -O- ${origin}/r | sh -s ${code}`;
       sharePowershell.textContent = `& ([scriptblock]::Create((irm ${origin}/ps/r))) '${code}'`;
-      shareCli.textContent = `sp2p receive ${code}`;
+      shareCli.textContent = `sp2p receive -server ${origin} ${code}`;
+      shareAgent.textContent = `AI Agent: Please receive file session ${code} using ${origin}/llm`;
       show(shareDisplay);
 
       // Wire up QR button.
@@ -622,7 +627,7 @@ async function initReceive(): Promise<void> {
       curlEl.textContent = `curl -f ${origin}/r | sh -s ${code}`;
       wgetEl.textContent = `wget -O- ${origin}/r | sh -s ${code}`;
       psEl.textContent = `& ([scriptblock]::Create((irm ${origin}/ps/r))) '${code}'`;
-      cliEl.textContent = `sp2p receive ${code}`;
+      cliEl.textContent = `sp2p receive -server ${origin} ${code}`;
 
       // Set up click-to-copy on confirmation copy-boxes.
       for (const box of confirmContainer.querySelectorAll<HTMLElement>(".copy-box")) {

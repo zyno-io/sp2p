@@ -49,6 +49,13 @@ async function build() {
   // Copy favicon.
   fs.copyFileSync("favicon.svg", path.join("dist", "favicon.svg"));
 
+  // Agent-facing Markdown is served directly by the Go server. Keep the
+  // conventional full-context file generated from the same source so the two
+  // documents cannot drift.
+  fs.copyFileSync("llms.txt", path.join("dist", "llms.txt"));
+  fs.copyFileSync("llm.md", path.join("dist", "llm.md"));
+  fs.copyFileSync("llm.md", path.join("dist", "llms-full.txt"));
+
   console.log(`  ${jsName}`);
   console.log(`  ${cssName}`);
 }

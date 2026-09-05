@@ -744,9 +744,9 @@ func TestBootstrap_BinaryUnsupportedPlatform(t *testing.T) {
 
 func TestBootstrap_BinaryRedirectsToGitHub(t *testing.T) {
 	tests := []struct {
-		name     string
-		path     string
-		wantURL  string
+		name    string
+		path    string
+		wantURL string
 	}{
 		{"linux/amd64", "/dl/linux/amd64", "https://github.com/zyno-io/sp2p/releases/latest/download/sp2p_linux_amd64.tar.gz"},
 		{"darwin/arm64", "/dl/darwin/arm64", "https://github.com/zyno-io/sp2p/releases/latest/download/sp2p_darwin_arm64.tar.gz"},
@@ -955,7 +955,7 @@ func TestSignalHandler_TrustProxyForSessionIP(t *testing.T) {
 // ── WebHandler tests ────────────────────────────────────────────────────────
 
 func TestWebHandler_PlaceholderWhenNoFS(t *testing.T) {
-	h := NewWebHandler(nil, "", "")
+	h := NewWebHandler(nil, "", "", "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
@@ -970,7 +970,7 @@ func TestWebHandler_PlaceholderWhenNoFS(t *testing.T) {
 }
 
 func TestWebHandler_ReceivePlaceholder(t *testing.T) {
-	h := NewWebHandler(nil, "", "")
+	h := NewWebHandler(nil, "", "", "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/r", nil)
@@ -986,7 +986,7 @@ func TestWebHandler_ReceivePlaceholder(t *testing.T) {
 }
 
 func TestWebHandler_AssetNotFoundWhenNoFS(t *testing.T) {
-	h := NewWebHandler(nil, "", "")
+	h := NewWebHandler(nil, "", "", "")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/app.js", nil)
@@ -994,6 +994,14 @@ func TestWebHandler_AssetNotFoundWhenNoFS(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+}
+
+func TestWebHandlerInjectsConfiguredAgentServerURL(t *testing.T) {
+	h := &WebHandler{baseURL: "https://transfer.example"}
+	got := string(h.injectAgentGuidePlaceholders([]byte(`-server "{{SP2P_SERVER_URL}}"`)))
+	if got != `-server "https://transfer.example"` {
+		t.Fatalf("agent guide = %q", got)
 	}
 }
 

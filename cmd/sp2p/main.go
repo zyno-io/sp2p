@@ -4,8 +4,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,7 +18,7 @@ import (
 )
 
 var version = "dev"
-var buildTime string     // set via ldflags (e.g., "2025-01-15T12:00:00Z")
+var buildTime string      // set via ldflags (e.g., "2025-01-15T12:00:00Z")
 var defaultBaseURL string // set via ldflags for release builds
 
 func main() {
@@ -25,11 +27,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Print banner for all commands.
-	if buildTime != "" {
-		fmt.Fprintf(os.Stderr, "sp2p %s (%s)\n\n", version, buildTime)
-	} else {
-		fmt.Fprintf(os.Stderr, "sp2p %s\n\n", version)
+	machineOutput, eventOutput := requestedMachineOutput(os.Args[2:])
+
+	// JSON mode is a strict machine protocol, so it must not be prefixed by
+	// the normal terminal banner.
+	if !machineOutput {
+		if buildTime != "" {
+			fmt.Fprintf(os.Stderr, "sp2p %s (%s)\n\n", version, buildTime)
+		} else {
+			fmt.Fprintf(os.Stderr, "sp2p %s\n\n", version)
+		}
 	}
 
 	// Handle commands that don't need config.
@@ -49,7 +56,7 @@ func main() {
 	// Load user config file (~/.config/sp2p/config.yaml).
 	cfg, err := config.Load()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		emitCommandError(machineOutput, eventOutput, os.Args[1], err)
 		os.Exit(1)
 	}
 
@@ -78,13 +85,18 @@ func main() {
 	case "receive", "recv":
 		err = runReceive(ctx, cfg, serverURL)
 	default:
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
-		printUsage()
-		os.Exit(1)
+		err = fmt.Errorf("unknown command: %s", os.Args[1])
+		if !machineOutput {
+			fmt.Fprintf(os.Stderr, "Unknown command: %s\n\n", os.Args[1])
+			printUsage()
+			os.Exit(1)
+		}
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if !cli.MachineErrorReported(err) {
+			emitCommandError(machineOutput, eventOutput, os.Args[1], err)
+		}
 		os.Exit(1)
 	}
 }
@@ -95,7 +107,13 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 		compressDefault = *cfg.Compress
 	}
 
-	fs := flag.NewFlagSet("send", flag.ExitOnError)
+	machineRequested, _ := requestedMachineOutput(os.Args[2:])
+	fs := flag.NewFlagSet("send", flag.ContinueOnError)
+	if machineRequested {
+		fs.SetOutput(io.Discard)
+	} else {
+		fs.SetOutput(os.Stderr)
+	}
 	server := fs.String("server", serverURL, "signaling server URL (env: SP2P_SERVER)")
 	base := fs.String("url", baseURL, "public base URL for sharing links (env: SP2P_URL)")
 	name := fs.String("name", "", "filename for stdin streams")
@@ -112,28 +130,52 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 	parallel := fs.Int("parallel", parallelDefault, "parallel TCP connections: 0=auto, 1=single, 2-6=force count")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
-	fs.Usage = func() {
+	format := fs.String("format", "human", "output format: human or json")
+	eventOutput := fs.String("event-output", "stdout", "JSON event stream: stdout or stderr")
+	statusFile := fs.String("status-file", "", "write the latest JSON status snapshot to this file (requires -format json)")
+	showUsage := func() {
+		fs.SetOutput(os.Stderr)
 		fmt.Fprintf(os.Stderr, "Usage: sp2p send [flags] <file|folder|...|->\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
-	fs.Parse(reorderArgs(fs, os.Args[2:]))
+	fs.Usage = func() {
+		if !machineRequested {
+			showUsage()
+		}
+	}
+	if err := fs.Parse(reorderArgs(fs, os.Args[2:])); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			if machineRequested {
+				showUsage()
+			}
+			return nil
+		}
+		return fmt.Errorf("parsing send flags: %w", err)
+	}
+
+	output, err := cli.NewOutputConfig(*format, *eventOutput, *statusFile, false)
+	if err != nil {
+		return err
+	}
 
 	if fs.NArg() < 1 {
-		fs.Usage()
-		os.Exit(1)
+		if !output.IsMachine() {
+			showUsage()
+		}
+		return commandFailure(output, "send", fmt.Errorf("send requires at least one file, folder, or -"))
 	}
 
 	if *compress < 0 || *compress > 9 {
-		return fmt.Errorf("compress must be 0-9, got %d", *compress)
+		return commandFailure(output, "send", fmt.Errorf("compress must be 0-9, got %d", *compress))
 	}
 
 	if *parallel < 0 || *parallel > 6 {
-		return fmt.Errorf("parallel must be 0-6, got %d", *parallel)
+		return commandFailure(output, "send", fmt.Errorf("parallel must be 0-6, got %d", *parallel))
 	}
 
 	transportMode, err := parseTransport(*transport)
 	if err != nil {
-		return err
+		return commandFailure(output, "send", err)
 	}
 
 	// If no explicit base URL, derive from the server URL.
@@ -153,6 +195,7 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 		RelayOK:       *allowRelay,
 		Verbose:       *verbose,
 		ClientVersion: version,
+		Output:        output,
 	})
 }
 
@@ -162,7 +205,13 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 		outputDefault = cfg.Output
 	}
 
-	fs := flag.NewFlagSet("receive", flag.ExitOnError)
+	machineRequested, _ := requestedMachineOutput(os.Args[2:])
+	fs := flag.NewFlagSet("receive", flag.ContinueOnError)
+	if machineRequested {
+		fs.SetOutput(io.Discard)
+	} else {
+		fs.SetOutput(os.Stderr)
+	}
 	server := fs.String("server", serverURL, "signaling server URL (env: SP2P_SERVER)")
 	outputDir := fs.String("output", outputDefault, "output directory")
 	stdout := fs.Bool("stdout", false, "write to stdout instead of file")
@@ -178,24 +227,48 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 	parallel := fs.Int("parallel", parallelDefault, "parallel TCP connections: 0=auto, 1=single, 2-6=force count")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
-	fs.Usage = func() {
+	format := fs.String("format", "human", "output format: human or json")
+	eventOutput := fs.String("event-output", "stdout", "JSON event stream: stdout or stderr")
+	statusFile := fs.String("status-file", "", "write the latest JSON status snapshot to this file (requires -format json)")
+	showUsage := func() {
+		fs.SetOutput(os.Stderr)
 		fmt.Fprintf(os.Stderr, "Usage: sp2p receive [flags] <CODE>\n\nFlags:\n")
 		fs.PrintDefaults()
 	}
-	fs.Parse(reorderArgs(fs, os.Args[2:]))
+	fs.Usage = func() {
+		if !machineRequested {
+			showUsage()
+		}
+	}
+	if err := fs.Parse(reorderArgs(fs, os.Args[2:])); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			if machineRequested {
+				showUsage()
+			}
+			return nil
+		}
+		return fmt.Errorf("parsing receive flags: %w", err)
+	}
+
+	output, err := cli.NewOutputConfig(*format, *eventOutput, *statusFile, *stdout)
+	if err != nil {
+		return err
+	}
 
 	if fs.NArg() < 1 {
-		fs.Usage()
-		os.Exit(1)
+		if !output.IsMachine() {
+			showUsage()
+		}
+		return commandFailure(output, "receive", fmt.Errorf("receive requires a transfer code"))
 	}
 
 	if *parallel < 0 || *parallel > 6 {
-		return fmt.Errorf("parallel must be 0-6, got %d", *parallel)
+		return commandFailure(output, "receive", fmt.Errorf("parallel must be 0-6, got %d", *parallel))
 	}
 
 	transportMode, err := parseTransport(*transport)
 	if err != nil {
-		return err
+		return commandFailure(output, "receive", err)
 	}
 
 	return cli.Receive(ctx, cli.ReceiveConfig{
@@ -208,6 +281,7 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 		RelayOK:       *allowRelay,
 		Verbose:       *verbose,
 		ClientVersion: version,
+		Output:        output,
 	})
 }
 
@@ -223,12 +297,76 @@ Usage:
   sp2p receive [flags] <CODE>            Receive a file
   sp2p version                           Show version
 
+Agent automation:
+  sp2p send -format json <file>          Emit JSON Lines lifecycle events
+
 Environment variables:
   SP2P_SERVER   Signaling server URL            (default: %s)
   SP2P_URL      Public base URL for share links (default: %s)
 
 Run 'sp2p <command> --help' for flag details.
 `, version, base, base)
+}
+
+func emitCommandError(machineOutput bool, eventOutput, role string, err error) {
+	role = canonicalMachineRole(role)
+	if machineOutput {
+		cli.EmitMachineFailure(machineEventWriter(eventOutput), role, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+}
+
+func commandFailure(output cli.OutputConfig, role string, err error) error {
+	if output.IsMachine() {
+		return cli.ReportMachineFailure(output, canonicalMachineRole(role), err)
+	}
+	return err
+}
+
+func canonicalMachineRole(role string) string {
+	if role == "recv" {
+		return "receive"
+	}
+	return role
+}
+
+func machineEventWriter(eventOutput string) io.Writer {
+	if strings.EqualFold(eventOutput, "stderr") {
+		return os.Stderr
+	}
+	return os.Stdout
+}
+
+// requestedMachineOutput performs a small, side-effect-free pre-parse so main
+// can suppress its banner and format early failures as JSON. FlagSet performs
+// the authoritative validation later.
+func requestedMachineOutput(args []string) (bool, string) {
+	format := ""
+	eventOutput := "stdout"
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		name := strings.TrimLeft(arg, "-")
+		value := ""
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			value = name[eq+1:]
+			name = name[:eq]
+		} else if (name == "format" || name == "event-output") && i+1 < len(args) {
+			value = args[i+1]
+			i++
+		}
+
+		switch name {
+		case "format":
+			format = value
+		case "event-output":
+			eventOutput = value
+		}
+	}
+	return strings.EqualFold(format, "json"), eventOutput
 }
 
 // deriveWSURL converts a base URL to its WebSocket equivalent,

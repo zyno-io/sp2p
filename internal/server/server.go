@@ -18,22 +18,22 @@ import (
 
 // Config holds server configuration.
 type Config struct {
-	Addr      string
-	BaseURL   string    // e.g., "https://sp2p.io"
-	WebFS     *embed.FS // embedded web UI files (optional)
-	Version   string    // server version (e.g., "1.0.0" or "dev")
-	BuildTime string    // build timestamp (e.g., "2025-01-15T12:00:00Z")
-	STUNServers []signal.ICEServer       // STUN servers to advertise to clients (optional)
-	StaticTURN  []signal.ICEServer       // static TURN servers with fixed credentials (optional)
-	TURNGen     *TURNCredentialGenerator // ephemeral TURN credential generator (optional, mutually exclusive with StaticTURN)
-	MaxSessions      int  // global session cap (0 = default 1000)
-	MaxSessionsPerIP int  // per-IP session cap (0 = default 10)
-	TrustProxy bool               // trust X-Forwarded-For for rate limiting (set when behind a reverse proxy)
-	TLSCert    string             // path to TLS certificate file (optional)
-	TLSKey     string             // path to TLS private key file (optional)
-	ACME       bool               // enable ACME auto-certificates (domain derived from BaseURL)
-	ACMEEmail  string             // contact email for ACME (optional)
-	ConfigDir  string             // directory for persistent data like ACME certs (optional)
+	Addr             string
+	BaseURL          string                   // e.g., "https://sp2p.io"
+	WebFS            *embed.FS                // embedded web UI files (optional)
+	Version          string                   // server version (e.g., "1.0.0" or "dev")
+	BuildTime        string                   // build timestamp (e.g., "2025-01-15T12:00:00Z")
+	STUNServers      []signal.ICEServer       // STUN servers to advertise to clients (optional)
+	StaticTURN       []signal.ICEServer       // static TURN servers with fixed credentials (optional)
+	TURNGen          *TURNCredentialGenerator // ephemeral TURN credential generator (optional, mutually exclusive with StaticTURN)
+	MaxSessions      int                      // global session cap (0 = default 1000)
+	MaxSessionsPerIP int                      // per-IP session cap (0 = default 10)
+	TrustProxy       bool                     // trust X-Forwarded-For for rate limiting (set when behind a reverse proxy)
+	TLSCert          string                   // path to TLS certificate file (optional)
+	TLSKey           string                   // path to TLS private key file (optional)
+	ACME             bool                     // enable ACME auto-certificates (domain derived from BaseURL)
+	ACMEEmail        string                   // contact email for ACME (optional)
+	ConfigDir        string                   // directory for persistent data like ACME certs (optional)
 }
 
 // Server is the SP2P signaling server.
@@ -91,7 +91,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: %w", err)
 	}
-	webHandler := NewWebHandler(cfg.WebFS, cfg.Version, cfg.BuildTime)
+	webHandler := NewWebHandler(cfg.WebFS, cfg.Version, cfg.BuildTime, cfg.BaseURL)
 
 	// Rate limit: 30 WebSocket connections per IP per minute.
 	wsLimiter := NewRateLimiter(30, time.Minute)
@@ -113,6 +113,15 @@ func New(cfg Config) (*Server, error) {
 
 	// Binary downloads.
 	mux.HandleFunc("/dl/", bootstrapHandler.ServeBinary)
+
+	// Agent-facing documentation. These exact routes take precedence over the
+	// static-file fallback below, ensuring their Markdown content type and cache
+	// policy remain stable.
+	mux.HandleFunc("/llms.txt", webHandler.ServeLLMs)
+	mux.HandleFunc("/llms-full.txt", webHandler.ServeLLMsFull)
+	mux.HandleFunc("/llm", webHandler.ServeAgentGuide)
+	mux.HandleFunc("/llm.md", webHandler.ServeAgentGuide)
+	mux.HandleFunc("/agents.md", webHandler.ServeAgentGuide)
 
 	// Root: curl gets send bootstrap script, browser gets send UI.
 	// Non-root paths are served as static assets from the embedded web UI

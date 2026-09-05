@@ -63,7 +63,7 @@ func iceServersToConn(servers []signal.ICEServer) ([]string, []conn.TURNServer) 
 // the relay retry with the peer via signaling, receives TURN credentials
 // from the server, and retries the connection.
 // peerWantsRelay is closed if the peer already signaled relay-retry (consumed from relayCh).
-func retryWithRelay(ctx context.Context, sigClient *signal.Client, relayCh chan *signal.Envelope, deniedCh chan *signal.Envelope, peerWantsRelay <-chan struct{}, relayOK bool, h Handler, cfg conn.ConnectConfig) (*conn.EstablishResult, error) {
+func retryWithRelay(ctx context.Context, sigClient *signal.Client, relayCh chan *signal.Envelope, deniedCh chan *signal.Envelope, peerLeftCh chan *signal.Envelope, peerWantsRelay <-chan struct{}, relayOK bool, h Handler, cfg conn.ConnectConfig) (*conn.EstablishResult, error) {
 	h.OnVerbose("direct connection failed, attempting TURN relay fallback")
 
 	// Subscribe to server-delivered TURN credentials.
@@ -104,16 +104,68 @@ func retryWithRelay(ctx context.Context, sigClient *signal.Client, relayCh chan 
 	case <-time.After(30 * time.Second):
 		h.OnError("Server did not provide TURN credentials")
 		return nil, fmt.Errorf("timeout waiting for TURN credentials")
+	case <-peerLeftCh:
+		h.OnError("Peer disconnected")
+		return nil, fmt.Errorf("peer disconnected")
+	case <-sigClient.Done():
+		h.OnError("Signaling server disconnected")
+		return nil, fmt.Errorf("signaling connection lost")
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 
-	// Now prompt the user for consent (peer is already being notified).
-	if !relayOK && !h.PromptRelay() {
-		h.OnVerbose("relay denied: user declined or no TTY available")
-		sigClient.Send(ctx, signal.TypeRelayDenied, struct{}{})
-		h.OnError("Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay.")
-		return nil, fmt.Errorf("direct connection failed and relay not allowed")
+	// Now prompt the user for consent (peer is already being notified). A
+	// machine handler can cancel its prompt if the peer has already declined;
+	// otherwise an unattended response-file prompt could wait indefinitely.
+	if !relayOK {
+		if contextualPrompt, ok := h.(RelayPromptHandler); ok {
+			promptCtx, cancelPrompt := context.WithCancel(ctx)
+			promptResult := make(chan bool, 1)
+			go func() {
+				promptResult <- contextualPrompt.PromptRelayContext(promptCtx)
+			}()
+			waitForPrompt := func() {
+				cancelPrompt()
+				// A RelayPromptHandler promises to honor cancellation. Waiting for
+				// it keeps any final relay-prompt event ahead of this flow's
+				// terminal result in the machine event stream.
+				<-promptResult
+			}
+
+			select {
+			case allowed := <-promptResult:
+				cancelPrompt()
+				if !allowed {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					h.OnVerbose("relay denied: user declined")
+					sigClient.Send(ctx, signal.TypeRelayDenied, struct{}{})
+					h.OnError("Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay.")
+					return nil, fmt.Errorf("direct connection failed and relay not allowed")
+				}
+			case <-deniedCh:
+				waitForPrompt()
+				h.OnError("Peer denied relay connection")
+				return nil, fmt.Errorf("peer denied relay")
+			case <-peerLeftCh:
+				waitForPrompt()
+				h.OnError("Peer disconnected")
+				return nil, fmt.Errorf("peer disconnected")
+			case <-sigClient.Done():
+				waitForPrompt()
+				h.OnError("Signaling server disconnected")
+				return nil, fmt.Errorf("signaling connection lost")
+			case <-ctx.Done():
+				waitForPrompt()
+				return nil, ctx.Err()
+			}
+		} else if !h.PromptRelay() {
+			h.OnVerbose("relay denied: user declined or no TTY available")
+			sigClient.Send(ctx, signal.TypeRelayDenied, struct{}{})
+			h.OnError("Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay.")
+			return nil, fmt.Errorf("direct connection failed and relay not allowed")
+		}
 	}
 
 	// Wait for peer to agree to relay retry.
@@ -125,8 +177,14 @@ func retryWithRelay(ctx context.Context, sigClient *signal.Client, relayCh chan 
 	case <-relayCh:
 		h.OnVerbose("peer agreed to relay retry")
 	case <-deniedCh:
-		h.OnError("Receiver denied relay connection")
+		h.OnError("Peer denied relay connection")
 		return nil, fmt.Errorf("peer denied relay")
+	case <-peerLeftCh:
+		h.OnError("Peer disconnected")
+		return nil, fmt.Errorf("peer disconnected")
+	case <-sigClient.Done():
+		h.OnError("Signaling server disconnected")
+		return nil, fmt.Errorf("signaling connection lost")
 	case <-time.After(30 * time.Second):
 		h.OnError("Peer did not agree to relay retry")
 		return nil, fmt.Errorf("peer did not agree to relay retry")

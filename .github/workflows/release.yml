@@ -333,16 +333,3 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
           ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'cd /opt/sp2p && docker compose pull && docker compose up -d'
-
-  publish:
-    needs: [release, publish-release]
-    uses: ./.github/workflows/publish-packages.yml
-    with:
-      tag: ${{ github.ref_name }}
-      version: ${{ needs.release.outputs.clean_version }}
-      publish_homebrew: ${{ needs.release.outputs.has_darwin == 'true' && needs.release.outputs.has_linux == 'true' && needs.release.outputs.has_cli == 'true' }}
-      publish_scoop: ${{ needs.release.outputs.has_windows == 'true' && needs.release.outputs.has_cli == 'true' }}
-      publish_aur: ${{ needs.release.outputs.has_linux == 'true' && needs.release.outputs.has_cli == 'true' }}
-      publish_chocolatey: ${{ needs.release.outputs.has_windows == 'true' && needs.release.outputs.has_cli == 'true' }}
-      publish_winget: ${{ needs.release.outputs.has_windows == 'true' && needs.release.outputs.has_cli == 'true' }}
-    secrets: inherit

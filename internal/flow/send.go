@@ -265,7 +265,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.
 		connCfg.Transport = conn.TransportWebRTC
 		connCfg.TCPPreferWait = 0
-		estResult, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
+		estResult, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerLeftCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
 	}
 	if err != nil {
 		return err

@@ -7,6 +7,7 @@ Secure peer-to-peer data transfer. End-to-end encrypted. Send files, folders, an
 - [Quick Start](#quick-start)
 - [Install](#install)
 - [Usage](#usage)
+  - [AI Agents](#ai-agents)
   - [Sending](#sending)
   - [Receiving](#receiving)
   - [Environment Variables](#environment-variables)
@@ -116,6 +117,33 @@ See [Building from Source](#building-from-source).
 
 ## Usage
 
+### AI Agents
+
+Give an agent this prompt to send a file:
+
+```text
+Please send [file] using https://sp2p.io/llm
+```
+
+The CLI has a JSON Lines interface for agents and other automation. It emits a
+`session` event with the transfer code, lifecycle and progress events while the
+command is running, and exactly one terminal `result` event. The transfer code
+is a secret capability; share it only with the intended receiver and do not
+place it in public logs.
+
+```bash
+sp2p send -format json report.pdf
+sp2p receive -format json SESSION-SEED
+```
+
+When a direct connection fails and relay consent is needed, JSON mode emits a
+`relay_required` event with a temporary response-file path. Write `allow` or
+`deny` to that file; SP2P removes it after reading the response. Use
+`-allow-relay` to permit the encrypted relay automatically. See
+[sp2p.io/llm](https://sp2p.io/llm) for the full event contract and examples.
+For a self-hosted guide, pass that guide's origin to `-server` on both the
+sender and receiver so they join the same signaling server.
+
 ### Sending
 
 ```
@@ -131,6 +159,9 @@ sp2p send [flags] <file|folder|...|->
 | `-allow-relay` | `false` | Allow TURN relay without prompting (see [TURN Relay](#turn-relay)) |
 | `-transport` | `auto` | Transport mode: `auto`, `tcp`, or `webrtc` |
 | `-v` | `false` | Verbose diagnostic output |
+| `-format` | `human` | Output format: `human` or JSON Lines (`json`) |
+| `-event-output` | `stdout` | JSON event stream: `stdout` or `stderr` |
+| `-status-file` | | Atomically update a private JSON status snapshot (requires `-format json`) |
 
 Send a file, a folder, multiple files, or pipe from stdin:
 
@@ -156,11 +187,15 @@ sp2p receive [flags] <CODE>
 | `-allow-relay` | `false` | Allow TURN relay without prompting (see [TURN Relay](#turn-relay)) |
 | `-transport` | `auto` | Transport mode: `auto`, `tcp`, or `webrtc` |
 | `-v` | `false` | Verbose diagnostic output |
+| `-format` | `human` | Output format: `human` or JSON Lines (`json`) |
+| `-event-output` | `stdout` | JSON event stream: `stdout` or `stderr` |
+| `-status-file` | | Atomically update a private JSON status snapshot (requires `-format json`) |
 
 ```bash
 sp2p receive abc123-xYz456
 sp2p receive abc123-xYz456 -output ~/Downloads
 sp2p receive abc123-xYz456 -stdout | tar xzf -
+sp2p receive -format json -event-output stderr -stdout abc123-xYz456 > received.tar
 ```
 
 `receive` and `recv` are both accepted as the subcommand.
@@ -467,7 +502,11 @@ sp2p send -allow-relay photo.jpg
 sp2p receive -allow-relay abc123-xYz456
 ```
 
-If no TTY is available and `-allow-relay` is not set, TURN is skipped and the connection fails with a message suggesting the flag.
+In JSON mode, SP2P creates a temporary owner-only response file and emits its
+path in a `relay_required` event. An agent writes `allow` or `deny` to that
+file to answer the prompt; SP2P removes it after reading the response. In
+human mode, if no TTY is available and `-allow-relay` is not set, TURN is
+skipped and the connection fails with a message suggesting the flag.
 
 **Credential delivery:** TURN credentials are never included in the initial handshake. The server only delivers them after a client signals `relay-retry` (meaning all direct methods have failed) and a minimum time has elapsed since the session started. When `-turn-secret` is configured, each connection receives unique short-lived HMAC credentials that expire after the configured TTL.
 

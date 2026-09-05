@@ -80,9 +80,24 @@ h1 {
   text-align: center;
 }
 
-.download-section {
+.download-section,
+.agent-section {
   margin: 3.5rem 0;
   text-align: center;
+}
+
+.agent-section {
+  margin: 2.5rem 0;
+}
+
+.agent-note {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  margin: -0.25rem 0 0.75rem;
+}
+
+.agent-note a {
+  color: var(--accent);
 }
 
 .cli-divider {

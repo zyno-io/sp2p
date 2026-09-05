@@ -6,6 +6,7 @@
   <title>SP2P — Secure P2P File Transfer</title>
   <meta name="description" content="Secure peer-to-peer data transfer. End-to-end encrypted. Send files, folders, and streams seamlessly - even between CLI and browser.">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; style-src 'self'">
+  <link rel="describedby" type="text/markdown" href="/llms.txt">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -55,6 +56,17 @@
       </div>
     </div>
 
+    <div class="agent-section">
+      <div class="cli-divider"><span>send with an AI agent</span></div>
+      <p class="agent-note">Copy this prompt into your agent and replace <code>[file]</code> with the file to send.</p>
+      <div class="copy-box">
+        <span class="copy-caption">AI Agent</span>
+        <code class="agent-send-prompt"></code>
+        <span class="copy-hint">click to copy</span>
+      </div>
+      <p class="agent-note"><a href="/llm">Read the agent transfer guide</a></p>
+    </div>
+
     <div class="share-display hidden">
       <p class="share-label">Share this link:</p>
       <div class="share-url-row">
@@ -85,6 +97,12 @@
       <div class="copy-box" data-copy="powershell">
         <span class="copy-caption">PowerShell</span>
         <code class="share-powershell"></code>
+        <span class="copy-hint">click to copy</span>
+      </div>
+      <p class="share-label">Or ask an AI agent to receive it:</p>
+      <div class="copy-box" data-copy="agent">
+        <span class="copy-caption">AI Agent</span>
+        <code class="share-agent"></code>
         <span class="copy-hint">click to copy</span>
       </div>
       <p class="share-note">Terminal commands download a temporary SP2P CLI, receive the file, then clean up</p>

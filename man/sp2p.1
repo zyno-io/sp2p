@@ -23,6 +23,24 @@ If a direct connection cannot be established, a TURN relay is used
 (with user confirmation unless
 .B \-allow\-relay
 is given).
+.PP
+For automation and AI agents, use
+.B \-format json
+to receive newline-delimited JSON lifecycle events. The sender's
+.B session
+event includes the transfer code; the final
+.B result
+event reports completion or failure. See
+.I https://sp2p.io/llm
+for the complete machine interface.
+.PP
+When direct connection fails, JSON mode emits a
+.B relay_required
+event containing the path of a temporary response file. Write
+.B allow
+or
+.B deny
+to that file to answer the relay prompt. The file is removed after it is read.
 .SH COMMANDS
 .TP
 .B send
@@ -71,6 +89,29 @@ Default:
 .TP
 .B \-v
 Verbose diagnostic output.
+.TP
+.BI \-format " format"
+Output format:
+.B human
+or newline-delimited JSON events with
+.BR json .
+Default:
+.BR human .
+.TP
+.BI \-event\-output " stream"
+Where JSON events are written:
+.B stdout
+or
+.BR stderr .
+Default:
+.BR stdout .
+.TP
+.BI \-status\-file " path"
+Atomically write the latest private JSON status snapshot to
+.IR path .
+Requires
+.BR \-format " json."
+The snapshot includes the transfer code after session registration.
 .SH RECEIVE FLAGS
 .TP
 .BI \-output " dir"
@@ -100,6 +141,31 @@ Default:
 .TP
 .B \-v
 Verbose diagnostic output.
+.TP
+.BI \-format " format"
+Output format:
+.B human
+or newline-delimited JSON events with
+.BR json .
+Default:
+.BR human .
+.TP
+.BI \-event\-output " stream"
+Where JSON events are written:
+.B stdout
+or
+.BR stderr .
+Default:
+.BR stdout .
+When using
+.BR \-stdout " to receive file bytes, set this to " stderr
+so events do not corrupt the output.
+.TP
+.BI \-status\-file " path"
+Atomically write the latest private JSON status snapshot to
+.IR path .
+Requires
+.BR \-format " json."
 .SH ENVIRONMENT
 .TP
 .B SP2P_SERVER
@@ -209,6 +275,14 @@ Use a custom server:
 .RS
 .nf
 $ sp2p send -server https://relay.example.com photo.jpg
+.fi
+.RE
+.PP
+Send with an agent-readable event stream:
+.PP
+.RS
+.nf
+$ sp2p send -format json photo.jpg
 .fi
 .RE
 .SH SEE ALSO
