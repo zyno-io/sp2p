@@ -171,16 +171,16 @@ func writeTar(w io.Writer, dir string) error {
 			return nil
 		}
 
+		// Security: only regular files and directories; skip sockets, links, and devices.
+		if !info.Mode().IsRegular() && !info.IsDir() {
+			return nil
+		}
+
 		header, err := tar.FileInfoHeader(info, "")
 		if err != nil {
 			return err
 		}
 		header.Name = name
-
-		// Security: only regular files and directories.
-		if !info.Mode().IsRegular() && !info.IsDir() {
-			return nil // skip symlinks, devices, etc.
-		}
 
 		if err := tw.WriteHeader(header); err != nil {
 			return err

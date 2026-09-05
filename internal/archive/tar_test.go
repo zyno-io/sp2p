@@ -3,6 +3,7 @@
 package archive
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,6 +44,46 @@ func TestTarAndUntar(t *testing.T) {
 	}
 	if string(data) != "world" {
 		t.Fatalf("expected 'world', got '%s'", data)
+	}
+}
+
+func TestTarAndUntarSkipsSockets(t *testing.T) {
+	srcDir := t.TempDir()
+	source := filepath.Join(srcDir, "source")
+	if err := os.Mkdir(source, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "file.txt"), []byte("contents"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	socketPath := filepath.Join(source, "service.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Skipf("Unix sockets are unavailable: %v", err)
+	}
+	defer listener.Close()
+
+	tarReader, err := NewTarReader(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tarReader.Close()
+
+	destDir := t.TempDir()
+	if err := Untar(tarReader, destDir); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(destDir, "source", "file.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "contents" {
+		t.Fatalf("expected %q, got %q", "contents", data)
+	}
+	if _, err := os.Lstat(filepath.Join(destDir, "source", "service.sock")); !os.IsNotExist(err) {
+		t.Fatalf("socket was archived: %v", err)
 	}
 }
 

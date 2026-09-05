@@ -18,6 +18,7 @@ type KeyListener struct {
 	oldState unix.Termios
 	Keys     chan byte
 	done     chan struct{}
+	stopped  chan struct{}
 }
 
 // NewKeyListener opens /dev/tty in cbreak mode and starts reading keys.
@@ -40,8 +41,11 @@ func NewKeyListener() *KeyListener {
 
 	cbreak := *oldState
 	cbreak.Lflag &^= unix.ECHO | unix.ICANON // no echo, char-at-a-time
-	cbreak.Cc[unix.VMIN] = 1                  // read returns after 1 byte
-	cbreak.Cc[unix.VTIME] = 0                 // no timeout
+	// A short read timeout lets Stop wait for readLoop to exit. Closing a
+	// terminal file descriptor from a different goroutine does not reliably
+	// interrupt a blocked read on every Unix platform.
+	cbreak.Cc[unix.VMIN] = 0
+	cbreak.Cc[unix.VTIME] = 1 // deciseconds
 
 	if err := unix.IoctlSetTermios(fd, ioctlSetTermios, &cbreak); err != nil {
 		tty.Close()
@@ -53,17 +57,29 @@ func NewKeyListener() *KeyListener {
 		oldState: *oldState,
 		Keys:     make(chan byte, 8),
 		done:     make(chan struct{}),
+		stopped:  make(chan struct{}),
 	}
 	go kl.readLoop()
 	return kl
 }
 
 func (kl *KeyListener) readLoop() {
+	defer close(kl.stopped)
+
 	buf := make([]byte, 1)
 	for {
-		n, err := kl.tty.Read(buf)
-		if err != nil || n == 0 {
+		select {
+		case <-kl.done:
 			return
+		default:
+		}
+
+		n, err := kl.tty.Read(buf)
+		if err != nil {
+			return
+		}
+		if n == 0 {
+			continue
 		}
 		select {
 		case kl.Keys <- buf[0]:
@@ -86,6 +102,7 @@ func (kl *KeyListener) Stop() {
 	default:
 		close(kl.done)
 	}
+	<-kl.stopped
 	unix.IoctlSetTermios(int(kl.tty.Fd()), ioctlSetTermios, &kl.oldState)
 	kl.tty.Close()
 }
