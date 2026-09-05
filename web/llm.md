@@ -9,6 +9,58 @@ exact URL with `-server` in both commands below so a self-hosted sender and
 receiver join the same server. The CLI converts its HTTP(S) URL to the required
 WebSocket endpoint automatically.
 
+## Get SP2P
+
+If `sp2p` is not installed, use a one-shot bootstrap command from this server.
+It downloads the right binary to a temporary directory, runs it, configures
+this server automatically, and then removes the binary. Add `-format json` as
+shown when an agent needs lifecycle events.
+
+### Send without installing
+
+macOS or Linux with curl:
+
+```bash
+curl -f "{{SP2P_SERVER_URL}}" | sh -s -- -format json "./report.pdf"
+```
+
+macOS or Linux with wget:
+
+```bash
+wget -O- "{{SP2P_SERVER_URL}}" | sh -s -- -format json "./report.pdf"
+```
+
+Windows PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm "{{SP2P_SERVER_URL}}/ps"))) -format json "C:\path\to\report.pdf"
+```
+
+### Receive without installing
+
+macOS or Linux with curl:
+
+```bash
+curl -f "{{SP2P_SERVER_URL}}/r" | sh -s -- -format json "abc12345-TRANSFER_SECRET"
+```
+
+macOS or Linux with wget:
+
+```bash
+wget -O- "{{SP2P_SERVER_URL}}/r" | sh -s -- -format json "abc12345-TRANSFER_SECRET"
+```
+
+Windows PowerShell:
+
+```powershell
+& ([scriptblock]::Create((irm "{{SP2P_SERVER_URL}}/ps/r"))) -format json "abc12345-TRANSFER_SECRET"
+```
+
+For a permanent installation, use the [latest GitHub release page](https://github.com/zyno-io/sp2p/releases/latest),
+or let an agent inspect the [latest-release JSON](https://api.github.com/repos/zyno-io/sp2p/releases/latest)
+and choose a matching `assets[].browser_download_url`. Package-manager options
+are also listed in the [SP2P README](https://github.com/zyno-io/sp2p#install).
+
 ## Send a file
 
 Run the sender and keep it running until a terminal result is emitted:

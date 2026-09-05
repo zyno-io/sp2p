@@ -159,6 +159,12 @@ test.describe("Health and static assets", () => {
       const body = await response.text();
       expect(body).toContain("SP2P");
       expect(body).not.toContain("{{SP2P_SERVER_URL}}");
+      if (path !== "/llms.txt") {
+        expect(body).toContain("curl -f");
+        expect(body).toContain("wget -O-");
+        expect(body).toContain("irm");
+        expect(body).toContain("api.github.com/repos/zyno-io/sp2p/releases/latest");
+      }
     }
   });
 });
