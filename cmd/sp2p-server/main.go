@@ -19,7 +19,7 @@ import (
 )
 
 var version = "dev"
-var buildTime string     // set via ldflags (e.g., "2025-01-15T12:00:00Z")
+var buildTime string      // set via ldflags (e.g., "2025-01-15T12:00:00Z")
 var defaultBaseURL string // set via ldflags for release builds
 
 func main() {
@@ -35,7 +35,8 @@ func main() {
 	turnPassword := flag.String("turn-password", envOr("SP2P_TURN_PASSWORD", ""), "TURN static password (env: SP2P_TURN_PASSWORD)")
 	turnSecret := flag.String("turn-secret", envOr("SP2P_TURN_SECRET", ""), "shared secret for ephemeral TURN credentials (env: SP2P_TURN_SECRET)")
 	turnTTL := flag.String("turn-ttl", envOr("SP2P_TURN_TTL", "5m"), "TTL for ephemeral TURN credentials (env: SP2P_TURN_TTL)")
-	trustProxy := flag.Bool("trust-proxy", envOr("SP2P_TRUST_PROXY", "") != "", "trust X-Forwarded-For for rate limiting (env: SP2P_TRUST_PROXY)")
+	trustProxy := flag.Bool("trust-proxy", envBool("SP2P_TRUST_PROXY"), "trust X-Forwarded-For for rate limiting (env: SP2P_TRUST_PROXY)")
+	trustedProxies := flag.String("trusted-proxies", envOr("SP2P_TRUSTED_PROXIES", ""), "comma-separated trusted proxy IPs/CIDRs (env: SP2P_TRUSTED_PROXIES)")
 	tlsCert := flag.String("tls-cert", envOr("SP2P_TLS_CERT", ""), "TLS certificate file (env: SP2P_TLS_CERT)")
 	tlsKey := flag.String("tls-key", envOr("SP2P_TLS_KEY", ""), "TLS private key file (env: SP2P_TLS_KEY)")
 	acme := flag.Bool("acme", envBool("SP2P_ACME"), "enable ACME auto-certificates, domain derived from --base-url (env: SP2P_ACME)")
@@ -105,8 +106,8 @@ func main() {
 			slog.Error("invalid --turn-ttl", "err", err)
 			os.Exit(1)
 		}
-		if ttl <= 0 {
-			slog.Error("--turn-ttl must be positive")
+		if ttl <= 0 || ttl > time.Hour {
+			slog.Error("--turn-ttl must be positive and at most one hour")
 			os.Exit(1)
 		}
 		turnGen = &server.TURNCredentialGenerator{
@@ -137,6 +138,7 @@ func main() {
 		MaxSessions:      *maxSessions,
 		MaxSessionsPerIP: *maxSessionsPerIP,
 		TrustProxy:       *trustProxy,
+		TrustedProxies:   strings.Split(*trustedProxies, ","),
 		TLSCert:          *tlsCert,
 		TLSKey:           *tlsKey,
 		ACME:             *acme,

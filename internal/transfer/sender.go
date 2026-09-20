@@ -39,11 +39,19 @@ func NewSender(frw FrameReadWriter, meta *Metadata) *Sender {
 
 // SetIdleTimeout configures a per-operation idle timeout.
 // The deadline is reset before each read/write operation.
+// For Session transports it instead configures physical write timeouts; Session
+// owns peer liveness and permits healthy input/finalization pauses.
 // If conn also implements BufferedAmounter, sender progress will be
 // adjusted to reflect actual transmission rather than local buffering.
 func (s *Sender) SetIdleTimeout(d DeadlineSetter, timeout time.Duration) {
-	s.deadliner = d
-	s.idleTimeout = timeout
+	if session, ok := s.frw.(*Session); ok {
+		// Session owns physical write timeouts and peer liveness. An absolute
+		// socket deadline here would kill healthy but paused stdin streams.
+		session.SetWriteTimeout(timeout)
+	} else {
+		s.deadliner = d
+		s.idleTimeout = timeout
+	}
 	if ba, ok := d.(BufferedAmounter); ok {
 		s.buffered = ba
 	}
@@ -91,7 +99,7 @@ func (s *Sender) SetCompression(level int) error {
 	default:
 		speed = zstd.SpeedBestCompression
 	}
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(speed))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(speed), zstd.WithEncoderConcurrency(4), zstd.WithWindowSize(MaxChunkSize))
 	if err != nil {
 		return fmt.Errorf("creating zstd encoder: %w", err)
 	}
@@ -108,10 +116,11 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 	// Set compression in metadata if enabled.
 	if s.compressor != nil {
 		s.meta.Compression = "zstd"
+		defer s.compressor.Close()
 	}
 
-	// Send data in chunks using a pipeline: the producer goroutine reads,
-	// hashes, and compresses while the consumer writes to the network.
+	// The reader hashes in order, bounded workers compress, and the consumer
+	// hands ordered chunks to the encrypted transport dispatcher.
 	type preparedChunk struct {
 		data     []byte // compressed (or raw) chunk ready to encrypt+send
 		rawBytes uint64 // uncompressed byte count for progress tracking
@@ -120,6 +129,10 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 
 	const pipelineDepth = 8
 	chunkCh := make(chan preparedChunk, pipelineDepth)
+	rawCh := chunkCh
+	if s.compressor != nil {
+		rawCh = make(chan preparedChunk, pipelineDepth)
+	}
 
 	// Pool of read buffers to avoid per-chunk allocations and GC pressure.
 	// Safety: when compression is disabled, the buffer is kept alive via
@@ -182,27 +195,29 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 		return s.wrapCtxErr(ctx, fmt.Errorf("sending metadata: %w", err))
 	}
 
-	// Stage 1 — Reader: read → hash → compress.
+	// Stage 1 — Reader owns hashing and global chunk order.
 	eg.Go(func() error {
-		defer close(chunkCh)
+		defer close(rawCh)
 		for {
 			buf := bufPool.Get().([]byte)
-			n, err := r.Read(buf)
+			var n int
+			var err error
+			if s.meta.StreamMode {
+				n, err = r.Read(buf) // preserve interactive pipe latency
+			} else {
+				n, err = io.ReadFull(r, buf) // coalesce TAR headers/padding and short file reads
+				if err == io.ErrUnexpectedEOF {
+					err = io.EOF
+				}
+			}
 			if n > 0 {
 				chunk := buf[:n]
 				s.hash.Write(chunk)
 				s.totalBytes += uint64(n)
 				s.chunkCount++
-				prepared := preparedChunk{rawBytes: uint64(n), poolBuf: buf}
-				if s.compressor != nil {
-					prepared.data = s.compressor.EncodeAll(chunk, nil)
-					bufPool.Put(buf) // return read buffer; compressed data is separate
-					prepared.poolBuf = nil
-				} else {
-					prepared.data = chunk
-				}
+				prepared := preparedChunk{data: chunk, rawBytes: uint64(n), poolBuf: buf}
 				select {
-				case chunkCh <- prepared:
+				case rawCh <- prepared:
 				case <-egCtx.Done():
 					return egCtx.Err()
 				}
@@ -223,6 +238,65 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 			}
 		}
 	})
+
+	// Bounded parallel compression, with ordered futures so compression speed
+	// cannot change file order or reserve encrypted nonces out of order.
+	if s.compressor != nil {
+		type compressionJob struct {
+			chunk  preparedChunk
+			result chan preparedChunk
+		}
+		jobs := make(chan compressionJob, 4)
+		futures := make(chan chan preparedChunk, pipelineDepth)
+		eg.Go(func() error {
+			defer close(jobs)
+			defer close(futures)
+			for chunk := range rawCh {
+				result := make(chan preparedChunk, 1)
+				select {
+				case futures <- result:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+				select {
+				case jobs <- compressionJob{chunk, result}:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+			}
+			return nil
+		})
+		for i := 0; i < min(4, runtime.GOMAXPROCS(0)); i++ {
+			eg.Go(func() error {
+				for job := range jobs {
+					if egCtx.Err() != nil {
+						return egCtx.Err()
+					}
+					data := s.compressor.EncodeAll(job.chunk.data, nil)
+					bufPool.Put(job.chunk.poolBuf)
+					job.result <- preparedChunk{data: data, rawBytes: job.chunk.rawBytes}
+				}
+				return nil
+			})
+		}
+		eg.Go(func() error {
+			defer close(chunkCh)
+			for future := range futures {
+				var chunk preparedChunk
+				select {
+				case chunk = <-future:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+				select {
+				case chunkCh <- chunk:
+				case <-egCtx.Done():
+					return egCtx.Err()
+				}
+			}
+			return nil
+		})
+	}
 
 	// adjustProgress converts total raw bytes and wire bytes into an
 	// adjusted progress value that subtracts data still buffered locally
@@ -271,7 +345,7 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 			resultCh chan<- wireFrame
 		}
 
-		numWorkers := runtime.GOMAXPROCS(0)
+		numWorkers := min(4, runtime.GOMAXPROCS(0))
 		if numWorkers < 2 {
 			numWorkers = 2
 		}
@@ -404,8 +478,9 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 					bufPool.Put(chunk.poolBuf)
 				}
 				progressBytes += chunk.rawBytes
+				wireBytes += uint64(len(chunk.data))
 				if onProgress != nil {
-					onProgress(adjustProgress(progressBytes, progressBytes))
+					onProgress(adjustProgress(progressBytes, wireBytes))
 				}
 			}
 			return nil
@@ -493,7 +568,7 @@ func (s *Sender) Send(ctx context.Context, r io.Reader, onProgress func(bytesSen
 // when the user hits Ctrl+C.
 func (s *Sender) wrapCtxErr(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return context.Cause(ctx)
 	}
 	return err
 }

@@ -5,65 +5,109 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: cd web && npm ci
+      - run: cd web && npx tsc --noEmit
       - run: make build-web
       - run: make test
+      - run: go vet ./...
+      - run: go test -race ./internal/crypto ./internal/transfer ./internal/flow ./internal/conn ./internal/server ./internal/archive ./internal/fileutil
 
   browser-interop:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: cd web && npm ci
       - run: cd web && npx playwright install --with-deps chromium
-      - run: cd web && npx playwright test interop.spec.ts
+      - run: cd web && npx playwright test
+
+  protocol-compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Immutable v0.4.0 source; never execute a moving release download.
+          ref: 7a616cd5ac1b51f7ad8d1b1de85a91780fff1ccb
+          path: .compat-v0.4.0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Build unmodified legacy fixtures
+        working-directory: .compat-v0.4.0
+        run: |
+          npm --prefix web ci --ignore-scripts
+          npm --prefix web run build
+          go build -o bin/sp2p ./cmd/sp2p
+          go build -o bin/sp2p-server ./cmd/sp2p-server
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
+      - name: Check CLI and server version matrix
+        run: go test ./internal -run '^TestE2E_ProtocolCompatibility$' -count=1 -timeout=12m
+        env:
+          SP2P_TEST_LEGACY_BINARY: ${{ github.workspace }}/.compat-v0.4.0/bin/sp2p
+          SP2P_TEST_LEGACY_SERVER_BINARY: ${{ github.workspace }}/.compat-v0.4.0/bin/sp2p-server
+      - run: cd web && npx playwright install --with-deps chromium
+      - name: Check browser and CLI cross-release transfers
+        run: cd web && npx playwright test tests/compatibility.spec.ts
+        env:
+          SP2P_TEST_LEGACY_BINARY: ${{ github.workspace }}/.compat-v0.4.0/bin/sp2p
+          SP2P_TEST_LEGACY_WEB_DIR: ${{ github.workspace }}/.compat-v0.4.0/web/dist
 
   build:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    needs: [test, browser-interop]
+    needs: [test, browser-interop, protocol-compatibility]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: cd web && npm ci
       - run: make build-web
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
-          version: "~> v2"
+          version: v2.18.0
           args: release --snapshot --clean --skip=publish,docker,sign
         env:
           APK_SIGNING_KEY: /dev/null
           SP2P_VERSION: 0.0.0-snapshot
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: packages
           path: |

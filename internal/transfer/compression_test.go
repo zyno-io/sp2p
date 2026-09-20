@@ -382,7 +382,7 @@ func TestDecompressionBoundCheck(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for oversized decompressed chunk")
 	}
-	if !bytes.Contains([]byte(err.Error()), []byte("decompressed chunk too large")) {
-		t.Fatalf("expected 'decompressed chunk too large' error, got: %s", err)
+	if !bytes.Contains([]byte(err.Error()), []byte("decompressed size exceeds configured limit")) {
+		t.Fatalf("expected decoder to reject before output allocation, got: %s", err)
 	}
 }

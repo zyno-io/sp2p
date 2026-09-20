@@ -22,17 +22,23 @@ type DeadlineSetter interface {
 // The context is used for cancellation — when ctx is cancelled, the underlying
 // connection deadline is set to the past to unblock any pending I/O.
 func SendConfirmation(ctx context.Context, rw io.ReadWriter, keys *DerivedKeys, senderPub, receiverPub []byte, isSender bool) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	// If the connection supports deadlines, watch for context cancellation.
 	if ds, ok := rw.(DeadlineSetter); ok {
-		done := make(chan struct{})
-		defer close(done)
-		go func() {
-			select {
-			case <-ctx.Done():
-				ds.SetDeadline(time.Now())
-			case <-done:
+		fired := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			ds.SetDeadline(time.Now())
+			close(fired)
+		})
+		defer func() {
+			if !stop() {
+				<-fired
 			}
+			ds.SetDeadline(time.Time{})
 		}()
+	} else {
+		return fmt.Errorf("key confirmation requires deadline support")
 	}
 
 	myRole := "sender"

@@ -3,6 +3,7 @@
 package flow
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -64,11 +65,11 @@ func probeRTTSender(frw transfer.FrameReadWriter) (time.Duration, error) {
 		if err := frw.WriteFrame(transfer.MsgParallelProbe, buf[:]); err != nil {
 			return 0, fmt.Errorf("writing RTT probe: %w", err)
 		}
-		msgType, _, err := frw.ReadFrame()
+		msgType, echo, err := frw.ReadFrame()
 		if err != nil {
 			return 0, fmt.Errorf("reading RTT probe echo: %w", err)
 		}
-		if msgType != transfer.MsgParallelProbe {
+		if msgType != transfer.MsgParallelProbe || !bytes.Equal(echo, buf[:]) {
 			return 0, fmt.Errorf("unexpected message during RTT probe: 0x%02x", msgType)
 		}
 		rtts = append(rtts, time.Since(now))
@@ -78,7 +79,7 @@ func probeRTTSender(frw transfer.FrameReadWriter) (time.Duration, error) {
 }
 
 // negotiateSender runs the sender side of parallel TCP negotiation.
-// Called after key confirmation when both sides advertised ParallelTCP.
+// Called after key confirmation when both sides advertised ParallelTCPV3.
 // If the file is too small or probes indicate no benefit, returns the
 // original single-stream setup.
 func negotiateSender(
@@ -93,70 +94,38 @@ func negotiateSender(
 	senderPub, receiverPub []byte,
 	onLog func(string),
 ) (transfer.FrameReadWriter, transfer.DeadlineSetter, error) {
-	single := func() (transfer.FrameReadWriter, transfer.DeadlineSetter, error) {
-		return encStream, primaryConn, nil
-	}
 
-	// Set a deadline on the primary connection for the negotiation phase
-	// so we don't block indefinitely on probe/ready I/O.
 	primaryConn.SetDeadline(time.Now().Add(parallelProbeTimeout))
-	defer primaryConn.SetDeadline(time.Time{}) // clear after negotiation
+	stop := context.AfterFunc(ctx, func() { primaryConn.Close() })
+	defer stop()
+	defer primaryConn.SetDeadline(time.Time{})
 
-	// If file is too small (and not forced), skip probes, just send count=1.
-	if fileSize < parallelMinFileSize && parallel == 0 {
-		logVerbose(onLog, "file too small for parallel TCP (%d bytes < %d), sending count=1", fileSize, parallelMinFileSize)
-		if err := encStream.WriteFrame(transfer.MsgParallelReady, []byte{1}); err != nil {
-			return single()
+	ourCount := 1
+	if fileSize >= parallelMinFileSize || parallel > 0 {
+		rtt, err := probeRTTSender(encStream)
+		if err != nil {
+			return nil, nil, err
 		}
-		// Read receiver's response (they'll send their count, but we'll min with 1).
-		msgType, _, err := encStream.ReadFrame()
-		if err != nil || msgType != transfer.MsgParallelReady {
-			return single()
-		}
-		return single()
+		ourCount = resolveParallelCount(parallel, rtt)
 	}
-
-	// RTT probe.
-	rtt, err := probeRTTSender(encStream)
-	if err != nil {
-		// Send count=1 so the receiver's negotiation loop has a clean
-		// exit (it handles MsgParallelReady arriving mid-probe).
-		logVerbose(onLog, "RTT probe failed: %v — sending count=1", err)
-		encStream.WriteFrame(transfer.MsgParallelReady, []byte{1})
-		// Best-effort drain: read frames until we get the receiver's
-		// MsgParallelReady response (or hit the deadline). This
-		// consumes any lingering probe echoes that the receiver may
-		// have already sent, preventing them from being misinterpreted
-		// as transfer protocol frames. The deadline set at the top of
-		// negotiateSender bounds this loop to parallelProbeTimeout.
-		for {
-			msgType, _, rerr := encStream.ReadFrame()
-			if rerr != nil || msgType == transfer.MsgParallelReady {
-				break
-			}
-		}
-		return single()
+	if ourCount < 1 || ourCount > 6 {
+		return nil, nil, fmt.Errorf("invalid parallel count: %d", ourCount)
 	}
-	logVerbose(onLog, "RTT probe: median=%v", rtt)
-
-	ourCount := resolveParallelCount(parallel, rtt)
-
-	// Exchange counts.
 	if err := encStream.WriteFrame(transfer.MsgParallelReady, []byte{byte(ourCount)}); err != nil {
-		return single()
+		return nil, nil, fmt.Errorf("sending parallel count: %w", err)
 	}
 	msgType, data, err := encStream.ReadFrame()
-	if err != nil || msgType != transfer.MsgParallelReady || len(data) < 1 {
-		return single()
+	if err != nil {
+		return nil, nil, fmt.Errorf("reading parallel count: %w", err)
 	}
-	peerCount := int(data[0])
+	peerCount, err := parseParallelCount(msgType, data)
+	if err != nil {
+		return nil, nil, err
+	}
 	agreed := min(ourCount, peerCount)
-	logVerbose(onLog, "parallel negotiation: ours=%d, peer=%d, agreed=%d", ourCount, peerCount, agreed)
-
-	if agreed <= 1 {
-		return single()
+	if agreed == 1 {
+		return encStream, primaryConn, nil
 	}
-
 	return setupSecondary(ctx, encStream, primaryConn, tcpResult, sharedSecret, seed, agreed, true, sessionID, senderPub, receiverPub, onLog)
 }
 
@@ -175,77 +144,56 @@ func negotiateReceiver(
 	senderPub, receiverPub []byte,
 	onLog func(string),
 ) (transfer.FrameReadWriter, transfer.DeadlineSetter, error) {
-	single := func() (transfer.FrameReadWriter, transfer.DeadlineSetter, error) {
-		return encStream, primaryConn, nil
-	}
 
-	// Set a deadline on the primary connection for the negotiation phase.
 	primaryConn.SetDeadline(time.Now().Add(parallelProbeTimeout))
-	defer primaryConn.SetDeadline(time.Time{}) // clear after negotiation
+	stop := context.AfterFunc(ctx, func() { primaryConn.Close() })
+	defer stop()
+	defer primaryConn.SetDeadline(time.Time{})
 
-	// Read the first frame — it's either a probe or a ParallelReady.
 	msgType, data, err := encStream.ReadFrame()
 	if err != nil {
-		return single()
+		return nil, nil, fmt.Errorf("reading parallel negotiation: %w", err)
 	}
-
 	if msgType == transfer.MsgParallelProbe {
-		// Echo this probe and the remaining ones.
-		if err := encStream.WriteFrame(transfer.MsgParallelProbe, data); err != nil {
-			return single()
-		}
-		for range parallelProbeCount - 1 {
-			msgType, data, err = encStream.ReadFrame()
-			if err != nil {
-				return single()
-			}
-			if msgType == transfer.MsgParallelReady && len(data) >= 1 {
-				// Sender's probes failed mid-sequence; it sent
-				// MsgParallelReady(1) to exit cleanly. Respond
-				// in kind so the sender's ReadFrame unblocks.
-				logVerbose(onLog, "sender cut probes short, received ParallelReady with count=%d", data[0])
-				encStream.WriteFrame(transfer.MsgParallelReady, []byte{1})
-				return single()
-			}
-			if msgType != transfer.MsgParallelProbe {
-				logVerbose(onLog, "unexpected frame during probe echo: 0x%02x", msgType)
-				encStream.WriteFrame(transfer.MsgParallelReady, []byte{1})
-				return single()
+		for i := 0; i < parallelProbeCount; i++ {
+			if msgType != transfer.MsgParallelProbe || len(data) != 8 {
+				return nil, nil, fmt.Errorf("invalid parallel probe")
 			}
 			if err := encStream.WriteFrame(transfer.MsgParallelProbe, data); err != nil {
-				return single()
+				return nil, nil, fmt.Errorf("echoing parallel probe: %w", err)
+			}
+			msgType, data, err = encStream.ReadFrame()
+			if err != nil {
+				return nil, nil, fmt.Errorf("reading parallel negotiation: %w", err)
 			}
 		}
-		// Now read the ParallelReady.
-		msgType, data, err = encStream.ReadFrame()
-		if err != nil || msgType != transfer.MsgParallelReady || len(data) < 1 {
-			return single()
-		}
-	} else if msgType != transfer.MsgParallelReady || len(data) < 1 {
-		logVerbose(onLog, "unexpected first frame during parallel negotiation: 0x%02x", msgType)
-		encStream.WriteFrame(transfer.MsgParallelReady, []byte{1})
-		return single()
 	}
-
-	senderCount := int(data[0])
-
-	// Determine our count (receiver defaults to max to let sender decide).
+	senderCount, err := parseParallelCount(msgType, data)
+	if err != nil {
+		return nil, nil, err
+	}
 	ourCount := 6
 	if parallel > 0 {
 		ourCount = parallel
 	}
+	if ourCount < 1 || ourCount > 6 {
+		return nil, nil, fmt.Errorf("invalid parallel count: %d", ourCount)
+	}
 	if err := encStream.WriteFrame(transfer.MsgParallelReady, []byte{byte(ourCount)}); err != nil {
-		return single()
+		return nil, nil, fmt.Errorf("sending parallel count: %w", err)
 	}
-
 	agreed := min(senderCount, ourCount)
-	logVerbose(onLog, "parallel negotiation: sender=%d, ours=%d, agreed=%d", senderCount, ourCount, agreed)
-
-	if agreed <= 1 {
-		return single()
+	if agreed == 1 {
+		return encStream, primaryConn, nil
 	}
-
 	return setupSecondary(ctx, encStream, primaryConn, tcpResult, sharedSecret, seed, agreed, false, sessionID, senderPub, receiverPub, onLog)
+}
+
+func parseParallelCount(kind byte, data []byte) (int, error) {
+	if kind != transfer.MsgParallelReady || len(data) != 1 || data[0] < 1 || data[0] > 6 {
+		return 0, fmt.Errorf("invalid parallel count frame")
+	}
+	return int(data[0]), nil
 }
 
 // setupSecondary establishes secondary connections and creates a MultiStream.
@@ -267,8 +215,7 @@ func setupSecondary(
 
 	token, err := crypto.DeriveParallelToken(sharedSecret, seed, sessionID, senderPub, receiverPub)
 	if err != nil {
-		logVerbose(onLog, "failed to derive parallel token: %v", err)
-		return single()
+		return nil, nil, fmt.Errorf("deriving parallel token: %w", err)
 	}
 
 	secondaryConns, err := conn.EstablishSecondary(ctx, conn.SecondaryConfig{
@@ -300,17 +247,23 @@ func setupSecondary(
 			c.Close()
 		}
 		primaryConn.SetDeadline(time.Time{})
-		return single()
+		return nil, nil, fmt.Errorf("sending actual stream count: %w", werr)
 	}
 	msgType, data, err := encStream.ReadFrame()
 	primaryConn.SetDeadline(time.Time{})
-	if err != nil || msgType != transfer.MsgParallelReady || len(data) < 1 {
+	if err != nil {
 		for _, c := range secondaryConns {
 			c.Close()
 		}
-		return single()
+		return nil, nil, fmt.Errorf("reading actual stream count: %w", err)
 	}
-	peerActual := int(data[0])
+	peerActual, err := parseParallelCount(msgType, data)
+	if err != nil || (peerActual != 1 && peerActual != agreed) {
+		for _, c := range secondaryConns {
+			c.Close()
+		}
+		return nil, nil, fmt.Errorf("invalid actual parallel stream count")
+	}
 
 	// Require exact match — partial success with different subsets leads to
 	// key/stream mismatch since dense compaction loses original indices.
@@ -343,8 +296,7 @@ func setupSecondary(
 			for j := i; j < len(secondaryConns); j++ {
 				secondaryConns[j].Close()
 			}
-			logVerbose(onLog, "failed to derive parallel keys: %v", kerr)
-			return single()
+			return nil, nil, fmt.Errorf("deriving parallel keys: %w", kerr)
 		}
 
 		var writeKey, readKey []byte
@@ -364,8 +316,7 @@ func setupSecondary(
 			for j := i; j < len(secondaryConns); j++ {
 				secondaryConns[j].Close()
 			}
-			logVerbose(onLog, "failed to create secondary encrypted stream: %v", serr)
-			return single()
+			return nil, nil, fmt.Errorf("creating secondary encrypted stream: %w", serr)
 		}
 		streams[i+1] = es
 		conns[i+1] = sc

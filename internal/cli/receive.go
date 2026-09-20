@@ -12,16 +12,18 @@ import (
 
 // ReceiveConfig holds configuration for the receive command.
 type ReceiveConfig struct {
-	ServerURL     string // WebSocket URL for signaling server
-	Code          string // Full transfer code (SESSION_ID-SEED)
-	OutputDir     string // Output directory (default: current dir)
-	Stdout        bool   // Write to stdout instead of file
-	RelayOK       bool   // Allow TURN relay without prompting
-	Verbose       bool   // Enable verbose diagnostic output
-	ClientVersion string // Client version for update check
-	Transport     string // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
-	Parallel      int    // parallel TCP connections: 0=auto, 1=single, 2-6=force count
-	Output        OutputConfig
+	ServerURL       string // WebSocket URL for signaling server
+	Code            string // Full transfer code (SESSION_ID-SEED)
+	OutputDir       string // Output directory (default: current dir)
+	Stdout          bool   // Write to stdout instead of file
+	RelayOK         bool   // Allow TURN relay without prompting
+	Verbose         bool   // Enable verbose diagnostic output
+	ClientVersion   string // Client version for update check
+	Transport       string // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
+	Parallel        int    // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	Output          OutputConfig
+	MaxReceiveBytes uint64
+	MaxExtractBytes uint64
 }
 
 // Receive performs the receive flow.
@@ -35,6 +37,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 	defer progress.Stop()
 
 	flowCfg := flow.ReceiveConfig{
+		MaxReceiveBytes: cfg.MaxReceiveBytes, MaxExtractBytes: cfg.MaxExtractBytes,
 		ServerURL:     cfg.ServerURL,
 		Code:          cfg.Code,
 		OutputDir:     cfg.OutputDir,
@@ -55,9 +58,9 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 	// Print save location (CLI-specific output).
 	if !cfg.Stdout && result.SavedPath != "" {
 		if result.Metadata.IsFolder {
-			fmt.Fprintf(os.Stderr, "  Extracted to: %s/\n", result.SavedPath)
+			fmt.Fprintf(os.Stderr, "  Extracted to: %s/\n", terminalText(result.SavedPath))
 		} else {
-			fmt.Fprintf(os.Stderr, "  Saved to: %s\n", result.SavedPath)
+			fmt.Fprintf(os.Stderr, "  Saved to: %s\n", terminalText(result.SavedPath))
 		}
 	}
 
@@ -67,6 +70,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig) error {
 func receiveMachine(ctx context.Context, cfg ReceiveConfig) error {
 	reporter := newMachineReporter(ctx, cfg.Output, "receive", cfg.Verbose)
 	flowCfg := flow.ReceiveConfig{
+		MaxReceiveBytes: cfg.MaxReceiveBytes, MaxExtractBytes: cfg.MaxExtractBytes,
 		ServerURL:     cfg.ServerURL,
 		Code:          cfg.Code,
 		OutputDir:     cfg.OutputDir,

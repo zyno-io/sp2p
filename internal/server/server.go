@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,7 @@ type Config struct {
 	MaxSessions      int                      // global session cap (0 = default 1000)
 	MaxSessionsPerIP int                      // per-IP session cap (0 = default 10)
 	TrustProxy       bool                     // trust X-Forwarded-For for rate limiting (set when behind a reverse proxy)
+	TrustedProxies   []string                 // immediate proxy IPs/CIDRs allowed to supply forwarding headers
 	TLSCert          string                   // path to TLS certificate file (optional)
 	TLSKey           string                   // path to TLS private key file (optional)
 	ACME             bool                     // enable ACME auto-certificates (domain derived from BaseURL)
@@ -50,6 +52,32 @@ type Server struct {
 
 // New creates a new signaling server.
 func New(cfg Config) (*Server, error) {
+	if cfg.TURNGen != nil && (cfg.TURNGen.TTL <= 0 || cfg.TURNGen.TTL > sessionMaxAge) {
+		return nil, fmt.Errorf("TURN credential TTL must be positive and no greater than one hour")
+	}
+	if len(cfg.StaticTURN) != 0 {
+		slog.Warn("static TURN credentials are reusable; public relays require external allocation, bandwidth and destination limits")
+	}
+	var proxies []netip.Prefix
+	for _, value := range cfg.TrustedProxies {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil {
+			addr, aerr := netip.ParseAddr(value)
+			if aerr != nil {
+				return nil, fmt.Errorf("invalid trusted proxy %q: %w", value, err)
+			}
+			addr = addr.Unmap()
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		proxies = append(proxies, prefix.Masked())
+	}
+	if cfg.TrustProxy && len(proxies) == 0 {
+		return nil, fmt.Errorf("trust-proxy requires explicit trusted-proxies IPs/CIDRs")
+	}
 	sessions := NewSessionManager(cfg.MaxSessions, cfg.MaxSessionsPerIP)
 
 	// Build the WebSocket URL from BaseURL.
@@ -85,6 +113,7 @@ func New(cfg Config) (*Server, error) {
 
 	stats := NewStatsTracker(cfg.ConfigDir)
 	signalHandler := NewSignalHandler(sessions, cfg.Version, cfg.BaseURL, cfg.STUNServers, cfg.StaticTURN, cfg.TURNGen, resolver, originPatterns, cfg.TrustProxy, stats)
+	signalHandler.trustedProxies = proxies
 	fileInfoHandler := NewFileInfoHandler(sessions)
 
 	bootstrapHandler, err := NewBootstrapHandler(cfg.BaseURL, wsURL, resolver)
@@ -96,6 +125,7 @@ func New(cfg Config) (*Server, error) {
 	// Rate limit: 30 WebSocket connections per IP per minute.
 	wsLimiter := NewRateLimiter(30, time.Minute)
 	wsLimiter.TrustProxy = cfg.TrustProxy
+	wsLimiter.TrustedProxies = proxies
 
 	mux := http.NewServeMux()
 
@@ -127,6 +157,7 @@ func New(cfg Config) (*Server, error) {
 	// Non-root paths are served as static assets from the embedded web UI
 	// (hashed filenames like main-abc123.js, style-abc123.css).
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		setSecurityHeaders(w)
 		if r.URL.Path != "/" {
 			// Try serving as a static asset from the web UI.
 			if webHandler.fileServer != nil {

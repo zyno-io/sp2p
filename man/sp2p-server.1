@@ -13,8 +13,21 @@ clients.
 It serves the web UI, handles WebSocket signaling, and optionally provides
 TURN relay and TLS termination.
 .PP
-The server never sees file contents \(em it only facilitates the initial
-connection handshake between peers.
+The signaling service cannot decrypt content between trusted clients.
+A compromised host serving browser JavaScript or bootstrap scripts can replace
+client code; use independently trusted CLI installations for that threat model.
+.PP
+By default, shell and PowerShell bootstraps check archive SHA-256 against the same fixed
+GitHub release's checksum manifest before extraction, without requiring GitHub
+CLI. They trust the GitHub HTTPS release channel, not an independently verified
+signer. Unavailable pinned releases and local development archives cannot
+bootstrap; use a locally built CLI for development.
+.PP
+The explicit first bootstrap argument
+.B \-\-insecure\-skip\-checksum
+skips checksum-manifest and digest checks, with a warning to stderr.
+It is consumed by the script and is not a server or installed CLI flag.
+TLS certificate checks and release/platform URL validation remain enabled.
 .SH FLAGS
 .TP
 .BI \-addr " address"
@@ -65,6 +78,11 @@ Mutually exclusive with static username/password.
 .TP
 .BI \-turn\-ttl " duration"
 TTL for ephemeral TURN credentials.
+Must be positive and no greater than one hour. Both paired peers share one
+cached issuance per session; repeated requests do not renew its lifetime.
+New issuances are limited to 120 per minute globally and 12 per sender IP.
+Anonymous relay use still requires external allocation/bandwidth quotas and
+destination-address restrictions. Static credentials remain reusable.
 Default:
 .IR 5m .
 .SS Reverse Proxy
@@ -72,8 +90,14 @@ Default:
 .B \-trust\-proxy
 Trust
 .B X\-Forwarded\-For
-headers for rate limiting.
-Enable this when running behind a reverse proxy.
+headers only from explicitly trusted proxy addresses, for all client-IP limits.
+Requires
+.BR \-trusted\-proxies .
+Environment values false and 0 disable trust.
+.TP
+.BI \-trusted\-proxies " addresses"
+Comma-separated IP addresses/CIDRs of the actual reverse proxies.
+Forwarded chains are resolved from the trusted side. Do not trust all addresses.
 .SH ENVIRONMENT
 All flags can be set via environment variables:
 .PP
@@ -88,6 +112,7 @@ Flag	Variable
 \-tls\-cert	SP2P_TLS_CERT
 \-tls\-key	SP2P_TLS_KEY
 \-trust\-proxy	SP2P_TRUST_PROXY
+\-trusted\-proxies	SP2P_TRUSTED_PROXIES
 \-turn\-servers	SP2P_TURN_SERVERS
 \-turn\-username	SP2P_TURN_USERNAME
 \-turn\-password	SP2P_TURN_PASSWORD
@@ -134,10 +159,26 @@ Run behind nginx with TURN relay:
 $ sp2p-server \\
     -base-url https://sp2p.example.com \\
     -trust-proxy \\
+    -trusted-proxies 127.0.0.1/32,::1/128 \\
     -turn-servers turn:turn.example.com:3478 \\
     -turn-secret mysecret
 .fi
 .RE
+.SH CONTAINERS AND UPGRADES
+Clients and servers can be upgraded independently: signaling remains v2.
+Two updated peers automatically use transfer v3, including through a 0.4.0
+server; a transfer with a 0.4.0 peer automatically uses v2.
+No version flag or browser checkbox is required.
+Legacy transfers lack v3 candidate authentication and receive credits;
+the server relays end-to-end capabilities without selecting a transfer version.
+Both images run as UID/GID 65532 and use /config; persistent mounts must be
+writable by that identity. Prefer TLS termination at a reverse proxy forwarding
+to port 8080. Native low-port TLS/ACME requires explicit runtime low-port
+permissions and routing, not a return to root. Validate renewal in staging.
+.PP
+Signaling sockets have a ten-second first-message deadline, bounded global
+and per-IP admission, and per-socket traffic limits. Public TURN deployments
+must configure and test the example coturn policy plus an egress firewall.
 .SH SEE ALSO
 .BR sp2p (1)
 .SH AUTHORS

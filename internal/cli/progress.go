@@ -149,6 +149,7 @@ func (p *Progress) ToggleQR() {
 
 // SetError sets the error state.
 func (p *Progress) SetError(msg string) {
+	msg = terminalText(msg)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.phase = PhaseError
@@ -179,6 +180,9 @@ func (p *Progress) ResetMethods() {
 
 // UpdateMethod updates a connection method status.
 func (p *Progress) UpdateMethod(status conn.MethodStatus) {
+	status.Method = terminalText(status.Method)
+	status.Detail = terminalText(status.Detail)
+	status.State = terminalText(status.State)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Unconditionally overwrite so the TCP preference window can re-announce
@@ -203,6 +207,7 @@ func (p *Progress) UpdateMethod(status conn.MethodStatus) {
 
 // SetTransfer sets up the transfer display.
 func (p *Progress) SetTransfer(name string, size uint64, fileCount int) {
+	name = terminalText(name)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.fileName = name
@@ -258,6 +263,7 @@ func (p *Progress) Stop() {
 // rendered as part of the ephemeral display during PhaseRegistered so that
 // toggling the QR code can cleanly replace it.
 func (p *Progress) ShowCode(code, baseURL string) {
+	code, baseURL = terminalText(code), terminalText(baseURL)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	// Keep the agent handoff prompt in the terminal scrollback. The share block
@@ -270,8 +276,18 @@ func (p *Progress) ShowCode(code, baseURL string) {
 	p.render()
 }
 
+// ShowWarning prints a permanent notice independently of verbose logging.
+func (p *Progress) ShowWarning(message string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.clearEphemeral()
+	fmt.Fprintf(p.out, "  WARNING: %s\n", terminalText(message))
+	p.render()
+}
+
 // ShowVerifyCode displays the verification code as permanent output.
 func (p *Progress) ShowVerifyCode(code string) {
+	code = terminalText(code)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.clearEphemeral()
@@ -302,6 +318,7 @@ func (p *Progress) ShowComplete(totalBytes uint64, duration time.Duration) {
 
 // ShowUpdateNotice prints a permanent update notice above the spinner.
 func (p *Progress) ShowUpdateNotice(currentVersion, serverVersion string) {
+	currentVersion, serverVersion = terminalText(currentVersion), terminalText(serverVersion)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.clearEphemeral()
@@ -311,6 +328,7 @@ func (p *Progress) ShowUpdateNotice(currentVersion, serverVersion string) {
 
 // Log prints a timestamped verbose diagnostic line as permanent output above the spinner.
 func (p *Progress) Log(msg string) {
+	msg = terminalText(msg)
 	if !p.verbose {
 		return
 	}

@@ -4,11 +4,14 @@ package archive
 
 import (
 	"archive/tar"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/zyno-io/sp2p/internal/fileutil"
 )
 
 // TarReader streams a directory as a tar archive.
@@ -61,9 +64,13 @@ func NewTarReaderFromPaths(paths []string) (*TarReader, error) {
 	return &TarReader{pr: pr}, nil
 }
 
-func writeTarPaths(w io.Writer, paths []string) error {
+func writeTarPaths(w io.Writer, paths []string) (retErr error) {
 	tw := tar.NewWriter(w)
-	defer tw.Close()
+	defer func() {
+		if err := tw.Close(); retErr == nil {
+			retErr = err
+		}
+	}()
 
 	for _, p := range paths {
 		info, err := os.Stat(p)
@@ -146,9 +153,13 @@ func addDirToTar(tw *tar.Writer, dir string) error {
 	})
 }
 
-func writeTar(w io.Writer, dir string) error {
+func writeTar(w io.Writer, dir string) (retErr error) {
 	tw := tar.NewWriter(w)
-	defer tw.Close()
+	defer func() {
+		if err := tw.Close(); retErr == nil {
+			retErr = err
+		}
+	}()
 
 	baseDir := filepath.Base(dir)
 
@@ -208,6 +219,33 @@ type TarInfo struct {
 	FileCount int    // number of regular files
 }
 
+func (info *TarInfo) addBytes(n uint64) error {
+	if n > ^uint64(0)-info.Size {
+		return fmt.Errorf("archive size overflows uint64")
+	}
+	info.Size += n
+	return nil
+}
+
+type headerCounter struct{ bytes uint64 }
+
+func (c *headerCounter) Write(p []byte) (int, error) { c.bytes += uint64(len(p)); return len(p), nil }
+
+// Account for the actual Go TAR serializer, including PAX extension headers.
+func encodedHeaderSize(name string, info os.FileInfo) (uint64, error) {
+	h, err := tar.FileInfoHeader(info, "")
+	if err != nil {
+		return 0, err
+	}
+	h.Name = filepath.ToSlash(name)
+	var c headerCounter
+	w := tar.NewWriter(&c)
+	if err := w.WriteHeader(h); err != nil {
+		return 0, err
+	}
+	return c.bytes, nil
+}
+
 // ComputeTarInfo walks paths and returns the exact tar stream size and file count.
 // This matches the output of NewTarReader / NewTarReaderFromPaths.
 func ComputeTarInfo(paths []string) (TarInfo, error) {
@@ -223,12 +261,20 @@ func ComputeTarInfo(paths []string) (TarInfo, error) {
 			}
 		} else if st.Mode().IsRegular() {
 			info.FileCount++
-			info.Size += 512 // tar header
-			info.Size += (uint64(st.Size()) + 511) &^ uint64(511) // data padded to 512
+			n, err := encodedHeaderSize(filepath.Base(p), st)
+			if err != nil {
+				return TarInfo{}, err
+			}
+			if err := info.addBytes(n); err != nil {
+				return TarInfo{}, err
+			}
+			if err := info.addBytes((uint64(st.Size()) + 511) &^ uint64(511)); err != nil {
+				return TarInfo{}, err
+			}
 		}
 	}
-	info.Size += 1024 // end-of-archive marker
-	return info, nil
+	err := info.addBytes(1024) // end-of-archive marker
+	return info, err
 }
 
 func tarInfoDir(dir string, info *TarInfo) error {
@@ -243,12 +289,20 @@ func tarInfoDir(dir string, info *TarInfo) error {
 		if rel == "." {
 			return nil // root directory skipped, matching writeTar
 		}
-		if fi.IsDir() {
-			info.Size += 512 // directory header
-		} else if fi.Mode().IsRegular() {
+		if fi.IsDir() || fi.Mode().IsRegular() {
+			n, err := encodedHeaderSize(filepath.Join(filepath.Base(dir), rel), fi)
+			if err != nil {
+				return err
+			}
+			if err := info.addBytes(n); err != nil {
+				return err
+			}
+		}
+		if fi.Mode().IsRegular() {
 			info.FileCount++
-			info.Size += 512 // file header
-			info.Size += (uint64(fi.Size()) + 511) &^ uint64(511)
+			if err := info.addBytes((uint64(fi.Size()) + 511) &^ uint64(511)); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -270,10 +324,43 @@ type StagedExtraction struct {
 	DestDir    string // final destination (absolute, symlinks resolved)
 }
 
+// CommitAs atomically publishes an extraction under a new directory.
+func (s *StagedExtraction) CommitAs(name string) (string, error) {
+	if name == "" || name == "." || name == ".." || filepath.Base(name) != name {
+		return "", fmt.Errorf("invalid archive output name")
+	}
+	dest := filepath.Join(s.DestDir, name)
+	src := s.StagingDir
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return "", fmt.Errorf("reading staging directory: %w", err)
+	}
+	if len(entries) == 1 && entries[0].Name() == name && entries[0].IsDir() {
+		src = filepath.Join(src, name)
+	}
+	if err := fileutil.RenameNoReplace(src, dest); err != nil {
+		return "", fmt.Errorf("publishing archive: %w", err)
+	}
+	if src != s.StagingDir {
+		if err := os.Remove(s.StagingDir); err != nil {
+			staging := s.StagingDir
+			s.StagingDir = ""
+			return dest, fmt.Errorf("published %s but could not remove empty staging %s: %w", dest, staging, err)
+		}
+	}
+	s.StagingDir = "" // publication transfers ownership
+	return dest, nil
+}
+
 // Extract reads a tar stream into a staging directory without moving to dest.
 // Call Commit() on the result to finalize, or Rollback() to clean up.
-func Extract(r io.Reader, destDir string) (*StagedExtraction, error) {
+func Extract(r io.Reader, destDir string, byteLimit ...uint64) (_ *StagedExtraction, retErr error) {
 	tr := tar.NewReader(r)
+	limit := uint64(1 << 40)
+	if len(byteLimit) > 0 && byteLimit[0] != 0 {
+		limit = byteLimit[0]
+	}
+	var expanded uint64
 
 	absDest, err := filepath.Abs(destDir)
 	if err != nil {
@@ -295,6 +382,11 @@ func Extract(r io.Reader, destDir string) (*StagedExtraction, error) {
 	}
 
 	staged := &StagedExtraction{StagingDir: tmpDir, DestDir: absDest}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, staged.Rollback())
+		}
+	}()
 
 	var entryCount int
 
@@ -344,6 +436,11 @@ func Extract(r io.Reader, destDir string) (*StagedExtraction, error) {
 				return nil, err
 			}
 		case tar.TypeReg:
+			if header.Size < 0 || uint64(header.Size) > limit-expanded {
+				staged.Rollback()
+				return nil, fmt.Errorf("archive exceeds expanded output limit (%d bytes)", limit)
+			}
+			expanded += uint64(header.Size)
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				staged.Rollback()
 				return nil, err
@@ -381,25 +478,30 @@ func (s *StagedExtraction) Commit() error {
 	if err != nil {
 		return fmt.Errorf("reading extracted entries: %w", err)
 	}
-	for _, entry := range entries {
-		src := filepath.Join(s.StagingDir, entry.Name())
-		dst := filepath.Join(s.DestDir, entry.Name())
-		// Refuse to overwrite existing paths in the destination.
-		if _, err := os.Lstat(dst); err == nil {
-			return fmt.Errorf("refusing to overwrite existing path: %s", entry.Name())
-		}
-		if err := os.Rename(src, dst); err != nil {
-			return fmt.Errorf("moving %s to destination: %w", entry.Name(), err)
+	if len(entries) > 1 {
+		return fmt.Errorf("multi-root archives require an explicit destination via CommitAs")
+	}
+	if len(entries) == 1 {
+		entry := entries[0]
+		if err := fileutil.RenameNoReplace(filepath.Join(s.StagingDir, entry.Name()), filepath.Join(s.DestDir, entry.Name())); err != nil {
+			return fmt.Errorf("publishing archive without replacement: %w", err)
 		}
 	}
 	// Remove the now-empty staging dir.
 	os.Remove(s.StagingDir)
+	s.StagingDir = ""
 	return nil
 }
 
 // Rollback removes the staging directory and all its contents.
-func (s *StagedExtraction) Rollback() {
-	os.RemoveAll(s.StagingDir)
+func (s *StagedExtraction) Rollback() error {
+	if s.StagingDir != "" {
+		if err := os.RemoveAll(s.StagingDir); err != nil {
+			return fmt.Errorf("cleanup failed; recover staging at %s: %w", s.StagingDir, err)
+		}
+		s.StagingDir = ""
+	}
+	return nil
 }
 
 // Untar extracts a tar stream to a directory.
@@ -411,8 +513,7 @@ func Untar(r io.Reader, destDir string) error {
 		return err
 	}
 	if err := staged.Commit(); err != nil {
-		staged.Rollback()
-		return err
+		return errors.Join(err, staged.Rollback())
 	}
 	return nil
 }

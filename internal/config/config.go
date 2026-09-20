@@ -16,14 +16,16 @@ import (
 
 // Config holds user-level defaults loaded from the config file.
 type Config struct {
-	Server     string `yaml:"server"`
-	URL        string `yaml:"url"`
-	Compress   *int   `yaml:"compress"`
-	Transport  string `yaml:"transport"`
-	AllowRelay bool   `yaml:"allow-relay"`
-	Output     string `yaml:"output"`
-	Verbose    bool   `yaml:"verbose"`
-	Parallel   *int   `yaml:"parallel"` // parallel TCP connections: 0=auto (RTT-based), 1=single, 2-6=force count
+	Server          string `yaml:"server"`
+	URL             string `yaml:"url"`
+	Compress        *int   `yaml:"compress"`
+	Transport       string `yaml:"transport"`
+	AllowRelay      bool   `yaml:"allow-relay"`
+	Output          string `yaml:"output"`
+	Verbose         bool   `yaml:"verbose"`
+	Parallel        *int   `yaml:"parallel"` // parallel TCP connections: 0=auto (RTT-based), 1=single, 2-6=force count
+	MaxReceiveBytes uint64 `yaml:"max-receive-bytes"`
+	MaxExtractBytes uint64 `yaml:"max-extract-bytes"`
 }
 
 // Load reads configuration from $XDG_CONFIG_HOME/sp2p/config.yaml

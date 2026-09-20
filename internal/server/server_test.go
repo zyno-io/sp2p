@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -654,7 +655,7 @@ func TestExtractIP_XForwardedFor(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	// Last IP is the one appended by the trusted reverse proxy.
 	r.Header.Set("X-Forwarded-For", "203.0.113.50, 70.41.3.18, 150.172.238.178")
-	if got := extractIP(r, true); got != "150.172.238.178" {
+	if got := extractIP(r, true, netip.MustParsePrefix("192.0.2.1/32")); got != "150.172.238.178" {
 		t.Fatalf("expected 150.172.238.178, got %s", got)
 	}
 }
@@ -662,7 +663,7 @@ func TestExtractIP_XForwardedFor(t *testing.T) {
 func TestExtractIP_XForwardedForSingle(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("X-Forwarded-For", "8.8.8.8")
-	if got := extractIP(r, true); got != "8.8.8.8" {
+	if got := extractIP(r, true, netip.MustParsePrefix("192.0.2.1/32")); got != "8.8.8.8" {
 		t.Fatalf("expected 8.8.8.8, got %s", got)
 	}
 }
@@ -1363,7 +1364,7 @@ func TestSignal_RelayRetryDeliversEphemeralTURN(t *testing.T) {
 		TURNGen: &TURNCredentialGenerator{
 			URLs:   wantURLs,
 			Secret: secret,
-			TTL:    24 * time.Hour,
+			TTL:    5 * time.Minute,
 		},
 	})
 
@@ -1385,8 +1386,12 @@ func TestSignal_RelayRetryDeliversEphemeralTURN(t *testing.T) {
 		t.Fatalf("URL mismatch: got %s", srv.URLs[0])
 	}
 
-	// Username should be a numeric unix timestamp.
-	_, err := strconv.ParseInt(srv.Username, 10, 64)
+	// Expiry is followed by an opaque per-session identity for TURN quotas.
+	expiry, identity, ok := strings.Cut(srv.Username, ":")
+	if !ok || identity == "" {
+		t.Fatalf("missing TURN session identity: %q", srv.Username)
+	}
+	_, err := strconv.ParseInt(expiry, 10, 64)
 	if err != nil {
 		t.Fatalf("username is not a numeric timestamp: %q", srv.Username)
 	}
@@ -1396,9 +1401,26 @@ func TestSignal_RelayRetryDeliversEphemeralTURN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("credential is not valid base64: %q", srv.Credential)
 	}
+	// A second request from either participant must share the original outcome.
+	wsSend(t, receiver, signal.TypeRelayRetry, struct{}{})
+	firstRelay := wsReadSlow(t, receiver)
+	if firstRelay.Type != signal.TypeRelayRetry {
+		t.Fatalf("expected initial relay notification, got %s", firstRelay.Type)
+	}
+	repeated := wsReadSlow(t, receiver)
+	var repeatedCredentials signal.TURNCredentials
+	if repeated.Type != signal.TypeTURNCredentials {
+		t.Fatalf("expected cached credentials, got %s", repeated.Type)
+	}
+	if err := repeated.ParsePayload(&repeatedCredentials); err != nil {
+		t.Fatal(err)
+	}
+	if len(repeatedCredentials.ICEServers) != 1 || repeatedCredentials.ICEServers[0].Username != srv.Username || repeatedCredentials.ICEServers[0].Credential != srv.Credential {
+		t.Fatal("TURN credentials renewed within one session")
+	}
 
-	// Receiver gets the relayed relay-retry.
-	relayed := wsReadSlow(t, receiver)
+	// Sender gets the receiver's relayed relay-retry.
+	relayed := wsReadSlow(t, sender)
 	if relayed.Type != signal.TypeRelayRetry {
 		t.Fatalf("expected relay-retry, got %s", relayed.Type)
 	}

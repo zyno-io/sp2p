@@ -6,7 +6,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/coder/websocket"
 )
@@ -14,7 +13,7 @@ import (
 // dummyConn returns a non-nil *websocket.Conn for use in tests that only need
 // to store the pointer without actually using the connection.
 func dummyConn() *websocket.Conn {
-	return (*websocket.Conn)(unsafe.Pointer(uintptr(1)))
+	return new(websocket.Conn)
 }
 
 func TestSession_CreateAndGetFields(t *testing.T) {

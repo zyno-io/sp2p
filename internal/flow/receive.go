@@ -4,6 +4,7 @@ package flow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,14 +22,16 @@ import (
 
 // ReceiveConfig holds configuration for the receive flow.
 type ReceiveConfig struct {
-	ServerURL     string    // WebSocket URL for signaling server
-	Code          string    // Transfer code "SESSION_ID-SEED"
-	OutputDir     string    // Directory to save received files
-	Writer        io.Writer // Alternative: write to this instead of OutputDir (e.g., stdout)
-	RelayOK       bool      // Allow TURN relay without prompting
-	ClientVersion string    // Client version for update check
-	Transport     string    // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
-	Parallel      int       // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	ServerURL       string    // WebSocket URL for signaling server
+	Code            string    // Transfer code "SESSION_ID-SEED"
+	OutputDir       string    // Directory to save received files
+	Writer          io.Writer // Alternative: write to this instead of OutputDir (e.g., stdout)
+	RelayOK         bool      // Allow TURN relay without prompting
+	ClientVersion   string    // Client version for update check
+	Transport       string    // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
+	Parallel        int       // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	MaxReceiveBytes uint64    // zero = 1 TiB
+	MaxExtractBytes uint64    // zero = 1 TiB
 }
 
 // ReceiveResult holds the outcome of a receive flow.
@@ -81,19 +84,19 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 
 	// Generate key pair and send immediately.
 	h.OnVerbose("generating X25519 key pair")
-	kp, err := crypto.GenerateKeyPair()
+	kp, err := crypto.GenerateTransferKeyPair()
 	if err != nil {
 		return nil, err
 	}
 	h.OnPhaseChanged(PhaseKeyExchange)
-	// Advertise ParallelTCP unless explicitly disabled (parallel=1).
+	// Advertise v3-only parallel TCP. The old capability would make legacy
+	// peers start incompatible secondary negotiation before we can skip it.
 	// The sender will only echo it back for CLI-to-CLI transfers (after
 	// seeing PeerJoined with clientType), so browser receivers will never
 	// enter parallel negotiation.
 	if err := sigClient.Send(ctx, signal.TypeCrypto, signal.CryptoExchange{
-		PublicKey:              kp.Public,
-		ParallelTCP:            cfg.Parallel != 1,
-		ParallelTCPDoneBarrier: cfg.Parallel != 1,
+		PublicKey:     kp.Public,
+		ParallelTCPV3: cfg.Parallel != 1,
 	}); err != nil {
 		return nil, fmt.Errorf("sending public key: %w", err)
 	}
@@ -130,7 +133,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 				}
 				senderPub = ce.PublicKey
 				senderPreferTCP = ce.PreferTCP
-				senderParallelTCP = ce.ParallelTCP
+				senderParallelTCP = ce.ParallelTCPV3
 			case signal.TypePeerLeft:
 				h.OnError("Sender disconnected")
 				return nil, fmt.Errorf("peer disconnected")
@@ -148,7 +151,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 				default:
 					h.OnError(e.Message)
 				}
-				return nil, fmt.Errorf("server error: %s", e.Message)
+				return nil, signalingError(e)
 			}
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -156,6 +159,10 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	}
 
 	// Derive keys.
+	protocol, err := crypto.TransferProtocol(senderPub, kp.Public)
+	if err != nil {
+		return nil, err
+	}
 	h.OnVerbose("public keys exchanged, deriving session keys")
 	keys, err := crypto.DeriveKeys(kp.Private, senderPub, seedRaw, sessionID, senderPub, kp.Public)
 	if err != nil {
@@ -207,9 +214,21 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		OnLog:          onLog,
 		DevMode:        cfg.ClientVersion == "dev",
 	}
-	if senderPreferTCP && cfg.Transport == conn.TransportAuto {
+	// In v3 the sender selects an authenticated candidate before the receiver's
+	// candidate authentication returns. Holding that selected WebRTC candidate
+	// here would delay key confirmation beyond the sender's key-confirmation deadline.
+	// Legacy peers do not have sender-led authenticated selection, so retain the
+	// symmetric TCP preference for their advertised large transfers.
+	if senderPreferTCP && cfg.Transport == conn.TransportAuto && protocol != 3 {
 		connCfg.TCPPreferWait = tcpPreferWait
 		h.OnVerbose(fmt.Sprintf("sender indicated large transfer — TCP preferred, will wait %v for TCP if WebRTC connects first", tcpPreferWait))
+	}
+	// Client type is only an unauthenticated transport hint, never an auth gate.
+	if protocol == 3 {
+		connCfg.Authenticate = func(ctx context.Context, c conn.P2PConn) (func(context.Context) error, error) {
+			h.OnVerbose("authenticating v3 connection candidate")
+			return crypto.AuthenticateCandidate(ctx, c, keys, senderPub, kp.Public, false)
+		}
 	}
 	estResult, err := conn.Establish(attemptCtx, connCfg)
 	attemptCancel()
@@ -249,6 +268,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		return nil, err
 	}
 	h.OnVerbose("key confirmation successful")
+	reportProtocol(protocol, h)
 
 	// Encrypted stream (receiver writes with k_r2s, reads with k_s2r).
 	h.OnVerbose("establishing encrypted stream")
@@ -262,19 +282,19 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	var frw transfer.FrameReadWriter = encStream
 	var deadliner transfer.DeadlineSetter = p2pConn
 	var multiStream *transfer.MultiStream
-	canParallel := senderParallelTCP && estResult.TCPResult != nil && cfg.Parallel != 1
+	canParallel := protocol == 3 && senderParallelTCP && estResult.TCPResult != nil && cfg.Parallel != 1
 	if canParallel {
 		h.OnVerbose("negotiating parallel TCP connections")
 		sharedSecret, ssErr := crypto.ComputeSharedSecret(kp.Private, senderPub)
 		if ssErr != nil {
-			h.OnVerbose(fmt.Sprintf("shared secret computation failed: %v — using single connection", ssErr))
+			return nil, fmt.Errorf("parallel shared secret: %w", ssErr)
 		} else {
 			pfrw, pd, negErr := negotiateReceiver(ctx, encStream, p2pConn, estResult.TCPResult,
 				sharedSecret, seedRaw, cfg.Parallel,
 				sessionID, senderPub, kp.Public,
 				func(msg string) { h.OnVerbose(msg) })
 			if negErr != nil {
-				h.OnVerbose(fmt.Sprintf("parallel negotiation failed: %v — using single connection", negErr))
+				return nil, fmt.Errorf("parallel negotiation failed: %w", negErr)
 			} else {
 				frw = pfrw
 				deadliner = pd
@@ -291,33 +311,40 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	h.OnVerbose("closing signaling connection (P2P established)")
 	sigClient.Close()
 
-	// Start heartbeat for peer liveness detection over P2P.
-	hb := transfer.StartHeartbeat()
-	defer hb.Stop()
-
-	// Monitor heartbeat timeout — close P2P to unblock transfer I/O.
-	transferDone := make(chan struct{})
-	defer close(transferDone)
-	go func() {
-		select {
-		case <-hb.Done():
-			if multiStream != nil {
-				multiStream.Close() // also closes p2pConn (conns[0])
-			} else {
-				p2pConn.Close()
-			}
-		case <-transferDone:
-		}
-	}()
+	// Protocol v3 continuously drains controls and applies receiver credits.
+	var transportCloser io.Closer = p2pConn
+	if multiStream != nil {
+		transportCloser = multiStream
+	}
+	if protocol == 3 {
+		sessionIO := transfer.NewSession(ctx, frw, transportCloser, false)
+		defer sessionIO.Close()
+		ctx = sessionIO.Context()
+		frw = sessionIO
+	}
 
 	// Receive via pipe.
 	startTime := time.Now()
 	h.OnPhaseChanged(PhaseTransferring)
 	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
 
 	receiver := transfer.NewReceiver(frw)
+	receiver.MaxBytes = cfg.MaxReceiveBytes
+	receiver.AllowLegacyArchiveSizeMismatch = protocol == 2
 	receiver.SetIdleTimeout(deadliner, 2*time.Minute)
-	receiver.SetHeartbeat(hb)
+	outputDone := make(chan error, 1)
+	receiver.Finalize = func() error {
+		// Verified EOF lets the sink finish before we await its commit result.
+		pw.Close()
+		select {
+		case err := <-outputDone:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 
 	// Channel to learn metadata before consuming the pipe.
 	metaCh := make(chan *transfer.Metadata, 1)
@@ -372,7 +399,11 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		_, copyErr = io.Copy(cfg.Writer, pr)
 	} else if meta.IsFolder {
 		// Stream tar directly into staging directory — no temp file needed.
-		staged, copyErr = archive.Extract(pr, outDir)
+		staged, copyErr = archive.Extract(pr, outDir, cfg.MaxExtractBytes)
+		if copyErr == nil {
+			// TAR has its own EOF marker; drain to the verified protocol EOF.
+			_, copyErr = io.Copy(io.Discard, pr)
+		}
 	} else {
 		// Single file: write to temp file.
 		tmpFile, ferr := os.CreateTemp(outDir, "sp2p-recv-*")
@@ -382,9 +413,9 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		}
 		tmpPath = tmpFile.Name()
 		_, copyErr = io.Copy(tmpFile, pr)
-		tmpFile.Close()
-		if copyErr != nil {
-			os.Remove(tmpPath)
+		closeErr := tmpFile.Close()
+		if copyErr == nil {
+			copyErr = closeErr
 		}
 	}
 
@@ -394,7 +425,36 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		pr.Close()
 	}
 
+	// Only EOF from verification can reach publication successfully.
+	meta.Name = filepath.Base(meta.Name)
+	if meta.Name == "." || meta.Name == "/" || meta.Name == ".." {
+		meta.Name = "received-file"
+	}
+	var savedPath string
+	if copyErr == nil {
+		if staged != nil {
+			savedPath, copyErr = staged.CommitAs(meta.Name)
+		} else if tmpPath != "" {
+			savedPath, copyErr = safeRename(tmpPath, meta.Name, outDir)
+			if copyErr == nil {
+				tmpPath = ""
+			}
+		}
+	}
+	outputDone <- copyErr
 	result := <-errCh
+	cleanup := func() error {
+		var cleanupErr error
+		if tmpPath != "" {
+			if err := os.Remove(tmpPath); err != nil && !os.IsNotExist(err) {
+				cleanupErr = fmt.Errorf("cleanup failed; recover staging at %s: %w", tmpPath, err)
+			}
+		}
+		if staged != nil {
+			cleanupErr = errors.Join(cleanupErr, staged.Rollback())
+		}
+		return cleanupErr
+	}
 	// Send cancel if we errored out (best-effort).
 	if result.err != nil {
 		if ctx.Err() != nil {
@@ -402,52 +462,17 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		} else {
 			transfer.WriteCancel(frw, transfer.CancelError)
 		}
-		if tmpPath != "" {
-			os.Remove(tmpPath)
-		}
-		if staged != nil {
-			staged.Rollback()
-		}
+		result.err = errors.Join(result.err, cleanup())
 		h.OnError(result.err.Error())
 		return nil, result.err
 	}
 	if copyErr != nil {
 		transfer.WriteCancel(frw, transfer.CancelError)
-		if tmpPath != "" {
-			os.Remove(tmpPath)
-		}
-		if staged != nil {
-			staged.Rollback()
-		}
-		return nil, fmt.Errorf("writing output: %w", copyErr)
+		return nil, errors.Join(fmt.Errorf("writing output: %w", copyErr), cleanup())
 	}
 
 	totalBytes, _ := receiver.Stats()
 	duration := time.Since(startTime)
-
-	// Sanitize filename.
-	meta.Name = filepath.Base(meta.Name)
-	if meta.Name == "." || meta.Name == "/" || meta.Name == ".." {
-		meta.Name = "received-file"
-	}
-
-	// Handle file output → final location.
-	var savedPath string
-	if staged != nil {
-		// Folder: hash verified, commit from staging to destination.
-		if err := staged.Commit(); err != nil {
-			staged.Rollback()
-			return nil, fmt.Errorf("extracting folder: %w", err)
-		}
-		savedPath = filepath.Join(outDir, meta.Name)
-	} else if tmpPath != "" {
-		sp, err := safeRename(tmpPath, meta.Name, outDir)
-		if err != nil {
-			os.Remove(tmpPath)
-			return nil, fmt.Errorf("renaming output: %w", err)
-		}
-		savedPath = sp
-	}
 
 	h.OnPhaseChanged(PhaseDone)
 	h.OnComplete(totalBytes, duration)

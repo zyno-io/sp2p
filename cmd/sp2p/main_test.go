@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"os"
@@ -11,7 +12,28 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zyno-io/sp2p/internal/config"
 )
+
+func TestManualProtocolFlagIsNotExposed(t *testing.T) {
+	originalArgs := os.Args
+	t.Cleanup(func() { os.Args = originalArgs })
+	for _, command := range []string{"send", "receive"} {
+		for _, version := range []string{"2", "3"} {
+			os.Args = []string{"sp2p", command, "-protocol=" + version, "unused"}
+			var err error
+			if command == "send" {
+				err = runSend(context.Background(), config.Config{}, "http://127.0.0.1:1", "")
+			} else {
+				err = runReceive(context.Background(), config.Config{}, "http://127.0.0.1:1")
+			}
+			if err == nil || !strings.Contains(err.Error(), "flag provided but not defined: -protocol") {
+				t.Fatalf("%s %s: %v", command, version, err)
+			}
+		}
+	}
+}
 
 func TestDeriveWSURL(t *testing.T) {
 	tests := []struct {

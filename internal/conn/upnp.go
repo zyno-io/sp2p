@@ -5,6 +5,7 @@ package conn
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/huin/goupnp/dcps/internetgateway2"
@@ -12,25 +13,56 @@ import (
 
 const upnpTimeout = 5 * time.Second
 
+type upnpDeleter interface {
+	DeletePortMappingCtx(context.Context, string, uint16, string) error
+}
+
 // UPnPMapping represents an active UPnP port mapping.
 type UPnPMapping struct {
 	ExternalPort uint16
 	InternalPort uint16
 	ExternalIP   string
-	client       any // underlying UPnP client for cleanup
+	client       upnpDeleter
 }
 
+// mappingOwner closes the handoff even when discovery finishes after cleanup.
+// Router I/O runs outside the lock; each mapping has exactly one cleanup owner.
+type mappingOwner struct {
+	mu      sync.Mutex
+	mapping *UPnPMapping
+	closed  bool
+}
+
+func (o *mappingOwner) register(m *UPnPMapping) bool {
+	o.mu.Lock()
+	if o.closed || o.mapping != nil {
+		o.mu.Unlock()
+		m.RemoveMapping()
+		return false
+	}
+	o.mapping = m
+	o.mu.Unlock()
+	return true
+}
+
+func (o *mappingOwner) close() {
+	o.mu.Lock()
+	o.closed = true
+	m := o.mapping
+	o.mapping = nil
+	o.mu.Unlock()
+	m.RemoveMapping()
+}
 
 // RemoveMapping removes a UPnP port mapping.
 func (m *UPnPMapping) RemoveMapping() {
 	if m == nil {
 		return
 	}
-	if client, ok := m.client.(*internetgateway2.WANIPConnection2); ok {
-		client.DeletePortMapping("", m.ExternalPort, "TCP")
-	}
-	if client, ok := m.client.(*internetgateway2.WANIPConnection1); ok {
-		client.DeletePortMapping("", m.ExternalPort, "TCP")
+	ctx, cancel := context.WithTimeout(context.Background(), upnpTimeout)
+	defer cancel()
+	if m.client != nil {
+		m.client.DeletePortMappingCtx(ctx, "", m.ExternalPort, "TCP")
 	}
 }
 
@@ -46,14 +78,14 @@ func discoverAndMap(ctx context.Context, localPort uint16) (*UPnPMapping, error)
 
 		// Try to map the same external port.
 		err = client.AddPortMappingCtx(ctx,
-			"",          // remote host (empty = any)
-			localPort,   // external port
-			"TCP",       // protocol
-			localPort,   // internal port
+			"",           // remote host (empty = any)
+			localPort,    // external port
+			"TCP",        // protocol
+			localPort,    // internal port
 			getLocalIP(), // internal client
-			true,        // enabled
-			"sp2p",      // description
-			3600,        // lease duration (1 hour)
+			true,         // enabled
+			"sp2p",       // description
+			3600,         // lease duration (1 hour)
 		)
 		if err != nil {
 			return nil, fmt.Errorf("adding port mapping: %w", err)

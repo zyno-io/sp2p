@@ -4,6 +4,7 @@
 
 import { log } from "./log";
 
+// Stable signaling version; transfer capabilities are authenticated end-to-end.
 export const PROTOCOL_VERSION = 2;
 
 export interface Envelope {

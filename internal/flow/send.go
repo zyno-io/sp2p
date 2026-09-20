@@ -76,7 +76,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 			if err := env.ParsePayload(&e); err != nil {
 				return fmt.Errorf("server error (malformed payload)")
 			}
-			return fmt.Errorf("server error: %s", e.Message)
+			return signalingError(e)
 		}
 		if env.Type != signal.TypeWelcome {
 			return fmt.Errorf("unexpected message: %s", env.Type)
@@ -118,7 +118,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 
 	// Generate key pair.
 	h.OnVerbose("generating X25519 key pair")
-	kp, err := crypto.GenerateKeyPair()
+	kp, err := crypto.GenerateTransferKeyPair()
 	if err != nil {
 		return err
 	}
@@ -127,7 +127,6 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	var receiverPub []byte
 	var peerClientType string
 	var peerParallelTCP bool
-	var peerParallelTCPDoneBarrier bool
 	for receiverPub == nil {
 		select {
 		case env := <-sigClient.Incoming:
@@ -153,8 +152,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 				// delivers PeerJoined (which sets it) before forwarding the
 				// peer's CryptoExchange message.
 				if peerClientType == signal.ClientTypeCLI && cfg.Parallel != 1 {
-					ce.ParallelTCP = true
-					ce.ParallelTCPDoneBarrier = true
+					ce.ParallelTCPV3 = true
 				}
 				if err := sigClient.Send(ctx, signal.TypeCrypto, ce); err != nil {
 					return fmt.Errorf("sending public key: %w", err)
@@ -165,8 +163,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 					return fmt.Errorf("parsing crypto: %w", err)
 				}
 				receiverPub = ce.PublicKey
-				peerParallelTCP = ce.ParallelTCP
-				peerParallelTCPDoneBarrier = ce.ParallelTCPDoneBarrier
+				peerParallelTCP = ce.ParallelTCPV3
 			case signal.TypePeerLeft:
 				h.OnError("Receiver disconnected")
 				return fmt.Errorf("peer disconnected")
@@ -175,7 +172,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 				if err := env.ParsePayload(&e); err != nil {
 					return fmt.Errorf("server error (malformed payload)")
 				}
-				return fmt.Errorf("server error: %s", e.Message)
+				return signalingError(e)
 			}
 		case <-ctx.Done():
 			return ctx.Err()
@@ -183,6 +180,10 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	}
 
 	// Derive keys.
+	protocol, err := crypto.TransferProtocol(kp.Public, receiverPub)
+	if err != nil {
+		return err
+	}
 	h.OnVerbose("public keys exchanged, deriving session keys")
 	keys, err := crypto.DeriveKeys(kp.Private, receiverPub, seedRaw, sessionID, kp.Public, receiverPub)
 	if err != nil {
@@ -244,8 +245,16 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 		DevMode:        cfg.ClientVersion == "dev",
 	}
 	if cfg.Transport == conn.TransportAuto && meta.Size >= tcpPreferThreshold {
+		// Selection is sender-led after candidate authentication for CLI peers.
 		connCfg.TCPPreferWait = tcpPreferWait
 		h.OnVerbose(fmt.Sprintf("large transfer (%d bytes) — TCP preferred, will wait %v for TCP if WebRTC connects first", meta.Size, tcpPreferWait))
+	}
+	// Client type is only an unauthenticated transport hint, never an auth gate.
+	if protocol == 3 {
+		connCfg.Authenticate = func(ctx context.Context, c conn.P2PConn) (func(context.Context) error, error) {
+			h.OnVerbose("authenticating v3 connection candidate")
+			return crypto.AuthenticateCandidate(ctx, c, keys, kp.Public, receiverPub, true)
+		}
 	}
 	estResult, err := conn.Establish(attemptCtx, connCfg)
 	attemptCancel()
@@ -294,6 +303,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 		return err
 	}
 	h.OnVerbose("key confirmation successful")
+	reportProtocol(protocol, h)
 
 	// Encrypted stream.
 	h.OnVerbose("establishing encrypted stream")
@@ -306,22 +316,19 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	var frw transfer.FrameReadWriter = encStream
 	var deadliner transfer.DeadlineSetter = p2pConn
 	var multiStream *transfer.MultiStream
-	canParallel := peerParallelTCP && peerParallelTCPDoneBarrier && estResult.TCPResult != nil && cfg.Parallel != 1
-	if peerParallelTCP && !peerParallelTCPDoneBarrier && cfg.Parallel != 1 {
-		h.OnVerbose("peer does not support ordered parallel TCP completion — using single connection")
-	}
+	canParallel := protocol == 3 && peerParallelTCP && estResult.TCPResult != nil && cfg.Parallel != 1
 	if canParallel {
 		h.OnVerbose("negotiating parallel TCP connections")
 		sharedSecret, ssErr := crypto.ComputeSharedSecret(kp.Private, receiverPub)
 		if ssErr != nil {
-			h.OnVerbose(fmt.Sprintf("shared secret computation failed: %v — using single connection", ssErr))
+			return fmt.Errorf("parallel shared secret: %w", ssErr)
 		} else {
 			pfrw, pd, negErr := negotiateSender(ctx, encStream, p2pConn, estResult.TCPResult,
 				sharedSecret, seedRaw, meta.Size, cfg.Parallel,
 				sessionID, kp.Public, receiverPub,
 				func(msg string) { h.OnVerbose(msg) })
 			if negErr != nil {
-				h.OnVerbose(fmt.Sprintf("parallel negotiation failed: %v — using single connection", negErr))
+				return fmt.Errorf("parallel negotiation failed: %w", negErr)
 			} else {
 				frw = pfrw
 				deadliner = pd
@@ -338,24 +345,17 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	h.OnVerbose("closing signaling connection (P2P established)")
 	sigClient.Close()
 
-	// Start heartbeat for peer liveness detection over P2P.
-	hb := transfer.StartHeartbeat()
-	defer hb.Stop()
-
-	// Monitor heartbeat timeout — close P2P to unblock transfer I/O.
-	transferDone := make(chan struct{})
-	defer close(transferDone)
-	go func() {
-		select {
-		case <-hb.Done():
-			if multiStream != nil {
-				multiStream.Close() // also closes p2pConn (conns[0])
-			} else {
-				p2pConn.Close()
-			}
-		case <-transferDone:
-		}
-	}()
+	// Protocol v3 continuously drains controls and applies receiver credits.
+	var transportCloser io.Closer = p2pConn
+	if multiStream != nil {
+		transportCloser = multiStream
+	}
+	if protocol == 3 {
+		sessionIO := transfer.NewSession(ctx, frw, transportCloser, true)
+		defer sessionIO.Close()
+		ctx = sessionIO.Context()
+		frw = sessionIO
+	}
 
 	// Transfer.
 	startTime := time.Now()
@@ -363,7 +363,6 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	h.OnPhaseChanged(PhaseTransferring)
 	sender := transfer.NewSender(frw, meta)
 	sender.SetIdleTimeout(deadliner, 2*time.Minute)
-	sender.SetHeartbeat(hb)
 	if cfg.CompressLevel > 0 {
 		if err := sender.SetCompression(cfg.CompressLevel); err != nil {
 			return fmt.Errorf("setting compression: %w", err)
@@ -371,7 +370,6 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 		h.OnVerbose(fmt.Sprintf("compression enabled (zstd, level %d)", cfg.CompressLevel))
 	}
 	sendErr := sender.Send(ctx, cfg.Reader, func(sent uint64) {
-		hb.Touch() // successful writes prove the connection is alive
 		h.OnProgress(sent)
 	})
 

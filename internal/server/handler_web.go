@@ -94,6 +94,7 @@ func (h *WebHandler) ServeLLMsFull(w http.ResponseWriter, r *http.Request) {
 
 // ServeAsset serves static assets (CSS, JS, etc.).
 func (h *WebHandler) ServeAsset(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
 	if h.fileServer == nil {
 		http.NotFound(w, r)
 		return
@@ -136,6 +137,7 @@ func (h *WebHandler) injectAgentGuidePlaceholders(data []byte) []byte {
 }
 
 func servePlaceholder(w http.ResponseWriter, title, body string) {
+	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Title is escaped; body is trusted static HTML from callers.
 	w.Write([]byte(`<!DOCTYPE html><html><body><h1>` + html.EscapeString(title) + `</h1><p>` + body + `</p></body></html>`))
@@ -153,7 +155,7 @@ func setAssetCacheHeaders(w http.ResponseWriter, path string) {
 }
 
 func setSecurityHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' wss: ws:; style-src 'self'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' wss: ws:; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("Referrer-Policy", "no-referrer")

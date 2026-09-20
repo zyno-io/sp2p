@@ -36,7 +36,7 @@ Secure peer-to-peer data transfer. End-to-end encrypted. Send files, folders, an
 
 ## Quick Start
 
-Send directly from the browser at [sp2p.io](https://sp2p.io), or use the CLI. No install required — pipe the bootstrap script to send a file:
+Send directly from the browser at [sp2p.io](https://sp2p.io), or use the CLI. Bootstrap needs no GitHub CLI (`gh`): by default, shell users need curl or wget and one of `sha256sum`, `shasum`, or `openssl` (tried in that order); PowerShell uses built-in download and hashing commands. If no supported hash tool is available, bootstrap stops unless you explicitly select the insecure bypass described below. To send without installing SP2P:
 
 ```bash
 curl -f https://sp2p.io | sh -s photo.jpg
@@ -48,7 +48,19 @@ The receiver can use the browser link, or receive via terminal:
 curl -f https://sp2p.io/r | sh -s SESSION_ID-SEED
 ```
 
-The bootstrap script downloads a temporary CLI binary, runs the transfer, and cleans up.
+By default, the bootstrap resolves a fixed platform release and checks the temporary CLI archive against that release's `checksums.txt` before extraction, then runs the transfer and cleans up. Missing, duplicate, malformed, or mismatched checksums stop execution. This trusts GitHub's HTTPS release channel, not an independently verified signer; browser JavaScript and bootstrap scripts also trust their distribution host. Old releases normally need a matching checksum manifest, not an attestation. Unresolved releases and local development archives are rejected; use a locally built CLI for development. For stronger provenance checks, see [optional artifact verification and endpoint trust](SECURITY.md#artifact-verification-and-endpoint-trust).
+
+For a manual opt-out, put `--insecure-skip-checksum` **first among the bootstrap arguments**. It skips the checksum manifest and hashing, requires no hash tool, and prints a warning to stderr before running downloaded code without an integrity check. It does not disable TLS certificate checks or fixed-release/platform URL validation. This is a bootstrap-only flag, not an installed `sp2p` CLI option; it is removed before passing the remaining arguments to SP2P.
+
+```bash
+curl -f https://sp2p.io | sh -s -- --insecure-skip-checksum ./report.pdf
+```
+
+```powershell
+& ([scriptblock]::Create((irm 'https://sp2p.io/ps'))) '--insecure-skip-checksum' 'C:\path\to\report.pdf'
+```
+
+The same flag works with the receive bootstrap at `/r` (shell) or `/ps/r` (PowerShell), followed by the transfer code. Do not use it unless you explicitly accept the unchecked-download risk.
 
 [sp2p.io](https://sp2p.io) is a public signaling and [relay server](#turn-relay) provided for public use by [Zyno Consulting](https://zyno.io). You can also [self-host](#self-hosting) your own server.
 
@@ -62,7 +74,7 @@ brew install zyno-io/tap/sp2p
 
 ### Linux
 
-The download links below (`sp2p.io/dl/...`) redirect to the latest GitHub release for each package.
+The download links below (`sp2p.io/dl/...`) redirect to the latest GitHub release for each package. Verify manually downloaded packages with the [trusted verifier](SECURITY.md#artifact-verification-and-endpoint-trust) before installation.
 
 **Debian / Ubuntu:**
 ```bash
@@ -146,7 +158,7 @@ sender and receiver so they join the same signaling server.
 
 ### Sending
 
-```
+```text
 sp2p send [flags] <file|folder|...|->
 ```
 
@@ -175,7 +187,7 @@ tar czf - src/ | sp2p send -name src.tar.gz -
 
 ### Receiving
 
-```
+```text
 sp2p receive [flags] <CODE>
 ```
 
@@ -184,6 +196,8 @@ sp2p receive [flags] <CODE>
 | `-server` | `wss://sp2p.io/ws` | Signaling server WebSocket URL |
 | `-output` | `.` | Output directory |
 | `-stdout` | `false` | Write to stdout instead of file |
+| `-max-receive-bytes` | `0` | Decoded transfer byte limit; 0 means 1 TiB |
+| `-max-extract-bytes` | `0` | Expanded archive byte limit; 0 means 1 TiB |
 | `-allow-relay` | `false` | Allow TURN relay without prompting (see [TURN Relay](#turn-relay)) |
 | `-transport` | `auto` | Transport mode: `auto`, `tcp`, or `webrtc` |
 | `-v` | `false` | Verbose diagnostic output |
@@ -199,6 +213,24 @@ sp2p receive -format json -event-output stderr -stdout abc123-xYz456 > received.
 ```
 
 `receive` and `recv` are both accepted as the subcommand.
+
+Received files are verified, closed, and published without replacing existing output before success is acknowledged. Archives publish atomically under a new directory named by the transfer: a single matching folder keeps its root; multi-root archives get a wrapper. Existing archive destinations cause failure; ordinary file name collisions receive an available numbered name. Filesystems without safe no-replace publication fail explicitly.
+
+The default receive and expanded-archive limits are each **1 TiB** (1,099,511,627,776 bytes), including unknown-size stdin and sparse logical output. Use a larger positive byte count only for trusted transfers, for example `-max-receive-bytes 2199023255552 -max-extract-bytes 2199023255552` for 2 TiB. Zero selects the finite default, not unlimited output. A known size, including zero, must match exactly.
+
+Browser sends use bounded file slices. Browser receives offer disk streaming where File System Access is available (1 TiB limit), or an explicit memory download limited to **256 MiB**. Select the save location before connecting; picker cancellation cancels the transfer. Blob completion means a verified download is ready, not that the browser saved it. CLI stdout/caller-provided writers acknowledge accepted bytes and cannot roll back a failed transfer. File close/publication is not an fsync or power-loss durability guarantee; a lost acknowledgement can leave valid committed output even when the sender reports failure.
+
+The memory fallback copies incoming chunks into bounded 256 KiB blocks, so tiny compressed chunks cannot retain oversized buffers or create an unbounded list of chunk objects. Its 256 MiB limit covers payload/staging storage, not total browser memory; Blob creation and browser internals add overhead. In protocol v3, healthy paused stdin and slow output finalization keep heartbeats flowing. Physical writes have a two-minute timeout; receivers wait at most five seconds for the final shutdown acknowledgement after sending Complete.
+
+### Protocol compatibility and staged upgrades
+
+Compatibility is automatic—no version flag, checkbox, or coordinated upgrade is needed. Two updated CLI/browser peers use transfer v3; a transfer involving a 0.4.0 peer uses v2. Both combinations work through a 0.4.0 or 0.5.0 signaling server. Signaling remains at its compatible v2 envelope version; transfer capabilities are negotiated end-to-end, independently of the server version.
+
+Capability markers are bound to the existing key derivation and confirmation transcript. Altering them causes authentication to fail, not a silent downgrade between updated peers. Every v3 peer, including browsers, authenticates the connection candidate and the sender's selection before key confirmation. A server's claimed client type cannot disable authentication. Connection errors never trigger a lower-version retry. See the [negotiation design](docs/security-performance-implementation.md#transitional-protocol-compatibility).
+
+Legacy compatibility displays an informational warning (a `warning` event in JSON mode), requires no confirmation, disables parallel TCP even if a larger count was requested, and omits v3 candidate authentication and receive credits. Updated peers retain encryption, bounded decoding/queues, receive quotas, and transactional output handling, but cannot retrofit fixes into an old peer. Legacy liveness/backpressure is weaker: idle transfers may time out, and a fast legacy sender can overflow a slow browser's bounded receive queue. Upgrade the older peer for the full v3 guarantees.
+
+JSON mode emits a `protocol` event after key confirmation. Later events and status snapshots include the authenticated negotiated `protocol`; earlier records omit it because it is not yet known. Share commands and links require no compatibility options.
 
 ### Environment Variables
 
@@ -233,6 +265,10 @@ transport: auto
 
 # Default output directory for received files
 output: ~/Downloads
+
+# Decoded transfer and expanded archive byte limits (0 = 1 TiB each)
+max-receive-bytes: 0
+max-extract-bytes: 0
 
 # Always show verbose output
 verbose: false
@@ -329,7 +365,8 @@ When TLS is active (manual or ACME) and `-addr` is not explicitly set, the serve
 |------|-----|---------|-------------|
 | `-addr` | `SP2P_ADDR` | `:8080` | Listen address |
 | `-base-url` | `SP2P_BASE_URL` | `http://localhost:8080` | Public base URL |
-| `-trust-proxy` | `SP2P_TRUST_PROXY` | `false` | Trust X-Forwarded-For for rate limiting |
+| `-trust-proxy` | `SP2P_TRUST_PROXY` | `false` | Honor forwarded IPs only through explicitly trusted proxies |
+| `-trusted-proxies` | `SP2P_TRUSTED_PROXIES` | | Comma-separated immediate proxy IPs/CIDRs; required with `-trust-proxy` |
 | `-tls-cert` | `SP2P_TLS_CERT` | | TLS certificate file |
 | `-tls-key` | `SP2P_TLS_KEY` | | TLS private key file |
 | `-acme` | `SP2P_ACME` | `false` | Enable ACME auto-certificates |
@@ -337,9 +374,19 @@ When TLS is active (manual or ACME) and `-addr` is not explicitly set, the serve
 | `-config-dir` | `SP2P_CONFIG_DIR` | | Persistent data directory (required for ACME) |
 | `-turn-servers` | `SP2P_TURN_SERVERS` | | Comma-separated TURN server URLs |
 | `-turn-secret` | `SP2P_TURN_SECRET` | | Shared secret for ephemeral TURN credentials |
-| `-turn-ttl` | `SP2P_TURN_TTL` | `5m` | Lifetime of ephemeral TURN credentials |
+| `-turn-ttl` | `SP2P_TURN_TTL` | `5m` | Positive lifetime of ephemeral TURN credentials, at most 1h |
 | `-turn-username` | `SP2P_TURN_USERNAME` | | TURN static username (mutually exclusive with `-turn-secret`) |
 | `-turn-password` | `SP2P_TURN_PASSWORD` | | TURN static password (mutually exclusive with `-turn-secret`) |
+
+### Proxy, container, and relay migration
+
+Existing `-trust-proxy` deployments must specify actual proxy addresses, for example `-trust-proxy -trusted-proxies 127.0.0.1/32,::1/128` for a local reverse proxy. Never use all-address CIDRs. Forwarded chains are examined from the trusted side; direct-client spoofing is ignored. `SP2P_TRUST_PROXY=false` and `0` disable trust.
+
+Both container variants run as UID/GID 65532 and use `/config`. Make persistent mounts writable by that identity. Prefer a reverse proxy that terminates TLS on 443 and forwards to container port 8080. Native low-port TLS/ACME requires an explicitly configured container low-port capability/policy and correct port routing; do not switch the image back to root. Verify ACME renewal and volume permissions in your deployment before rollout.
+
+Signaling admits at most `2 × max-sessions + 64` sockets globally and `2 × max-sessions-per-ip + 4` per IP, with a 10-second first-message deadline. Registered sockets permit 600 messages and 4 MiB per minute; IP limiter bookkeeping is bounded.
+
+Use the [coturn policy example](deploy/turnserver.conf.example) as a starting point, not an unchanged production configuration. It needs private secrets, TLS/address settings, and an egress firewall covering private, loopback, link-local, translated IPv6, and organization-specific service ranges. Confirm allocation, bandwidth, expiry/refresh, and destination-denial behavior in isolated staging. Application credential expiry alone does not revoke an existing relay allocation.
 
 ## Architecture Overview
 
@@ -347,7 +394,7 @@ SP2P has three components: the **CLI** (`sp2p`), the **signaling server** (`sp2p
 
 ### Connection Flow
 
-```
+```text
 Sender                    Server                   Receiver
   |                         |                         |
   |------- hello ---------->|                         |
@@ -459,7 +506,7 @@ The transfer code has the format `SESSION_ID-SEED` where:
 - **Session ID** identifies the signaling session on the server
 - **Seed** is a 128-bit random value (base62-encoded) used as the HKDF salt
 
-Both components are required to derive encryption keys. The server only knows the session ID, not the seed — so even a compromised server cannot decrypt the transfer.
+Both components are required to derive encryption keys. The server only knows the session ID, not the seed — so a compromised signaling service alone cannot decrypt transfers between independently trusted clients. A compromised web/bootstrap host can instead deliver malicious client code; see the trust model below.
 
 ### Encrypted Metadata Preview
 
@@ -476,7 +523,7 @@ The metadata is encrypted with **AES-256-GCM** using a key derived from the seed
 
 ### Wire Format (Encrypted)
 
-```
+```text
 [4 bytes: total payload length, big-endian uint32]
 [1 byte:  message type (cleartext, authenticated via AAD)]
 [8 bytes: sequence number (big-endian uint64)]
@@ -508,7 +555,7 @@ file to answer the prompt; SP2P removes it after reading the response. In
 human mode, if no TTY is available and `-allow-relay` is not set, TURN is
 skipped and the connection fails with a message suggesting the flag.
 
-**Credential delivery:** TURN credentials are never included in the initial handshake. The server only delivers them after a client signals `relay-retry` (meaning all direct methods have failed) and a minimum time has elapsed since the session started. When `-turn-secret` is configured, each connection receives unique short-lived HMAC credentials that expire after the configured TTL.
+**Credential delivery:** TURN credentials are omitted from the initial handshake. After pairing and retry pacing, both participants share one cached issuance outcome for that session; repeated requests never renew it. Ephemeral usernames bind expiry to an opaque session ID. TTL defaults to 5 minutes and cannot exceed one hour. New issuances are limited to 120/minute globally and 12/minute per sender IP. These are abuse bounds, not user authentication: anonymous clients can create new sessions and reuse legitimately issued credentials elsewhere until expiry. Static credentials are explicitly warned as reusable and require external relay policy.
 
 ### Trust Model
 
@@ -518,10 +565,11 @@ skipped and the connection fails with a message suggesting the flag.
 - TURN relay requires explicit consent (`-allow-relay` or interactive prompt)
 - The server cannot derive encryption keys (it never sees the seed portion of the transfer code)
 - Ephemeral key pairs are generated per session and never reused
+- Browser JavaScript and bootstrap scripts must be trusted; their host can replace them with code that exposes secrets or files. A verifier fetched from that same compromised host cannot fix this. Independently verified CLI/package installations have a stronger endpoint trust boundary.
 
 ## Development
 
-**Requirements:** Go 1.25+, Node.js (for web UI build)
+**Requirements:** Go 1.26.8 (or a newer supported, security-patched toolchain), Node.js 24 (for the web UI build). CI and release builds follow `go.mod`; containers pin builder/runtime digests. Dependabot proposes weekly dependency/action/image updates. Rebuild static binaries after toolchain security updates.
 
 ### Make Targets
 
@@ -555,7 +603,7 @@ make build-cli
 
 ### Project Structure
 
-```
+```text
 cmd/
   sp2p/             CLI entrypoint
   sp2p-server/      Server entrypoint

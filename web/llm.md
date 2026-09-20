@@ -11,10 +11,12 @@ WebSocket endpoint automatically.
 
 ## Get SP2P
 
-If `sp2p` is not installed, use a one-shot bootstrap command from this server.
-It downloads the right binary to a temporary directory, runs it, configures
+Prefer an independently trusted installation of `sp2p`. The browser and bootstrap host can replace executable code; end-to-end encryption does not defend against that host compromise. If you trust this server and GitHub's HTTPS release channel, a one-shot bootstrap is available without GitHub CLI (`gh`). By default, shell needs curl or wget and one of `sha256sum`, `shasum`, or `openssl`; PowerShell uses built-in commands. If no supported verifier is available, normally stop and use a trusted installation.
+It downloads the right archive to a temporary directory, by default checks SHA-256 against the same fixed release's checksum manifest before extraction, runs it, configures
 this server automatically, and then removes the binary. Add `-format json` as
-shown when an agent needs lifecycle events.
+shown when an agent needs lifecycle events. Missing, duplicate, malformed, or mismatched checksums fail closed by default, as do unavailable pinned releases and local development archives. This does not independently verify signer identity or release freshness. Optional provenance verification and independently approved tag guidance are in [SECURITY](https://github.com/zyno-io/sp2p/blob/main/SECURITY.md#artifact-verification-and-endpoint-trust).
+
+If the user explicitly accepts unchecked downloaded code, both bootstraps accept `--insecure-skip-checksum` as their first argument, before `-format json`, file paths, or the transfer code. It skips manifest/hash checks and emits a warning on stderr without changing the remaining CLI arguments. It does not bypass TLS certificate checks or fixed GitHub release/platform validation. Never enable it automatically after a verification failure or merely because tools are missing.
 
 ### Send without installing
 
@@ -85,7 +87,15 @@ Use the complete transfer code:
 sp2p receive -format json -server "{{SP2P_SERVER_URL}}" "abc12345-TRANSFER_SECRET"
 ```
 
-The receiver writes files to the current directory by default. A successful terminal result includes `saved_path` when SP2P created a file or directory.
+The receiver writes files to the current directory by default. A successful terminal result includes `saved_path` when SP2P created a file or directory. Files are verified and finalized without replacement before acknowledgement. Multi-root archives publish under one new wrapper; an existing archive destination fails instead of merging. A lost acknowledgement can leave a valid saved result while the sender reports failure. This is not a power-loss durability guarantee.
+
+Transfer compatibility is automatic: two updated CLI/browser peers use v3, and mixed 0.4.0/0.5.0 peers use v2, through either server version. Signaling remains v2; servers and clients can be upgraded independently. Do not ask users to select a protocol or add compatibility flags: none are needed. Capabilities are bound to key derivation and confirmation, so tampering fails authentication rather than silently downgrading updated peers. Connection errors never trigger a lower-version retry. Legacy mode warns without prompting, disables parallel TCP even if requested, and lacks v3 candidate authentication, receive credits, and robust idle/backpressure behavior. Updated peers retain local bounds and output protections, but old peers are not repaired. A slow browser can reject a fast legacy sender when its bounded input queue fills.
+
+All v3 peers, including browsers, authenticate connection candidates and the sender's selection before key confirmation. A server's claimed client type cannot disable this handshake. Browser proof and confirmation each time out after five seconds; a receiver waits at most 30 seconds for selection. Failure does not trigger a retry at v2.
+
+Decoded receive and expanded archive output each default to 1 TiB; `-max-receive-bytes` and `-max-extract-bytes` accept larger positive finite byte counts for trusted transfers. Zero selects the default, never unlimited output. Stdout/caller-provided writers cannot roll back bytes and promise acceptance, not durable storage. Browser memory downloads are limited to 256 MiB and disk receives to 1 TiB.
+
+The browser memory limit bounds payload/staging storage, not total browser RSS or Blob/download copies. Healthy paused stdin and slow finalization maintain heartbeats; physical writes time out after two minutes. After sending Complete, a receiver waits at most five seconds for FinAck and retains verified output if that acknowledgement is lost.
 
 For raw file bytes on stdout, route events to stderr so JSON never mixes with the file data:
 
@@ -95,7 +105,7 @@ sp2p receive -format json -event-output stderr -stdout -server "{{SP2P_SERVER_UR
 
 ## Read status and completion
 
-JSON mode writes one JSON object per line. Every record includes `schema_version`, `sequence`, `event`, `at`, and `role`.
+JSON mode writes one JSON object per line. Every record includes `schema_version`, `sequence`, `event`, `at`, and `role`. A `protocol` event reports the negotiated transfer version after key confirmation; subsequent records and status snapshots include `protocol`. Pre-confirmation records and older clients omit it. Automatic legacy compatibility emits a `warning` event even without `-v`; it requires no user response.
 
 | Event | Meaning |
 | --- | --- |

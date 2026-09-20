@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -18,24 +19,26 @@ const secondaryMagic = byte(0x54)
 // SecondaryConfig holds configuration for establishing secondary parallel
 // TCP connections after the primary connection has been established.
 type SecondaryConfig struct {
-	Count         int            // N-1 additional connections needed
-	WeDialed      bool           // our role: true = we dial again, false = we accept
-	Listener      net.Listener   // non-nil if we're accepting (acceptor side)
-	PeerAddr      string         // non-empty if we're dialing (dialer side)
-	Token         [16]byte       // HKDF-derived session token for authentication
-	Timeout       time.Duration  // deadline for all secondary connections (5s default)
+	Count         int             // N-1 additional connections needed
+	WeDialed      bool            // our role: true = we dial again, false = we accept
+	Listener      net.Listener    // non-nil if we're accepting (acceptor side)
+	PeerAddr      string          // non-empty if we're dialing (dialer side)
+	Token         [16]byte        // HKDF-derived session token for authentication
+	Timeout       time.Duration   // deadline for all secondary connections (5s default)
 	AcceptStopped <-chan struct{} // wait for primary accept goroutine to exit before accepting
-	OnLog         func(string)   // verbose logging (nil = disabled)
+	OnLog         func(string)    // verbose logging (nil = disabled)
 }
 
 // EstablishSecondary opens count additional TCP connections using the same
 // role (dialer/acceptor) as the primary. Each secondary is authenticated
-// with a token + stream index handshake. Returns however many connections
-// succeed (graceful degradation). The returned slice may be shorter than
-// count if some connections fail.
+// with a token + stream index handshake. Returns the complete indexed set or
+// closes every partial result. Callers may negotiate a single-stream fallback.
 func EstablishSecondary(ctx context.Context, cfg SecondaryConfig) ([]P2PConn, error) {
 	if cfg.Count <= 0 {
 		return nil, nil
+	}
+	if cfg.Count > 255 {
+		return nil, fmt.Errorf("secondary count exceeds wire index limit")
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 5 * time.Second
@@ -52,11 +55,14 @@ func EstablishSecondary(ctx context.Context, cfg SecondaryConfig) ([]P2PConn, er
 
 	results := make(chan indexedConn, cfg.Count)
 	errors := make(chan error, cfg.Count)
+	var workers sync.WaitGroup
 
 	if cfg.WeDialed {
 		// Dialer: redial the same peer address for each secondary connection.
 		for i := 0; i < cfg.Count; i++ {
+			workers.Add(1)
 			go func(streamIndex int) {
+				defer workers.Done()
 				c, err := dialSecondary(connCtx, cfg.PeerAddr, cfg.Token, byte(streamIndex+1), deadline)
 				if err != nil {
 					logVerbose(cfg.OnLog, "secondary dial %d failed: %v", streamIndex+1, err)
@@ -79,13 +85,25 @@ func EstablishSecondary(ctx context.Context, cfg SecondaryConfig) ([]P2PConn, er
 		// Set a deadline on the listener for our secondary accepts.
 		if dl, ok := cfg.Listener.(interface{ SetDeadline(time.Time) error }); ok {
 			dl.SetDeadline(deadline)
+			fired := make(chan struct{})
+			stop := context.AfterFunc(connCtx, func() { dl.SetDeadline(time.Now()); close(fired) })
+			defer func() {
+				if !stop() {
+					<-fired
+				}
+				dl.SetDeadline(time.Time{})
+			}()
+		} else {
+			return nil, fmt.Errorf("secondary listener requires deadline support")
 		}
 		// Acceptor: accept connections on the existing listener.
 		// Each goroutine loops to retry after rejecting invalid connections
 		// (e.g., stale primary dial attempts) so they don't consume an
 		// accept slot permanently.
 		for i := 0; i < cfg.Count; i++ {
+			workers.Add(1)
 			go func() {
+				defer workers.Done()
 				for {
 					c, streamIndex, err := acceptSecondary(connCtx, cfg.Listener, cfg.Token, deadline)
 					if err != nil {
@@ -141,6 +159,10 @@ func EstablishSecondary(ctx context.Context, cfg SecondaryConfig) ([]P2PConn, er
 		}
 	}
 
+	// Stop and join producers before draining, so a connection cannot arrive
+	// just after the final empty-channel check and lose its cleanup owner.
+	cancel()
+	workers.Wait()
 	// Drain any remaining results that arrived after the collector loop
 	// exited (e.g. due to timeout). Without this, connections that
 	// completed concurrently with the deadline would leak.
@@ -159,8 +181,13 @@ func EstablishSecondary(ctx context.Context, cfg SecondaryConfig) ([]P2PConn, er
 	}
 drained:
 
-	if succeeded == 0 {
-		return nil, fmt.Errorf("no secondary connections established")
+	if succeeded != cfg.Count {
+		for _, c := range conns {
+			if c != nil {
+				c.Close()
+			}
+		}
+		return nil, fmt.Errorf("incomplete secondary connection set: %d/%d", succeeded, cfg.Count)
 	}
 
 	// Filter to only successfully connected streams (maintain index order).
@@ -185,6 +212,7 @@ func dialSecondary(ctx context.Context, addr string, token [16]byte, streamIndex
 	}
 
 	c.SetDeadline(deadline)
+	defer interruptSecondaryIO(ctx, c)()
 
 	// Write handshake: magic + token + stream index.
 	var handshake [18]byte
@@ -213,13 +241,14 @@ func dialSecondary(ctx context.Context, addr string, token [16]byte, streamIndex
 
 // acceptSecondary accepts a connection and verifies the secondary handshake.
 // Returns the connection and the stream index from the handshake.
-func acceptSecondary(_ context.Context, ln net.Listener, token [16]byte, deadline time.Time) (P2PConn, byte, error) {
+func acceptSecondary(ctx context.Context, ln net.Listener, token [16]byte, deadline time.Time) (P2PConn, byte, error) {
 	c, err := ln.Accept()
 	if err != nil {
 		return nil, 0, fmt.Errorf("accepting secondary: %w", err)
 	}
 
 	c.SetDeadline(deadline)
+	defer interruptSecondaryIO(ctx, c)()
 
 	// Read handshake: magic + token + stream index.
 	var handshake [18]byte
@@ -251,4 +280,15 @@ func acceptSecondary(_ context.Context, ln net.Listener, token [16]byte, deadlin
 
 	c.SetDeadline(time.Time{}) // clear deadline
 	return &netConnAdapter{Conn: c}, streamIndex, nil
+}
+
+func interruptSecondaryIO(ctx context.Context, c net.Conn) func() {
+	fired := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { c.SetDeadline(time.Now()); close(fired) })
+	return func() {
+		if !stop() {
+			<-fired
+		}
+		c.SetDeadline(time.Time{})
+	}
 }

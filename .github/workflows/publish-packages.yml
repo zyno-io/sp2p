@@ -394,7 +394,7 @@ jobs:
             gh api --method PATCH "user/repository_invitations/$INVITATION_ID"
           fi
 
-      - uses: vedantmgoyal9/winget-releaser@v2
+      - uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
         if: steps.existing-pr.outputs.exists != 'true'
         with:
           identifier: zyno-io.sp2p
@@ -409,7 +409,7 @@ jobs:
   #   # Classic confinement requires manual Snap Store approval.
   #   # Request at: https://forum.snapcraft.io/t/process-for-reviewing-classic-confinement-snaps
   #   steps:
-  #     - uses: actions/checkout@v4
+  #     - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
   #       with:
   #         ref: ${{ inputs.tag }}
   #         fetch-depth: 0

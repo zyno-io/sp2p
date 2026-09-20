@@ -41,6 +41,28 @@ event containing the path of a temporary response file. Write
 or
 .B deny
 to that file to answer the relay prompt. The file is removed after it is read.
+.PP
+Healthy paused stdin and slow output finalization maintain peer heartbeats.
+Physical network writes have a two-minute timeout; this is not an idle-stdin limit.
+After sending Complete, a receiver waits at most five seconds for the final
+shutdown acknowledgement. Verified published output is retained if it is lost.
+.PP
+Bootstrap scripts require no GitHub CLI. Shell downloads use curl or wget and
+SHA-256 verification with sha256sum, shasum, or openssl (in that order);
+PowerShell uses built-in commands. By default, if no supported verifier is
+available, bootstrap stops without executing the CLI. The archive must match
+the checksum manifest from the same fixed GitHub release before extraction.
+This trusts the GitHub HTTPS release channel and bootstrap
+host; it does not independently verify signer identity or prevent rollback.
+.PP
+To explicitly opt out, pass
+.B \-\-insecure\-skip\-checksum
+as the first argument to the downloaded shell or PowerShell bootstrap script,
+before file paths, transfer codes, or CLI flags. This bootstrap-only option
+skips manifest/hash checks, prints a warning to stderr, and runs downloaded
+code without an archive integrity check. It is removed before invoking SP2P
+and does not disable TLS certificate checks or release/platform URL validation.
+It is not an option of the installed sp2p command.
 .SH COMMANDS
 .TP
 .B send
@@ -122,6 +144,15 @@ Default:
 .B \-stdout
 Write received data to stdout instead of saving to a file.
 .TP
+.BI \-max\-receive\-bytes " bytes"
+Maximum decoded transfer bytes, including unknown-size stdin.
+Default: 0, meaning 1 TiB (1099511627776 bytes), not unlimited.
+Use a larger positive finite byte count only for trusted transfers.
+.TP
+.BI \-max\-extract\-bytes " bytes"
+Maximum expanded archive bytes, including sparse logical output.
+Default: 0, meaning 1 TiB. Independent of the receive byte limit.
+.TP
 .B \-allow\-relay
 Allow TURN relay connections without prompting.
 .TP
@@ -166,6 +197,34 @@ Atomically write the latest private JSON status snapshot to
 .IR path .
 Requires
 .BR \-format " json."
+.SH OUTPUT AND COMPATIBILITY
+Transfer compatibility is automatic: two updated peers use v3, while
+mixed 0.4.0/0.5.0 peers use v2. No version flag or browser checkbox is needed.
+Both combinations work through either server version; signaling remains v2.
+Clients and servers can be upgraded independently.
+.PP
+Capabilities are bound to key derivation and confirmation; tampering fails
+authentication rather than silently downgrading updated peers.
+Every v3 peer, including browsers, authenticates connection candidates and
+sender selection. A server's claimed client type cannot disable authentication.
+Connection errors never trigger a lower-version retry.
+Legacy mode warns without prompting, omits v3 candidate authentication and
+receiver credits, and disables parallel TCP even if a larger count was requested.
+Updated peers retain local decoding, queue, quota, and output protections;
+old peers retain their old vulnerabilities. Legacy idle/backpressure behavior
+is weaker, and slow browser receivers can exceed their bounded input queues.
+JSON mode emits a protocol event after key confirmation; subsequent events
+and status snapshots report the authenticated version. Earlier records omit it.
+.PP
+Received content is verified, closed, and published before acknowledgement.
+Existing files are not replaced; colliding file names receive an available
+numbered name. Archives publish as one new directory, without merging into
+existing output. A single matching folder keeps its root; multi-root archives
+get a wrapper. Unsupported no-replace filesystems fail explicitly.
+.PP
+Close and publication do not guarantee power-loss durability. Stdout cannot
+roll back bytes. A lost acknowledgement may leave valid committed output even
+when the sender reports failure.
 .SH ENVIRONMENT
 .TP
 .B SP2P_SERVER
@@ -208,6 +267,10 @@ transport: auto
 
 # Default output directory for received files
 output: ~/Downloads
+
+# Receive and expanded archive limits (0 = 1 TiB each)
+max-receive-bytes: 0
+max-extract-bytes: 0
 
 # Always show verbose output
 verbose: false

@@ -4,6 +4,13 @@
 
 const PROTOCOL_VERSION = 1;
 
+// Web Crypto rejects shared memory; validate at the boundary without copying
+// ordinary owned ArrayBuffers. Keep the stronger type for DOM APIs and TS 5.9.
+export function bufferSource(data: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (!(data.buffer instanceof ArrayBuffer)) throw new Error("Shared memory is not supported");
+  return data as Uint8Array<ArrayBuffer>;
+}
+
 export interface DerivedKeys {
   senderToReceiver: CryptoKey;
   receiverToSender: CryptoKey;
@@ -19,14 +26,28 @@ export async function generateKeyPair(): Promise<CryptoKeyPair> {
 }
 
 // Export the public key as raw bytes.
-export async function exportPublicKey(key: CryptoKey): Promise<Uint8Array> {
+export async function exportPublicKey(key: CryptoKey): Promise<Uint8Array<ArrayBuffer>> {
   const raw = await crypto.subtle.exportKey("raw", key);
   return new Uint8Array(raw);
 }
 
+// RFC 7748 §5 ignores bit 255 for X25519 math. SP2P's existing HKDF and
+// confirmation bind the original bytes, so the v3 marker cannot be stripped
+// without failing authentication. Never normalize these bytes in the transcript.
+export async function exportTransferPublicKey(key: CryptoKey): Promise<Uint8Array<ArrayBuffer>> {
+  const raw = await exportPublicKey(key);
+  raw[31] |= 0x80;
+  return raw;
+}
+
+export function transferProtocol(senderPub: Uint8Array, receiverPub: Uint8Array): 2 | 3 {
+  if (senderPub.length !== 32 || receiverPub.length !== 32) throw new Error("Protocol negotiation requires 32-byte public keys");
+  return senderPub[31] & receiverPub[31] & 0x80 ? 3 : 2;
+}
+
 // Import a peer's public key from raw bytes.
 export async function importPublicKey(raw: Uint8Array): Promise<CryptoKey> {
-  return crypto.subtle.importKey("raw", raw, "X25519", true, []);
+  return crypto.subtle.importKey("raw", bufferSource(raw), "X25519", true, []);
 }
 
 // Perform X25519 DH and derive all session keys.
@@ -54,7 +75,7 @@ export async function deriveKeys(
   // HKDF-Extract: PRK = HMAC-SHA256(seed, shared)
   const prkKey = await crypto.subtle.importKey(
     "raw",
-    seed,
+    bufferSource(seed),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
@@ -112,10 +133,10 @@ async function hkdfExpand(
   infoPrefix: Uint8Array,
   label: string,
   length: number
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   const hmacKey = await crypto.subtle.importKey(
     "raw",
-    prk,
+    bufferSource(prk),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
@@ -136,9 +157,8 @@ async function hkdfExpand(
     input.set(info, prev.length);
     input[prev.length + info.length] = counter;
 
-    const block = new Uint8Array(
-      await crypto.subtle.sign("HMAC", hmacKey, input)
-    );
+    const blockBits = await crypto.subtle.sign("HMAC", hmacKey, input);
+    const block = new Uint8Array(blockBits);
     const needed = Math.min(block.length, length - offset);
     result.set(block.subarray(0, needed), offset);
     offset += needed;
@@ -155,10 +175,10 @@ export async function computeConfirmation(
   role: string,
   senderPub: Uint8Array,
   receiverPub: Uint8Array
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   const hmacKey = await crypto.subtle.importKey(
     "raw",
-    confirmKey,
+    bufferSource(confirmKey),
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"]
@@ -172,11 +192,12 @@ export async function computeConfirmation(
   data.set(senderPub, roleBytes.length);
   data.set(receiverPub, roleBytes.length + senderPub.length);
 
-  return new Uint8Array(await crypto.subtle.sign("HMAC", hmacKey, data));
+  const signed = await crypto.subtle.sign("HMAC", hmacKey, data);
+  return new Uint8Array(signed);
 }
 
 // Build a 96-bit nonce from a counter.
-function buildNonce(counter: number): Uint8Array {
+function buildNonce(counter: number): Uint8Array<ArrayBuffer> {
   const nonce = new Uint8Array(12);
   const view = new DataView(nonce.buffer);
   // Put counter in the last 8 bytes (big-endian).
@@ -187,7 +208,7 @@ function buildNonce(counter: number): Uint8Array {
 }
 
 // Build AAD: [type][seq (8 bytes)][version]
-function buildAAD(msgType: number, seq: number): Uint8Array {
+function buildAAD(msgType: number, seq: number): Uint8Array<ArrayBuffer> {
   const aad = new Uint8Array(10);
   aad[0] = msgType;
   const view = new DataView(aad.buffer);
@@ -214,7 +235,7 @@ export class EncryptedChannel {
   async encryptFrame(
     msgType: number,
     data: Uint8Array
-  ): Promise<Uint8Array> {
+  ): Promise<Uint8Array<ArrayBuffer>> {
     if (this.writeSeq >= 0x100000000) {
       throw new Error("Nonce counter exhausted — transfer too large");
     }
@@ -222,13 +243,12 @@ export class EncryptedChannel {
     const nonce = buildNonce(seq);
     const aad = buildAAD(msgType, seq);
 
-    const ciphertext = new Uint8Array(
-      await crypto.subtle.encrypt(
+    const ciphertextBits = await crypto.subtle.encrypt(
         { name: "AES-GCM", iv: nonce, additionalData: aad },
         this.writeKey,
-        data
-      )
-    );
+        bufferSource(data)
+      );
+    const ciphertext = new Uint8Array(ciphertextBits);
 
     const framePayloadLen = 1 + 8 + ciphertext.length;
     const frame = new Uint8Array(4 + framePayloadLen);
@@ -271,13 +291,12 @@ export class EncryptedChannel {
     if (msgType === MSG_CANCEL && seq >= this.readSeq && seq < 0x100000000) {
       const nonce = buildNonce(seq);
       const aad = buildAAD(msgType, seq);
-      const plaintext = new Uint8Array(
-        await crypto.subtle.decrypt(
+      const plaintextBits = await crypto.subtle.decrypt(
           { name: "AES-GCM", iv: nonce, additionalData: aad },
           this.readKey,
-          ciphertext
-        )
-      );
+          bufferSource(ciphertext)
+        );
+    const plaintext = new Uint8Array(plaintextBits);
       // Advance past the gap so a stale readSeq can't accept a replay
       // if any caller ever reads again after cancel (defensive hardening).
       this.readSeq = seq + 1;
@@ -293,13 +312,12 @@ export class EncryptedChannel {
     const nonce = buildNonce(seq);
     const aad = buildAAD(msgType, seq);
 
-    const plaintext = new Uint8Array(
-      await crypto.subtle.decrypt(
+    const plaintextBits = await crypto.subtle.decrypt(
         { name: "AES-GCM", iv: nonce, additionalData: aad },
         this.readKey,
-        ciphertext
-      )
-    );
+        bufferSource(ciphertext)
+      );
+    const plaintext = new Uint8Array(plaintextBits);
 
     this.readSeq++;
     return { msgType, data: plaintext };
@@ -383,16 +401,15 @@ export function base64ToBytes(b64: string): Uint8Array {
 export async function encryptFileInfo(
   seed: Uint8Array,
   plaintext: Uint8Array
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   const key = await deriveFileInfoKey(seed);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = new Uint8Array(
-    await crypto.subtle.encrypt(
+  const ciphertextBits = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv: nonce },
       key,
-      plaintext
-    )
-  );
+      bufferSource(plaintext)
+    );
+    const ciphertext = new Uint8Array(ciphertextBits);
   const out = new Uint8Array(nonce.length + ciphertext.length);
   out.set(nonce, 0);
   out.set(ciphertext, nonce.length);
@@ -403,17 +420,16 @@ export async function encryptFileInfo(
 export async function decryptFileInfo(
   seed: Uint8Array,
   encrypted: Uint8Array
-): Promise<Uint8Array> {
+): Promise<Uint8Array<ArrayBuffer>> {
   const key = await deriveFileInfoKey(seed);
   const nonce = encrypted.slice(0, 12);
   const ciphertext = encrypted.slice(12);
-  return new Uint8Array(
-    await crypto.subtle.decrypt(
+  const plaintext = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: nonce },
       key,
       ciphertext
-    )
-  );
+    );
+  return new Uint8Array(plaintext);
 }
 
 // Derive AES-256-GCM key from seed for file-info encryption.
@@ -427,7 +443,8 @@ async function deriveFileInfoKey(seed: Uint8Array): Promise<CryptoKey> {
     false,
     ["sign"]
   );
-  const prk = new Uint8Array(await crypto.subtle.sign("HMAC", prkKey, seed));
+  const prkBits = await crypto.subtle.sign("HMAC", prkKey, bufferSource(seed));
+    const prk = new Uint8Array(prkBits);
 
   // HKDF-Expand with label "sp2p-v1-file-info-key"
   const keyBytes = await hkdfExpand(

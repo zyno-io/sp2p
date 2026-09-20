@@ -8,6 +8,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -17,15 +19,22 @@ import (
 // SignalHandler handles WebSocket signaling connections.
 type SignalHandler struct {
 	sessions       *SessionManager
-	serverVersion  string             // app version to include in Welcome
-	baseURL        string             // public base URL for share links
-	stunServers    []signal.ICEServer // STUN-only servers (sent in Welcome)
-	staticTURN     []signal.ICEServer // static TURN servers (delivered on relay-retry)
+	serverVersion  string                   // app version to include in Welcome
+	baseURL        string                   // public base URL for share links
+	stunServers    []signal.ICEServer       // STUN-only servers (sent in Welcome)
+	staticTURN     []signal.ICEServer       // static TURN servers (delivered on relay-retry)
 	turnGen        *TURNCredentialGenerator // ephemeral TURN credential generator (mutually exclusive with staticTURN)
-	releases       *ReleaseResolver   // platform-aware version lookup (nil in dev mode)
+	releases       *ReleaseResolver         // platform-aware version lookup (nil in dev mode)
 	originPatterns []string
 	trustProxy     bool // trust X-Forwarded-For for client IP extraction
+	trustedProxies []netip.Prefix
 	stats          *StatsTracker
+	socketMu       sync.Mutex
+	sockets        int
+	socketsByIP    map[string]int
+	turnWindow     time.Time
+	turnIssued     int
+	turnByIP       map[string]int
 }
 
 // NewSignalHandler creates a new signaling WebSocket handler.
@@ -41,10 +50,30 @@ func NewSignalHandler(sessions *SessionManager, serverVersion string, baseURL st
 		originPatterns: originPatterns,
 		trustProxy:     trustProxy,
 		stats:          stats,
+		socketsByIP:    make(map[string]int),
 	}
 }
 
 func (h *SignalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ip := extractIP(r, h.trustProxy, h.trustedProxies...)
+	h.socketMu.Lock()
+	if h.sockets >= 2*h.sessions.maxTotalSessions+64 || h.socketsByIP[ip] >= 2*h.sessions.maxSessionsPerIP+4 {
+		h.socketMu.Unlock()
+		http.Error(w, "signaling connection capacity exceeded", http.StatusTooManyRequests)
+		return
+	}
+	h.sockets++
+	h.socketsByIP[ip]++
+	h.socketMu.Unlock()
+	defer func() {
+		h.socketMu.Lock()
+		defer h.socketMu.Unlock()
+		h.sockets--
+		h.socketsByIP[ip]--
+		if h.socketsByIP[ip] == 0 {
+			delete(h.socketsByIP, ip)
+		}
+	}()
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		OriginPatterns: h.originPatterns,
 	})
@@ -56,7 +85,7 @@ func (h *SignalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), sessionMaxAge)
 	defer cancel()
 
-	h.handleConnection(ctx, conn, extractIP(r, h.trustProxy))
+	h.handleConnection(ctx, conn, ip)
 }
 
 func (h *SignalHandler) handleConnection(ctx context.Context, conn *websocket.Conn, ip string) {
@@ -68,7 +97,9 @@ func (h *SignalHandler) handleConnection(ctx context.Context, conn *websocket.Co
 	go keepAlive(ctx, conn, 30*time.Second)
 
 	// Read the first message to determine if this is a sender or receiver.
-	_, data, err := conn.Read(ctx)
+	helloCtx, helloCancel := context.WithTimeout(ctx, 10*time.Second)
+	_, data, err := conn.Read(helloCtx)
+	helloCancel()
 	if err != nil {
 		return
 	}
@@ -100,7 +131,7 @@ func (h *SignalHandler) handleSender(ctx context.Context, conn *websocket.Conn, 
 		return
 	}
 
-	session, err := h.sessions.Create(conn, ip)
+	session, err := h.sessions.Create(conn, ip, hello)
 	if err != nil {
 		if errors.Is(err, ErrTooManySessionsForIP) {
 			sendError(ctx, conn, "rate_limited", "too many active sessions from this IP")
@@ -111,8 +142,6 @@ func (h *SignalHandler) handleSender(ctx context.Context, conn *websocket.Conn, 
 		}
 		return
 	}
-	session.SenderClientType = hello.ClientType
-	session.SenderVersion = hello.Version
 	slog.Info("peer connected", "session", session.ID, "role", "sender", "clientType", hello.ClientType)
 	h.stats.RecordAttempt()
 
@@ -140,9 +169,11 @@ func (h *SignalHandler) handleReceiver(ctx context.Context, conn *websocket.Conn
 		return
 	}
 
-	session, err := h.sessions.Join(join.SessionID, conn)
+	session, err := h.sessions.Join(join.SessionID, conn, join.Version)
 	if err != nil {
-		if errors.Is(err, ErrSessionFull) {
+		if errors.Is(err, ErrPeerVersion) {
+			sendError(ctx, conn, signal.ErrCodeVersionMismatch, err.Error())
+		} else if errors.Is(err, ErrSessionFull) {
 			sendError(ctx, conn, signal.ErrCodeSessionFull, "someone has already connected to this session")
 		} else {
 			sendError(ctx, conn, signal.ErrCodeSessionNotFound, "transfer session not found")
@@ -150,8 +181,8 @@ func (h *SignalHandler) handleReceiver(ctx context.Context, conn *websocket.Conn
 		return
 	}
 
-	// Reject version mismatch between sender and receiver — v1 and v2
-	// clients use incompatible transfer protocols and cannot interoperate.
+	// Match signaling envelopes only. P2P transfer capabilities are negotiated
+	// end-to-end; the server does not select or translate the transfer version.
 	if join.Version != session.SenderVersion {
 		sendError(ctx, conn, signal.ErrCodeVersionMismatch, "protocol version mismatch with sender")
 		return
@@ -197,9 +228,20 @@ func (h *SignalHandler) relayLoop(ctx context.Context, session *Session, conn *w
 		slog.Info("peer disconnected", "session", session.ID, "role", role(isSender))
 	}()
 
+	windowStart := time.Now()
+	var messages, messageBytes int
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
+			return
+		}
+		if time.Since(windowStart) >= time.Minute {
+			windowStart, messages, messageBytes = time.Now(), 0, 0
+		}
+		messages++
+		messageBytes += len(data)
+		if messages > 600 || messageBytes > 4*1024*1024 {
+			conn.Close(websocket.StatusPolicyViolation, "signaling traffic limit exceeded")
 			return
 		}
 		h.sessions.Touch(session.ID)
@@ -241,16 +283,44 @@ func (h *SignalHandler) relayLoop(ctx context.Context, session *Session, conn *w
 
 		// Deliver TURN credentials when a peer signals relay-retry.
 		// Credentials are sent back to the requesting peer (not relayed).
-		// A minimum elapsed time since the receiver joined is enforced to
-		// make scripted credential extraction impractical.
+		// A short delay is only retry pacing, not an authentication control.
 		if env.Type == signal.TypeRelayRetry && h.hasTURN() {
 			if joinedAt := session.JoinedAt(); !joinedAt.IsZero() {
 				if wait := turnMinWait - time.Since(joinedAt); wait > 0 {
-					time.Sleep(wait)
+					timer := time.NewTimer(wait)
+					select {
+					case <-timer.C:
+					case <-ctx.Done():
+						timer.Stop()
+						return
+					}
 				}
 			}
+			session.turnOnce.Do(func() {
+				h.socketMu.Lock()
+				if time.Since(h.turnWindow) >= time.Minute {
+					h.turnWindow, h.turnIssued = time.Now(), 0
+					h.turnByIP = make(map[string]int)
+				}
+				if h.turnIssued >= 120 || h.turnByIP[session.IP] >= 12 {
+					h.socketMu.Unlock()
+					return
+				}
+				h.turnIssued++
+				h.turnByIP[session.IP]++
+				h.socketMu.Unlock()
+				if h.turnGen != nil {
+					session.turnServers = []signal.ICEServer{h.turnGen.Generate(session.ID)}
+				} else {
+					session.turnServers = h.staticTURN
+				}
+			})
+			if len(session.turnServers) == 0 {
+				sendError(ctx, conn, "rate_limited", "TURN issuance capacity exceeded")
+				return
+			}
 			sendMessage(ctx, conn, signal.TypeTURNCredentials, signal.TURNCredentials{
-				ICEServers: h.generateTURNServers(),
+				ICEServers: session.turnServers,
 			})
 		}
 
@@ -338,6 +408,7 @@ func keepAlive(ctx context.Context, conn *websocket.Conn, interval time.Duration
 			err := conn.Ping(pingCtx)
 			cancel()
 			if err != nil {
+				conn.CloseNow()
 				return
 			}
 		}

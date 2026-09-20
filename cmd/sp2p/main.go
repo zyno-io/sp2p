@@ -215,6 +215,8 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 	server := fs.String("server", serverURL, "signaling server URL (env: SP2P_SERVER)")
 	outputDir := fs.String("output", outputDefault, "output directory")
 	stdout := fs.Bool("stdout", false, "write to stdout instead of file")
+	maxReceive := fs.Uint64("max-receive-bytes", cfg.MaxReceiveBytes, "maximum received bytes (0 = 1 TiB)")
+	maxExtract := fs.Uint64("max-extract-bytes", cfg.MaxExtractBytes, "maximum expanded archive bytes (0 = 1 TiB)")
 	transportDefault := cfg.Transport
 	if transportDefault == "" {
 		transportDefault = "auto"
@@ -272,6 +274,7 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 	}
 
 	return cli.Receive(ctx, cli.ReceiveConfig{
+		MaxReceiveBytes: *maxReceive, MaxExtractBytes: *maxExtract,
 		ServerURL:     deriveWSURL(*server),
 		Code:          fs.Arg(0),
 		OutputDir:     *outputDir,
@@ -300,6 +303,16 @@ Usage:
 Agent automation:
   sp2p send -format json <file>          Emit JSON Lines lifecycle events
 
+Receive limits (also available in config.yaml):
+  -max-receive-bytes N   Maximum decoded transfer bytes (0 = 1 TiB)
+  -max-extract-bytes N   Maximum expanded archive bytes (0 = 1 TiB)
+  Existing files/directories are never replaced.
+
+Protocol compatibility:
+  Automatic: v3 between updated peers, v2 with a 0.4.0 peer.
+  No version flag or coordinated server/client upgrade is needed.
+  Legacy transfers warn, disable parallel TCP, and have fewer protections.
+
 Environment variables:
   SP2P_SERVER   Signaling server URL            (default: %s)
   SP2P_URL      Public base URL for share links (default: %s)
@@ -314,7 +327,7 @@ func emitCommandError(machineOutput bool, eventOutput, role string, err error) {
 		cli.EmitMachineFailure(machineEventWriter(eventOutput), role, err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	fmt.Fprintf(os.Stderr, "Error: %s\n", cli.SanitizeTerminalText(err.Error()))
 }
 
 func commandFailure(output cli.OutputConfig, role string, err error) error {

@@ -4,8 +4,11 @@ package signal
 
 import "encoding/json"
 
+// This is the stable SIGNALING envelope version, not the P2P transfer version.
+// Peers negotiate transfer v2/v3 through their transcript-bound public keys,
+// transparently to old and new signaling servers.
 const ProtocolVersion = 2
-const MinProtocolVersion = 1
+const MinProtocolVersion = 2
 
 // Message types exchanged over the signaling WebSocket.
 const (
@@ -102,10 +105,9 @@ type Candidate struct {
 
 // CryptoExchange carries a DH public key for the key exchange.
 type CryptoExchange struct {
-	PublicKey              []byte `json:"publicKey"`                        // 32-byte X25519 public key
-	PreferTCP              bool   `json:"preferTCP,omitempty"`              // hint: prefer TCP for large transfers
-	ParallelTCP            bool   `json:"parallelTCP,omitempty"`            // capability: supports parallel TCP connections
-	ParallelTCPDoneBarrier bool   `json:"parallelTCPDoneBarrier,omitempty"` // supports ordered Done delivery across parallel TCP streams
+	PublicKey     []byte `json:"publicKey"`               // 32-byte X25519 public key
+	ParallelTCPV3 bool   `json:"parallelTCPv3,omitempty"` // v3-only capability; old peers must not start parallel negotiation
+	PreferTCP     bool   `json:"preferTCP,omitempty"`     // hint: prefer TCP for large transfers
 }
 
 // DirectEndpoint carries direct connection addresses for TCP.

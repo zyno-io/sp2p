@@ -149,6 +149,7 @@ func TestE2E_SendReceiveFile(t *testing.T) {
 	wg.Wait()
 
 	if errs[0] != nil {
+		t.Logf("receiver stderr:\n%s", receiverStderr.String())
 		t.Logf("sender stderr:\n%s", senderOutput.String())
 		t.Fatalf("sender failed: %v", errs[0])
 	}

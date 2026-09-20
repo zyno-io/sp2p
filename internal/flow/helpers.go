@@ -14,6 +14,7 @@ import (
 
 	"github.com/zyno-io/sp2p/internal/archive"
 	"github.com/zyno-io/sp2p/internal/conn"
+	"github.com/zyno-io/sp2p/internal/fileutil"
 	"github.com/zyno-io/sp2p/internal/signal"
 	"github.com/zyno-io/sp2p/internal/transfer"
 )
@@ -214,17 +215,20 @@ func safeRename(tmpPath, name, dir string) (string, error) {
 		// preventing TOCTOU races between existence check and creation.
 		err := os.Link(tmpPath, destPath)
 		if err == nil {
-			os.Remove(tmpPath)
+			if err := os.Remove(tmpPath); err != nil {
+				return destPath, fmt.Errorf("published %s but could not remove staging %s: %w", destPath, tmpPath, err)
+			}
 			return destPath, nil
 		}
 		if !os.IsExist(err) {
-			// Hard links not supported (e.g., EPERM on network FS).
-			// Only fall back to rename if dest doesn't already exist,
-			// to preserve no-overwrite semantics.
-			if _, statErr := os.Lstat(destPath); statErr == nil {
-				continue // dest exists, try next suffix
+			err = fileutil.RenameNoReplace(tmpPath, destPath)
+			if os.IsExist(err) {
+				continue
 			}
-			return destPath, os.Rename(tmpPath, destPath)
+			if err != nil {
+				return "", fmt.Errorf("publishing output without replacement: %w", err)
+			}
+			return destPath, nil
 		}
 	}
 

@@ -24,6 +24,45 @@ type lockedBuffer struct {
 	buf bytes.Buffer
 }
 
+func TestMachineProtocolIsUnknownUntilConfirmed(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{Format: OutputJSON, EventWriter: &output}, "send", false)
+	reporter.OnPhaseChanged(flow.PhaseConnecting)
+	if strings.Contains(output.String(), `"protocol"`) || reporter.snapshot.Protocol != 0 {
+		t.Fatal("reported a protocol before authentication")
+	}
+	reporter.OnProtocolVersion(3)
+	if !strings.Contains(output.String(), `"event":"protocol","protocol":3`) || reporter.snapshot.Protocol != 3 {
+		t.Fatal("did not publish authenticated protocol")
+	}
+}
+
+func TestLegacyProtocolNoticeIsMachineReadableWithoutVerbose(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{Format: OutputJSON, EventWriter: &output}, "send", false)
+	reporter.OnProtocolVersion(2)
+	output.buf.Reset()
+	reporter.OnWarning(flow.LegacyProtocolWarning)
+	var event machineEvent
+	if err := json.Unmarshal([]byte(output.String()), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Event != "warning" || event.Protocol != 2 || event.Message != flow.LegacyProtocolWarning {
+		t.Fatalf("warning: %+v", event)
+	}
+	if reporter.snapshot.Protocol != 2 {
+		t.Fatal("snapshot lost selected protocol")
+	}
+	var display bytes.Buffer
+	writeShareInfoTo(&display, "abcdefgh-1", "https://sp2p.io", false, 200)
+	if !strings.Contains(display.String(), "sp2p receive abcdefgh-1") || strings.Contains(display.String(), "-protocol") {
+		t.Fatalf("share command requires manual compatibility: %s", display.String())
+	}
+	if strings.Contains(agentPrompt("abcdefgh-1", "https://sp2p.io"), "-protocol") {
+		t.Fatal("agent prompt requires manual compatibility")
+	}
+}
+
 func (b *lockedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

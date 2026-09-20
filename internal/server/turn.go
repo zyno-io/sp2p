@@ -13,8 +13,8 @@ import (
 )
 
 // turnMinWait is the minimum time that must elapse after a receiver joins
-// before the server will issue TURN credentials. This makes scripted
-// credential extraction impractical.
+// before the server will issue TURN credentials. This is retry pacing only;
+// public deployments also need allocation, bandwidth, and destination quotas.
 const turnMinWait = 5 * time.Second
 
 // TURNCredentialGenerator produces short-lived HMAC-based TURN credentials
@@ -30,9 +30,12 @@ type TURNCredentialGenerator struct {
 // Generate produces a fresh ICEServer with ephemeral credentials.
 // The username is the Unix expiry timestamp; the credential is
 // HMAC-SHA1(secret, username) encoded as base64.
-func (g *TURNCredentialGenerator) Generate() signal.ICEServer {
+func (g *TURNCredentialGenerator) Generate(sessionID ...string) signal.ICEServer {
 	expiry := time.Now().Add(g.TTL).Unix()
 	username := strconv.FormatInt(expiry, 10)
+	if len(sessionID) != 0 {
+		username += ":" + sessionID[0]
+	}
 	mac := hmac.New(sha1.New, []byte(g.Secret))
 	mac.Write([]byte(username))
 	credential := base64.StdEncoding.EncodeToString(mac.Sum(nil))

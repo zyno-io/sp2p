@@ -154,6 +154,7 @@ type machineReporter struct {
 	writer          io.Writer
 	role            string
 	verbose         bool
+	protocol        int
 	statusFile      string
 	sequence        uint64
 	lastProgressAt  time.Time
@@ -168,6 +169,7 @@ type machineEvent struct {
 	SchemaVersion    int                `json:"schema_version"`
 	Sequence         uint64             `json:"sequence"`
 	Event            string             `json:"event"`
+	Protocol         int                `json:"protocol,omitempty"`
 	At               string             `json:"at"`
 	Role             string             `json:"role"`
 	Phase            string             `json:"phase,omitempty"`
@@ -216,6 +218,7 @@ type machineResult struct {
 
 type machineSnapshot struct {
 	SchemaVersion    int                `json:"schema_version"`
+	Protocol         int                `json:"protocol,omitempty"`
 	Role             string             `json:"role"`
 	UpdatedAt        string             `json:"updated_at"`
 	Phase            string             `json:"phase,omitempty"`
@@ -371,6 +374,21 @@ func (r *machineReporter) OnVerbose(message string) {
 	r.mu.Unlock()
 }
 
+// Publish the negotiated version only after the flow authenticates its transcript.
+func (r *machineReporter) OnProtocolVersion(version int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.protocol = version
+	r.emitLocked(machineEvent{Event: "protocol"})
+}
+
+// Warnings are emitted even without -v, without contaminating the JSON stream.
+func (r *machineReporter) OnWarning(message string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.emitLocked(machineEvent{Event: "warning", Message: message})
+}
+
 // PromptRelay emits an actionable event instead of reading a terminal. It
 // creates the response file itself so an agent cannot accidentally approve a
 // later transfer with a stale file. The file is removed after a response.
@@ -509,6 +527,8 @@ func (r *machineReporter) finish(err error, savedPath string) {
 }
 
 func (r *machineReporter) emitLocked(event machineEvent) {
+	event.Protocol = r.protocol
+	r.snapshot.Protocol = event.Protocol
 	if event.Event == "result" {
 		// The result is terminal. Persist it before writing it to the event
 		// stream so a status-file failure is reported before, never after, the

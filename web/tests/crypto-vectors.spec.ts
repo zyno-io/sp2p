@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 import { readFileSync } from "fs";
 import { join } from "path";
 import { test, expect } from "./fixtures";
@@ -10,6 +12,56 @@ const VECTORS = JSON.parse(readFileSync(vectorsPath, "utf-8"));
 async function loadCryptoBundle(page: any) {
   await page.addScriptTag({ url: "/crypto-test.js" });
 }
+
+test("transfer capabilities negotiate automatically and bind both raw keys", async ({ page }) => {
+  await page.goto("/");
+  await loadCryptoBundle(page);
+  const errors = await page.evaluate(async () => {
+    const { generateKeyPair, exportPublicKey, exportTransferPublicKey, importPublicKey, deriveKeys, transferProtocol, computeConfirmation } = (window as any).__cryptoTest;
+    const sender = await generateKeyPair();
+    const receiver = await generateKeyPair();
+    const canonicalSender = await exportPublicKey(sender.publicKey);
+    const canonicalReceiver = await exportPublicKey(receiver.publicKey);
+    const markedSender = await exportTransferPublicKey(sender.publicKey);
+    const markedReceiver = await exportTransferPublicKey(receiver.publicKey);
+    const errors: string[] = [];
+    if ((canonicalSender[31] | canonicalReceiver[31]) & 0x80) errors.push("canonical key has capability bit");
+    if (!(markedSender[31] & markedReceiver[31] & 0x80)) errors.push("missing advertised capability");
+    const seed = new Uint8Array(32).fill(17);
+    const same = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v,i) => v === b[i]);
+    for (const senderNew of [false,true]) {
+      for (const receiverNew of [false,true]) {
+        const senderPub = senderNew ? markedSender : canonicalSender;
+        const receiverPub = receiverNew ? markedReceiver : canonicalReceiver;
+        if (transferProtocol(senderPub,receiverPub) !== (senderNew && receiverNew ? 3 : 2)) errors.push("wrong negotiated version");
+        // Check honest interoperability and adversarial mutation of either/both advertisements.
+        for (const mask of [0,1,2,3]) {
+          const receivedSender = senderPub.slice();
+          const receivedReceiver = receiverPub.slice();
+          if (mask & 1) receivedSender[31] ^= 0x80;
+          if (mask & 2) receivedReceiver[31] ^= 0x80;
+          const senderKey = await importPublicKey(receivedSender);
+          const receiverKey = await importPublicKey(receivedReceiver);
+          const senderKeys = await deriveKeys(sender.privateKey,receiverKey,seed,"session",senderPub,receivedReceiver);
+          const receiverKeys = await deriveKeys(receiver.privateKey,senderKey,seed,"session",receivedSender,receiverPub);
+          const senderMAC = await computeConfirmation(senderKeys.confirm,"sender",senderPub,receivedReceiver);
+          const expectedMAC = await computeConfirmation(receiverKeys.confirm,"sender",receivedSender,receiverPub);
+          if (same(senderMAC,expectedMAC) !== (mask === 0)) errors.push(`authentication result incorrect: ${senderNew}/${receiverNew}/${mask}`);
+        }
+      }
+    }
+    for (const size of [0,31,33,64]) {
+      for (const senderInvalid of [false,true]) {
+        let rejected = false;
+        try { transferProtocol(senderInvalid ? new Uint8Array(size) : markedSender,senderInvalid ? markedReceiver : new Uint8Array(size)); }
+        catch { rejected = true; }
+        if (!rejected) errors.push(`accepted invalid key size: ${size}`);
+      }
+    }
+    return errors;
+  });
+  expect(errors).toEqual([]);
+});
 
 // ── Base62 ─────────────────────────────────────────────────────────────────────
 

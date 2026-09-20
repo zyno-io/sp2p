@@ -5,6 +5,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -122,14 +123,14 @@ func TestExtractIP_Spoofing(t *testing.T) {
 			remoteAddr: "127.0.0.1:9999",
 			xff:        "spoofed.ip.1.1, real.ip.2.2",
 			trustProxy: true,
-			wantIP:     "real.ip.2.2",
+			wantIP:     "127.0.0.1",
 		},
 		{
 			name:       "trust proxy, multiple XFF entries takes last",
 			remoteAddr: "127.0.0.1:9999",
 			xff:        "client, proxy1, proxy2",
 			trustProxy: true,
-			wantIP:     "proxy2",
+			wantIP:     "127.0.0.1",
 		},
 		{
 			name:       "trust proxy off, ignores XFF",
@@ -155,7 +156,7 @@ func TestExtractIP_Spoofing(t *testing.T) {
 				req.Header.Set("X-Forwarded-For", tc.xff)
 			}
 
-			got := extractIP(req, tc.trustProxy)
+			got := extractIP(req, tc.trustProxy, netip.MustParsePrefix("127.0.0.1/32"))
 			if got != tc.wantIP {
 				t.Errorf("extractIP() = %q, want %q", got, tc.wantIP)
 			}

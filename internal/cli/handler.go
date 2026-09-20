@@ -107,6 +107,10 @@ func (h *cliHandler) OnVerbose(msg string) {
 	h.progress.Log(msg)
 }
 
+func (h *cliHandler) OnWarning(msg string) {
+	h.progress.ShowWarning(msg)
+}
+
 func (h *cliHandler) PromptRelay() bool {
 	h.progress.Pause()
 	result := promptRelay()

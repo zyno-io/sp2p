@@ -13,7 +13,9 @@ async function extractCodeFromShareUrl(page: { locator: (selector: string) => an
 }
 
 async function maybeConfirmBrowserDownload(page: { locator: (selector: string) => any }): Promise<void> {
-  const confirmButton = page.locator(".confirm-btn");
+  // Explicitly choose the bounded memory path; native file dialogs are covered
+  // separately with an injected File System Access writer.
+  const confirmButton = page.locator(".memory-download-btn, .confirm-btn").last();
   try {
     await confirmButton.click({ timeout: 5_000 });
   } catch {

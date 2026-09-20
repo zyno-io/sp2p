@@ -224,7 +224,7 @@ func (s *EncryptedStream) ReadFrame() (byte, []byte, error) {
 		buildNonce(nonce[:], seq)
 		var aad [10]byte
 		buildAAD(aad[:], msgType, seq)
-		plaintext, err := s.readAEAD.Open(nil, nonce[:], ciphertext, aad[:])
+		plaintext, err := s.readAEAD.Open(ciphertext[:0], nonce[:], ciphertext, aad[:])
 		if err != nil {
 			return 0, nil, fmt.Errorf("data integrity check failed — connection may be compromised: %w", err)
 		}
@@ -245,7 +245,9 @@ func (s *EncryptedStream) ReadFrame() (byte, []byte, error) {
 	var aad [10]byte
 	buildAAD(aad[:], msgType, seq)
 
-	plaintext, err := s.readAEAD.Open(nil, nonce[:], ciphertext, aad[:])
+	// The payload is owned by this read and is never pooled/reused. Decrypting
+	// in place avoids retaining a second full-size plaintext allocation.
+	plaintext, err := s.readAEAD.Open(ciphertext[:0], nonce[:], ciphertext, aad[:])
 	if err != nil {
 		return 0, nil, fmt.Errorf("data integrity check failed — connection may be compromised: %w", err)
 	}

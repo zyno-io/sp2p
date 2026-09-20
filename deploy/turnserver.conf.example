@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MIT
+# Example policy, not production provisioning. Set realm, TLS cert/key,
+# listening/relay/external addresses, and a random shared auth secret privately.
+# Never start this file unchanged or expose the relay without an egress firewall.
+realm=REPLACE_WITH_YOUR_DOMAIN
+use-auth-secret
+# static-auth-secret must match SP2P_TURN_SECRET; supply it in a private config.
+fingerprint
+listening-port=3478
+tls-listening-port=5349
+min-port=49152
+max-port=49279
+user-quota=8
+total-quota=128
+# Bytes/sec per allocation and globally; inputs and outputs are counted separately.
+max-bps=5242880
+bps-capacity=52428800
+no-multicast-peers
+# Loopback is disallowed by default; never enable allow-loopback-peers.
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=224.0.0.0-255.255.255.255
+denied-peer-ip=::-::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=ff00::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+# Add all organization-specific management/service ranges, including public IPs
+# and translated/tunneled IPv6 ranges, to the firewall and deny policy.

@@ -16,6 +16,11 @@ import (
 // inside MultiStream for global ordering across streams.
 const globalSeqSize = 8
 
+// maxPendingControls bounds control frames awaiting delivery while a data
+// barrier delays them. It also sizes controlCh so the primary reader applies
+// backpressure before controls can accumulate without bound.
+const maxPendingControls = 16
+
 // maxRawFrameSize is the maximum size for a raw (pre-prepared) frame passed
 // through MultiStream, including the multiFrame wrapper overhead. This caps
 // data + encryption overhead + global seq + wrapper tag at 1 MiB.
@@ -59,8 +64,10 @@ type MultiStream struct {
 	// Control frames from stream 0
 	controlCh       chan controlFrame
 	pendingControls []controlFrame // queued controls, delivered after any required data barrier
+	expectMetadata  bool           // owned by the application reader
 
-	closeOnce sync.Once
+	closeOnce   sync.Once
+	asyncWriter *asyncMultiWriter // exclusively owned by Session's write dispatcher
 }
 
 type controlFrame struct {
@@ -86,7 +93,7 @@ func NewMultiStream(streams []FrameReadWriter, conns []MultiStreamConn) *MultiSt
 		reassembly: newReassembler(),
 		readCancel: cancel,
 		readDone:   make(chan struct{}),
-		controlCh:  make(chan controlFrame, 16),
+		controlCh:  make(chan controlFrame, maxPendingControls),
 	}
 
 	// Start N reader goroutines.
@@ -127,72 +134,50 @@ func (ms *MultiStream) WriteFrame(msgType byte, data []byte) error {
 
 // ReadFrame returns frames in order. Control frames are delivered as-is.
 // Data frames are reassembled in global sequence order, with the global
-// sequence prefix stripped. Data frames are always prioritized over control
-// frames to ensure ordering within the data stream. A Done frame is withheld
-// until every preceding data frame has been reassembled, so it cannot overtake
-// a slower secondary TCP stream.
+// sequence prefix stripped. Controls are prioritized unless their data barrier
+// has not been reached. A Done frame is withheld until every preceding data
+// frame has been reassembled, so it cannot overtake a slower secondary TCP
+// stream.
 func (ms *MultiStream) ReadFrame() (byte, []byte, error) {
-	// Always drain buffered data and pending controls before surfacing errors,
-	// so callers see MsgDone/MsgComplete even if a secondary stream errored.
-	if data, ok := ms.reassembly.tryDeliver(); ok {
-		return MsgData, data, nil
-	}
-	if cf, ok := ms.popReadyControl(); ok {
-		return cf.msgType, cf.data, nil
-	}
-	if ep := ms.readErr.Load(); ep != nil {
-		if ms.dequeueControl() {
-			if cf, ok := ms.popReadyControl(); ok {
-				return cf.msgType, cf.data, nil
-			}
-		}
-		return 0, nil, *ep
-	}
-
 	for {
-		// Always try to deliver buffered data frames first.
-		if data, ok := ms.reassembly.tryDeliver(); ok {
-			return MsgData, data, nil
+		// Controls are bounded and inspected first; Done retains its data barrier.
+		// Only drain the capacity left after controls deferred by a data barrier.
+		// Otherwise a valid burst can overflow pendingControls before one ready
+		// control is delivered to the caller.
+		availableControls := maxPendingControls - len(ms.pendingControls)
+		for i := 0; i < availableControls && ms.dequeueControl(); i++ {
 		}
-
-		// If a pending control has passed its data barrier, deliver it.
 		if cf, ok := ms.popReadyControl(); ok {
+			if cf.msgType == MsgMetadata {
+				ms.expectMetadata = false
+			}
 			return cf.msgType, cf.data, nil
 		}
-
-		// No data frame ready. Wait for a signal.
-		select {
-		case <-ms.reassembly.signal():
-			// A new data frame arrived — loop to try delivery.
-			// Also recheck for errors: a reader may have stored an error
-			// and signaled the reassembler concurrently.
-			if ep := ms.readErr.Load(); ep != nil {
-				// Drain any remaining buffered data before surfacing the error.
-				if data, ok := ms.reassembly.tryDeliver(); ok {
-					return MsgData, data, nil
-				}
-				if ms.dequeueControl() {
-					if cf, ok := ms.popReadyControl(); ok {
-						return cf.msgType, cf.data, nil
-					}
-				}
-				return 0, nil, *ep
-			}
-			continue
-		case cf := <-ms.controlCh:
-			ms.enqueueControl(cf)
-			continue
-		case <-ms.readDone:
-			// All readers exited. Drain remaining data frames.
+		if !ms.expectMetadata {
 			if data, ok := ms.reassembly.tryDeliver(); ok {
 				return MsgData, data, nil
 			}
+		}
+		if ep := ms.readErr.Load(); ep != nil {
+			return 0, nil, *ep
+		}
+		select {
+		case <-ms.reassembly.signal():
+		case cf := <-ms.controlCh:
+			ms.enqueueControl(cf)
+		case <-ms.readDone:
+			availableControls := maxPendingControls - len(ms.pendingControls)
+			for i := 0; i < availableControls && ms.dequeueControl(); i++ {
+			}
 			if cf, ok := ms.popReadyControl(); ok {
+				if cf.msgType == MsgMetadata {
+					ms.expectMetadata = false
+				}
 				return cf.msgType, cf.data, nil
 			}
-			if ms.dequeueControl() {
-				if cf, ok := ms.popReadyControl(); ok {
-					return cf.msgType, cf.data, nil
+			if !ms.expectMetadata {
+				if data, ok := ms.reassembly.tryDeliver(); ok {
+					return MsgData, data, nil
 				}
 			}
 			if ep := ms.readErr.Load(); ep != nil {
@@ -203,11 +188,22 @@ func (ms *MultiStream) ReadFrame() (byte, []byte, error) {
 	}
 }
 
+// ExpectMetadata must be called before the application's first ReadFrame.
+// The reverse direction has no metadata, so this is a receiver-only phase.
+func (ms *MultiStream) ExpectMetadata() { ms.expectMetadata = true }
+
 // enqueueControl queues a control frame. Cancels are terminal and bypass any
 // pending Done barrier so callers can stop promptly when the peer aborts.
 func (ms *MultiStream) enqueueControl(cf controlFrame) {
-	if cf.msgType == MsgCancel {
+	if cf.msgType == MsgCancel || cf.msgType == MsgError {
 		ms.pendingControls = []controlFrame{cf}
+		return
+	}
+	if len(ms.pendingControls) >= maxPendingControls {
+		err := fmt.Errorf("too many pending control frames")
+		ms.readErr.CompareAndSwap(nil, &err)
+		ms.readCancel()
+		ms.reassembly.abort(err)
 		return
 	}
 	ms.pendingControls = append(ms.pendingControls, cf)
@@ -231,6 +227,14 @@ func (ms *MultiStream) popReadyControl() (controlFrame, bool) {
 		return controlFrame{}, false
 	}
 	cf := ms.pendingControls[0]
+	if cf.msgType == MsgDone && !ms.expectMetadata {
+		ms.reassembly.mu.Lock()
+		_, ready := ms.reassembly.buffer[ms.reassembly.nextSeq]
+		ms.reassembly.mu.Unlock()
+		if ready {
+			return controlFrame{}, false
+		}
+	}
 	if cf.msgType != MsgCancel && ms.reassembly.deliveredCount() < cf.dataBarrier {
 		return controlFrame{}, false
 	}
@@ -455,6 +459,13 @@ func (ms *MultiStream) readLoop(ctx context.Context, streamIdx int) {
 		}
 
 		if msgType != MsgData {
+			if streamIdx != 0 || len(data) > MaxControlSize {
+				err := fmt.Errorf("invalid parallel control frame")
+				ms.readErr.CompareAndSwap(nil, &err)
+				ms.readCancel()
+				ms.reassembly.abort(err)
+				return
+			}
 			// Control frame from any stream (should only come from stream 0,
 			// but handle gracefully).
 			cf := controlFrameFor(msgType, data)
@@ -515,6 +526,8 @@ type reassembler struct {
 	nextSeq  uint64
 	buffer   map[uint64][]byte
 	maxAhead int // cap to prevent unbounded memory
+	bytes    int
+	maxBytes int
 	err      error
 }
 
@@ -523,7 +536,8 @@ func newReassembler() *reassembler {
 		notifyCh: make(chan struct{}, 1),
 		spaceCh:  make(chan struct{}, 1),
 		buffer:   make(map[uint64][]byte),
-		maxAhead: 4096,
+		maxAhead: 128,
+		maxBytes: 32 * 1024 * 1024,
 	}
 }
 
@@ -542,8 +556,22 @@ func (r *reassembler) insert(ctx context.Context, seq uint64, data []byte) error
 			r.mu.Unlock()
 			return r.err
 		}
-		if r.maxAhead <= 0 || seq < r.nextSeq+uint64(r.maxAhead) {
+		if seq < r.nextSeq {
+			r.mu.Unlock()
+			return fmt.Errorf("stale data sequence: %d", seq)
+		}
+		if _, exists := r.buffer[seq]; exists {
+			r.mu.Unlock()
+			return fmt.Errorf("duplicate data sequence: %d", seq)
+		}
+		if len(data) > MaxFrameSize || seq-r.nextSeq > 4096 {
+			r.mu.Unlock()
+			return fmt.Errorf("data exceeds reassembly window")
+		}
+		if (r.maxAhead <= 0 || seq-r.nextSeq < uint64(r.maxAhead)) &&
+			(seq == r.nextSeq || len(data) <= r.maxBytes-r.bytes) {
 			r.buffer[seq] = data
+			r.bytes += len(data)
 			r.mu.Unlock()
 			// Signal that new data is available.
 			select {
@@ -573,6 +601,7 @@ func (r *reassembler) tryDeliver() ([]byte, bool) {
 		return nil, false
 	}
 	delete(r.buffer, r.nextSeq)
+	r.bytes -= len(data)
 	r.nextSeq++
 	// Signal that space has been freed for blocked inserters.
 	select {

@@ -1,6 +1,6 @@
 module github.com/zyno-io/sp2p
 
-go 1.25.6
+go 1.26.8
 
 require (
 	github.com/coder/websocket v1.8.15
@@ -8,7 +8,7 @@ require (
 	github.com/klauspost/compress v1.19.2
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/pion/webrtc/v4 v4.2.18
-	golang.org/x/crypto v0.55.0
+	golang.org/x/crypto v0.56.0
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0

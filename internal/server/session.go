@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/zyno-io/sp2p/internal/signal"
 )
 
 const (
@@ -28,6 +29,7 @@ var (
 	ErrTooManySessionsForIP = errors.New("too many sessions for this IP")
 	ErrSessionNotFound      = errors.New("session not found")
 	ErrSessionFull          = errors.New("session already has a receiver")
+	ErrPeerVersion          = errors.New("protocol version mismatch with sender")
 )
 
 // Unambiguous alphabet: excludes 0, 1, i, l, o to avoid confusion.
@@ -45,6 +47,8 @@ type Session struct {
 	receiver         atomic.Pointer[websocket.Conn]
 	joinedAt         atomic.Int64           // unix nanos when receiver joined (0 = not yet joined)
 	fileInfo         atomic.Pointer[string] // encrypted file metadata (set by sender, read via HTTP)
+	turnOnce         sync.Once
+	turnServers      []signal.ICEServer
 }
 
 // CloseConns closes both sender and receiver WebSocket connections (best-effort).
@@ -122,7 +126,7 @@ func NewSessionManager(maxTotal, maxPerIP int) *SessionManager {
 
 // Create creates a new session for the given sender connection.
 // Returns ErrTooManySessions or ErrTooManySessionsForIP if limits are exceeded.
-func (sm *SessionManager) Create(sender *websocket.Conn, ip string) (*Session, error) {
+func (sm *SessionManager) Create(sender *websocket.Conn, ip string, hello ...signal.Hello) (*Session, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -152,6 +156,10 @@ func (sm *SessionManager) Create(sender *websocket.Conn, ip string) (*Session, e
 		LastSeen:  time.Now(),
 		Sender:    sender,
 	}
+	if len(hello) != 0 {
+		s.SenderClientType = hello[0].ClientType
+		s.SenderVersion = hello[0].Version
+	}
 	sm.sessions[id] = s
 	sm.ipCounts[ip]++
 	return s, nil
@@ -160,13 +168,16 @@ func (sm *SessionManager) Create(sender *websocket.Conn, ip string) (*Session, e
 // Join adds a receiver to an existing session.
 // Returns ErrSessionNotFound if the session does not exist,
 // or ErrSessionFull if a receiver has already joined.
-func (sm *SessionManager) Join(id string, receiver *websocket.Conn) (*Session, error) {
+func (sm *SessionManager) Join(id string, receiver *websocket.Conn, version ...int) (*Session, error) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	s, ok := sm.sessions[id]
 	if !ok {
 		return nil, ErrSessionNotFound
+	}
+	if len(version) != 0 && version[0] != s.SenderVersion {
+		return nil, ErrPeerVersion
 	}
 	if s.Receiver() != nil {
 		return nil, ErrSessionFull

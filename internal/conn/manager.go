@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/zyno-io/sp2p/internal/signal"
@@ -23,11 +22,12 @@ type P2PConn interface {
 // TCPResult holds the result of a successful TCP connection establishment,
 // along with the information needed to open secondary parallel connections.
 type TCPResult struct {
-	Conn          P2PConn        // Primary TCP connection
-	Listener      net.Listener   // Non-nil if we were the acceptor (peer dialed us)
-	PeerAddr      string         // Non-empty if we were the dialer (we dialed out)
-	WeDialed      bool           // True if we initiated the winning connection
-	Cleanup       func()         // Closes listener (if open) + removes UPnP mapping
+	SelectWinner  func(context.Context) error
+	Conn          P2PConn         // Primary TCP connection
+	Listener      net.Listener    // Non-nil if we were the acceptor (peer dialed us)
+	PeerAddr      string          // Non-empty if we were the dialer (we dialed out)
+	WeDialed      bool            // True if we initiated the winning connection
+	Cleanup       func()          // Closes listener (if open) + removes UPnP mapping
 	AcceptStopped <-chan struct{} // Closed when the primary accept goroutine has exited (acceptor only)
 }
 
@@ -50,14 +50,15 @@ const (
 
 // ConnectConfig holds configuration for establishing a P2P connection.
 type ConnectConfig struct {
+	Authenticate   func(context.Context, P2PConn) (func(context.Context) error, error)
 	SignalClient   *signal.Client
 	IsSender       bool
 	STUNServers    []string
 	TURNServers    []TURNServer
-	PeerClientType string         // "cli", "browser", or "" — used to skip TCP for browsers
-	Transport      string         // TransportAuto, TransportTCP, or TransportWebRTC
-	TCPPreferWait  time.Duration  // in auto mode, hold a WebRTC win this long to let TCP catch up
-	DevMode        bool           // when true, allow dialing loopback/link-local addresses
+	PeerClientType string        // "cli", "browser", or "" — used to skip TCP for browsers
+	Transport      string        // TransportAuto, TransportTCP, or TransportWebRTC
+	TCPPreferWait  time.Duration // in auto mode, hold a WebRTC win this long to let TCP catch up
+	DevMode        bool          // when true, allow dialing loopback/link-local addresses
 	OnStatus       StatusCallback
 	OnLog          func(string) // verbose diagnostic logging (nil = disabled)
 }
@@ -89,10 +90,11 @@ func establish(ctx context.Context, cfg ConnectConfig) (*EstablishResult, error)
 	defer cancel()
 
 	type result struct {
-		conn      P2PConn
-		method    string
-		tcpResult *TCPResult
-		err       error
+		selectWinner func(context.Context) error
+		conn         P2PConn
+		method       string
+		tcpResult    *TCPResult
+		err          error
 	}
 
 	// Determine which methods to attempt based on transport mode and peer type.
@@ -158,7 +160,14 @@ func establish(ctx context.Context, cfg ConnectConfig) (*EstablishResult, error)
 				OnStatus:       onStatus,
 				OnLog:          cfg.OnLog,
 			})
-			results <- result{conn: conn, method: "WebRTC", err: err}
+			var selectWinner func(context.Context) error
+			if err == nil && cfg.Authenticate != nil {
+				selectWinner, err = cfg.Authenticate(ctx, conn)
+				if err != nil {
+					conn.Close()
+				}
+			}
+			results <- result{conn: conn, method: "WebRTC", err: err, selectWinner: selectWinner}
 		}()
 	} else if onStatus != nil {
 		onStatus(MethodStatus{Method: "WebRTC", State: "skipped", Detail: "transport=" + cfg.Transport})
@@ -171,7 +180,7 @@ func establish(ctx context.Context, cfg ConnectConfig) (*EstablishResult, error)
 			if err != nil {
 				results <- result{method: "TCP", err: err}
 			} else {
-				results <- result{conn: tcpRes.Conn, method: "TCP", tcpResult: tcpRes, err: nil}
+				results <- result{conn: tcpRes.Conn, method: "TCP", tcpResult: tcpRes, err: nil, selectWinner: tcpRes.SelectWinner}
 			}
 		}()
 	} else if onStatus != nil {
@@ -236,6 +245,15 @@ func establish(ctx context.Context, cfg ConnectConfig) (*EstablishResult, error)
 							remaining--
 							waiting = false
 							if tcpRes.err == nil && tcpRes.conn != nil {
+								if tcpRes.selectWinner != nil {
+									if err := tcpRes.selectWinner(ctx); err != nil {
+										tcpRes.conn.Close()
+										if tcpRes.tcpResult.Cleanup != nil {
+											tcpRes.tcpResult.Cleanup()
+										}
+										break // fall back to the held WebRTC candidate
+									}
+								}
 								logVerbose(cfg.OnLog, "TCP connected during preference window — using TCP")
 								// Re-announce TCP as the winner so the UI
 								// overwrites the earlier WebRTC "connected".
@@ -276,6 +294,16 @@ func establish(ctx context.Context, cfg ConnectConfig) (*EstablishResult, error)
 					}
 				} else {
 					logVerbose(cfg.OnLog, "%s won the connection race", r.method)
+				}
+				if r.selectWinner != nil {
+					if err := r.selectWinner(ctx); err != nil {
+						r.conn.Close()
+						if r.tcpResult != nil && r.tcpResult.Cleanup != nil {
+							r.tcpResult.Cleanup()
+						}
+						firstErr = err
+						continue
+					}
 				}
 				cancel()
 				drainLosers(remaining)
@@ -348,19 +376,12 @@ func tryTCP(ctx context.Context, cfg ConnectConfig) (*TCPResult, error) {
 	directCh := cfg.SignalClient.Subscribe(signal.TypeDirect)
 
 	// Track cleanup resources.
-	var mapping *UPnPMapping
-	var mappingMu sync.Mutex
-	var cleaned bool
+	var mappings mappingOwner
 
 	cleanup := func() {
 		ln.Close()
 		cfg.SignalClient.Unsubscribe(signal.TypeDirect, directCh)
-		mappingMu.Lock()
-		cleaned = true
-		if mapping != nil {
-			mapping.RemoveMapping()
-		}
-		mappingMu.Unlock()
+		mappings.close()
 	}
 
 	// Immediately trickle all LAN addresses.
@@ -384,15 +405,9 @@ func tryTCP(ctx context.Context, cfg ConnectConfig) (*TCPResult, error) {
 			logVerbose(cfg.OnLog, "TCP: UPnP failed: %v", err)
 			return
 		}
-		mappingMu.Lock()
-		if cleaned {
-			// cleanup() already ran; remove mapping immediately.
-			m.RemoveMapping()
-			mappingMu.Unlock()
+		if !mappings.register(m) {
 			return
 		}
-		mapping = m
-		mappingMu.Unlock()
 
 		externalAddr := fmt.Sprintf("%s:%d", m.ExternalIP, m.ExternalPort)
 		logVerbose(cfg.OnLog, "TCP: UPnP mapped %s", externalAddr)
@@ -472,6 +487,7 @@ func tryTCP(ctx context.Context, cfg ConnectConfig) (*TCPResult, error) {
 	// the magic byte and writes an ack. This guarantees both sides use the
 	// same physical TCP connection even when both dial simultaneously.
 	var winner net.Conn
+	var selectWinner func(context.Context) error
 
 	if cfg.IsSender {
 		// Sender: try connections sequentially — write magic, read ack.
@@ -491,6 +507,14 @@ func tryTCP(ctx context.Context, cfg ConnectConfig) (*TCPResult, error) {
 					continue
 				}
 				c.SetDeadline(time.Time{})
+				if cfg.Authenticate != nil {
+					var err error
+					selectWinner, err = cfg.Authenticate(ctx, c)
+					if err != nil {
+						c.Close()
+						continue
+					}
+				}
 				winner = c
 			case <-ctx.Done():
 				reportFailed(cfg.OnStatus, "TCP", ctx.Err())
@@ -503,11 +527,19 @@ func tryTCP(ctx context.Context, cfg ConnectConfig) (*TCPResult, error) {
 		// Receiver: try all connections concurrently — read magic, write ack.
 		// First connection to receive the sender's magic byte wins.
 		winCh := make(chan net.Conn, 1)
+		handshakeSlots := make(chan struct{}, 16)
 		go func() {
 			for {
 				select {
 				case c := <-rawConns:
+					select {
+					case handshakeSlots <- struct{}{}:
+					default:
+						c.Close()
+						continue
+					}
 					go func(c net.Conn) {
+						defer func() { <-handshakeSlots }()
 						c.SetDeadline(time.Now().Add(5 * time.Second))
 						buf := make([]byte, 1)
 						if _, err := io.ReadFull(c, buf); err != nil || buf[0] != tcpMagic {
@@ -519,6 +551,12 @@ func tryTCP(ctx context.Context, cfg ConnectConfig) (*TCPResult, error) {
 							return
 						}
 						c.SetDeadline(time.Time{})
+						if cfg.Authenticate != nil {
+							if _, err := cfg.Authenticate(ctx, c); err != nil {
+								c.Close()
+								return
+							}
+						}
 						select {
 						case winCh <- c:
 						default:
@@ -555,24 +593,17 @@ func tryTCP(ctx context.Context, cfg ConnectConfig) (*TCPResult, error) {
 	listenerPort := ln.Addr().(*net.TCPAddr).Port
 	weDialed := winnerLocalPort != listenerPort
 
-	mappingCleanup := func() {
-		mappingMu.Lock()
-		if mapping != nil {
-			mapping.RemoveMapping()
-		}
-		mappingMu.Unlock()
-	}
-
 	res := &TCPResult{
-		Conn:     &netConnAdapter{Conn: winner, onClose: nil},
-		WeDialed: weDialed,
+		SelectWinner: selectWinner,
+		Conn:         &netConnAdapter{Conn: winner, onClose: nil},
+		WeDialed:     weDialed,
 	}
 
 	if weDialed {
 		// We dialed out — close listener, record peer address for re-dialing.
 		ln.Close()
 		res.PeerAddr = winner.RemoteAddr().String()
-		res.Cleanup = mappingCleanup
+		res.Cleanup = mappings.close
 	} else {
 		// We were the acceptor — keep listener open for secondary connections.
 		// Set an immediate deadline to unblock the accept goroutine above so it
@@ -582,7 +613,7 @@ func tryTCP(ctx context.Context, cfg ConnectConfig) (*TCPResult, error) {
 		res.AcceptStopped = acceptStopped
 		res.Cleanup = func() {
 			ln.Close()
-			mappingCleanup()
+			mappings.close()
 		}
 	}
 

@@ -5,16 +5,17 @@
 
 import { SignalClient, PROTOCOL_VERSION, Envelope } from "./signal";
 import { establishWebRTC, ICEServerConfig, splitIceServers } from "./webrtc";
+import { confirmDataChannel } from "./handshake";
 import {
   generateKeyPair,
-  exportPublicKey,
+  exportTransferPublicKey,
+  transferProtocol,
   importPublicKey,
   deriveKeys,
   generateSeed,
   decodeSeed,
   parseCode,
   EncryptedChannel,
-  computeConfirmation,
   encryptFileInfo,
   decryptFileInfo,
   bytesToBase64,
@@ -38,7 +39,10 @@ import {
   showError,
 } from "./ui";
 import { log } from "./log";
+import { createTar, type TarArchive } from "./tar";
 import { showQRModal, closeQRModal } from "./qr";
+
+const MULTI_FILE_ARCHIVE_NAME = "sp2p-received-folder.tar";
 
 // Wait for a message type, but also race against server error messages
 // and peer disconnection so rejections are surfaced immediately instead
@@ -240,6 +244,12 @@ function initCliSection(): void {
 
 // ─── SEND PAGE ───────────────────────────────────────────────
 
+// Only show a negotiated protocol after successful transcript confirmation.
+function showProtocol(protocol: 2 | 3): void {
+  log(`authenticated transfer protocol v${protocol}`);
+  if (protocol === 2) show($(".legacy-warning"));
+}
+
 async function initSend(): Promise<void> {
   initCliSection();
 
@@ -304,7 +314,9 @@ async function initSend(): Promise<void> {
   async function startSend(files: File[]): Promise<void> {
     const isSingleFile = files.length === 1;
     const file = files[0]; // used for single-file path
-    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const transferName = isSingleFile ? file.name : MULTI_FILE_ARCHIVE_NAME;
+    let transferSize = file.size;
+    let preparedArchive: TarArchive | undefined;
     hide(dropZone);
     hide(cliSection);
     hide(downloadSection);
@@ -314,6 +326,11 @@ async function initSend(): Promise<void> {
     let pc: RTCPeerConnection | null = null;
 
     try {
+      if (!isSingleFile) {
+        // Validate paths and retain the exact TAR size before publishing a code.
+        preparedArchive = createTar(files);
+        transferSize = preparedArchive.totalSize;
+      }
       // Step 1: Generate seed.
       log("generating encryption seed");
       const { encoded: seedEncoded, raw: seedRaw } = generateSeed();
@@ -335,8 +352,8 @@ async function initSend(): Promise<void> {
       // Encrypt and send file-info for receiver preview (best-effort).
       try {
         const fileInfoMeta = {
-          name: isSingleFile ? file.name : `${files.length} files`,
-          size: totalSize,
+          name: transferName,
+          size: transferSize,
           isFolder: !isSingleFile,
           fileCount: isSingleFile ? 0 : files.length,
         };
@@ -378,11 +395,12 @@ async function initSend(): Promise<void> {
       const cryptoPromise = waitForWithErrors(sigClient, "crypto");
       log("generating X25519 key pair");
       const kp = await generateKeyPair();
-      const myPub = await exportPublicKey(kp.publicKey);
+      const myPub = await exportTransferPublicKey(kp.publicKey);
       sigClient.send("crypto", { publicKey: bytesToBase64(myPub) });
 
       const cryptoMsg = await cryptoPromise;
       const peerPub = base64ToBytes(cryptoMsg.payload.publicKey);
+      const protocol = transferProtocol(myPub, peerPub);
       const peerKey = await importPublicKey(peerPub);
 
       log("public keys exchanged, deriving session keys");
@@ -417,47 +435,11 @@ async function initSend(): Promise<void> {
       $(".step-p2p").textContent = "P2P connected via WebRTC";
       setStepStatus($(".step-p2p"), "done");
 
-      // Step 7: Key confirmation over DataChannel.
-      log("performing key confirmation over data channel");
-      const myConfirm = await computeConfirmation(
-        keys.confirm,
-        "sender",
-        myPub,
-        peerPub
-      );
-      dc.send(myConfirm);
-
-      // Read peer's confirmation, buffering any extra messages.
-      const extraBuffered: Uint8Array[] = [];
-      const peerConfirmData = await new Promise<ArrayBuffer>((resolve, reject) => {
-        let resolved = false;
-        const timer = setTimeout(() => {
-          if (!resolved) { resolved = true; reject(new Error("Key confirmation timed out")); }
-        }, 15000);
-        dc.onclose = () => {
-          if (!resolved) { resolved = true; clearTimeout(timer); reject(new Error("Connection closed during key confirmation")); }
-        };
-        dc.onmessage = (event) => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timer);
-            resolve(event.data);
-          } else {
-            extraBuffered.push(new Uint8Array(event.data));
-          }
-        };
-      });
-      const peerConfirm = new Uint8Array(peerConfirmData);
-      const expectedPeerConfirm = await computeConfirmation(
-        keys.confirm,
-        "receiver",
-        myPub,
-        peerPub
-      );
-      if (!constantTimeEqual(peerConfirm, expectedPeerConfirm)) {
-        throw new Error("Key confirmation failed");
-      }
+      // Step 7: All v3 peers authenticate the candidate before key confirmation.
+      log("authenticating and confirming data channel");
+      const extraBuffered = await confirmDataChannel(dc, keys, myPub, peerPub, true, protocol);
       log("key confirmation successful");
+      showProtocol(protocol);
 
       // Step 8: Transfer file(s).
       log("establishing encrypted stream");
@@ -472,7 +454,8 @@ async function initSend(): Promise<void> {
         dc,
         enc,
         extraBuffered,
-        pc.sctp?.maxMessageSize
+        pc.sctp?.maxMessageSize,
+        protocol
       );
 
       // Close signaling — no longer needed after P2P + key confirmation.
@@ -489,7 +472,7 @@ async function initSend(): Promise<void> {
       const startTime = Date.now();
       let sentBytes: number;
 
-      log(`starting transfer: ${isSingleFile ? file.name : files.length + " files"} (${formatBytes(totalSize)})`);
+      log(`starting transfer: ${transferName} (${formatBytes(transferSize)})`);
       try {
         if (isSingleFile) {
           await sendFile(transport, file, (bytesSent) => {
@@ -497,9 +480,15 @@ async function initSend(): Promise<void> {
           });
           sentBytes = file.size;
         } else {
-          sentBytes = await sendFiles(transport, files, "sp2p-received-folder.tgz", (bytesSent) => {
-            updateProgress(progressBar, progressInfo, bytesSent, totalSize, startTime);
-          });
+          sentBytes = await sendFiles(
+            transport,
+            files,
+            MULTI_FILE_ARCHIVE_NAME,
+            (bytesSent) => {
+              updateProgress(progressBar, progressInfo, bytesSent, transferSize, startTime);
+            },
+            preparedArchive
+          );
         }
       } finally {
         transport.stopHeartbeat();
@@ -597,12 +586,8 @@ async function initReceive(): Promise<void> {
     show(stepsContainer);
     setStepStatus($(".step-connect"), "active");
 
-    // Start file-info fetch in parallel with the WebSocket connection.
+    // Fetch preview before opening a socket: user decisions have no deadline.
     const fileInfoPromise = fetchFileInfo(sessionId, seedRaw);
-
-    // Connect to signaling server.
-    sigClient = await SignalClient.connect(getWsUrl());
-    setStepStatus($(".step-connect"), "done");
 
     // Wait for file-info (runs in parallel with WS connect, so usually instant).
     // If available, show confirmation card BEFORE joining so the sender doesn't
@@ -647,15 +632,49 @@ async function initReceive(): Promise<void> {
         });
       }
 
-      // Show confirmation card and wait for user to click download.
-      hide(stepsContainer);
-      show(confirmContainer);
-      await new Promise<void>((resolve) => {
-        confirmContainer.querySelector(".confirm-btn")!.addEventListener("click", () => resolve(), { once: true });
-      });
-      hide(confirmContainer);
-      show(stepsContainer);
     }
+
+    // Invoke the picker in the click handler itself, before transient activation
+    // expires during ICE/key exchange. Even a missing preview needs a gesture.
+    let saveHandle: any = null;
+    if (!fileInfo) {
+      confirmContainer.querySelector(".confirm-file")!.textContent = "Incoming transfer";
+      confirmContainer.querySelector(".confirm-size")!.textContent = "Size unknown";
+    }
+    hide(stepsContainer);
+    show(confirmContainer);
+    const downloadButton = confirmContainer.querySelector<HTMLButtonElement>(".confirm-btn")!;
+    const memoryButton = document.createElement("button");
+    memoryButton.className = "confirm-btn memory-download-btn";
+    memoryButton.textContent = "Download in memory (up to 256 MiB)";
+    if ("showSaveFilePicker" in window) {
+      downloadButton.textContent = "Choose file and save to disk";
+      downloadButton.insertAdjacentElement("afterend", memoryButton);
+    } else {
+      downloadButton.textContent = memoryButton.textContent;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const choose = async (memory: boolean) => {
+        if (downloadButton.disabled) return;
+        downloadButton.disabled = true;
+        memoryButton.disabled = true;
+        try {
+          if (!memory && "showSaveFilePicker" in window) {
+            saveHandle = await (window as any).showSaveFilePicker({ suggestedName: fileInfo?.name || "received-file" });
+          } else if (fileInfo && fileInfo.size > 256 * 1024 * 1024) {
+            throw new Error("File exceeds the 256 MiB memory limit; choose disk streaming or use the CLI");
+          }
+          resolve();
+        } catch (err) { reject(err); }
+      };
+      downloadButton.addEventListener("click", () => { void choose(false); }, { once: true });
+      memoryButton.addEventListener("click", () => { void choose(true); }, { once: true });
+    });
+    memoryButton.remove();
+    hide(confirmContainer);
+    show(stepsContainer);
+    sigClient = await SignalClient.connect(getWsUrl());
+    setStepStatus($(".step-connect"), "done");
 
     // Join session and wait for welcome (or error).
     setStepStatus($(".step-join"), "active");
@@ -673,11 +692,12 @@ async function initReceive(): Promise<void> {
     const cryptoPromise = waitForWithErrors(sigClient, "crypto");
     log("generating X25519 key pair");
     const kp = await generateKeyPair();
-    const myPub = await exportPublicKey(kp.publicKey);
+    const myPub = await exportTransferPublicKey(kp.publicKey);
     sigClient.send("crypto", { publicKey: bytesToBase64(myPub) });
 
     const cryptoMsg = await cryptoPromise;
     const peerPub = base64ToBytes(cryptoMsg.payload.publicKey);
+    const protocol = transferProtocol(peerPub, myPub);
     const peerKey = await importPublicKey(peerPub);
 
     log("public keys exchanged, deriving session keys");
@@ -713,46 +733,11 @@ async function initReceive(): Promise<void> {
     $(".step-p2p").textContent = "P2P connected via WebRTC";
     setStepStatus($(".step-p2p"), "done");
 
-    // Key confirmation.
-    log("performing key confirmation over data channel");
-    const myConfirm = await computeConfirmation(
-      keys.confirm,
-      "receiver",
-      peerPub,
-      myPub
-    );
-    dc.send(myConfirm);
-
-    const extraBuffered: Uint8Array[] = [];
-    const peerConfirmData = await new Promise<ArrayBuffer>((resolve, reject) => {
-      let resolved = false;
-      const timer = setTimeout(() => {
-        if (!resolved) { resolved = true; reject(new Error("Key confirmation timed out")); }
-      }, 15000);
-      dc.onclose = () => {
-        if (!resolved) { resolved = true; clearTimeout(timer); reject(new Error("Connection closed during key confirmation")); }
-      };
-      dc.onmessage = (event) => {
-        if (!resolved) {
-          resolved = true;
-          clearTimeout(timer);
-          resolve(event.data);
-        } else {
-          extraBuffered.push(new Uint8Array(event.data));
-        }
-      };
-    });
-    const peerConfirm = new Uint8Array(peerConfirmData);
-    const expectedPeerConfirm = await computeConfirmation(
-      keys.confirm,
-      "sender",
-      peerPub,
-      myPub
-    );
-    if (!constantTimeEqual(peerConfirm, expectedPeerConfirm)) {
-      throw new Error("Key confirmation failed");
-    }
+    // All v3 peers authenticate the candidate before key confirmation.
+    log("authenticating and confirming data channel");
+    const extraBuffered = await confirmDataChannel(dc, keys, peerPub, myPub, false, protocol);
     log("key confirmation successful");
+    showProtocol(protocol);
 
     // Receive file.
     log("establishing encrypted stream");
@@ -768,7 +753,8 @@ async function initReceive(): Promise<void> {
       dc,
       enc,
       extraBuffered,
-      pc.sctp?.maxMessageSize
+      pc.sctp?.maxMessageSize,
+      protocol
     );
 
     // Close signaling — no longer needed after P2P + key confirmation.
@@ -797,20 +783,13 @@ async function initReceive(): Promise<void> {
           updateProgress(progressBar, progressInfo, bytesRecv, totalSize, startTime, fileCount);
         },
         async (fileMeta) => {
-          // Try File System Access API for streaming large files to disk.
-          if (!("showSaveFilePicker" in window)) return null;
-          try {
-            const handle = await (window as any).showSaveFilePicker({
-              suggestedName: fileMeta.name,
-            });
-            const writable = await handle.createWritable();
-            return {
-              write: (chunk: Uint8Array) => writable.write(chunk),
-              close: () => writable.close(),
-            };
-          } catch {
-            return null; // user cancelled or API blocked — fall back to in-memory
-          }
+          if (!saveHandle) return null;
+          const writable = await saveHandle.createWritable();
+          return {
+            write: (chunk: Uint8Array) => writable.write(chunk),
+            close: () => writable.close(),
+            abort: (reason?: unknown) => writable.abort(reason),
+          };
         }
       );
     } finally {
@@ -848,6 +827,9 @@ async function initReceive(): Promise<void> {
 
 // Map raw server/protocol error messages to user-friendly text.
 function friendlyReceiveError(msg: string): string {
+  if (msg.includes("protocol version") || msg.includes("unsupported protocol")) {
+    return "Unsupported signaling protocol. Upgrade the peer or server; transfer-version selection is automatic.";
+  }
   if (msg.includes("transfer session not found")) {
     return "Transfer session not found — the link may have expired or is invalid.";
   }
@@ -890,16 +872,6 @@ function escapeHtml(s: string): string {
   const d = document.createElement("div");
   d.textContent = s;
   return d.innerHTML;
-}
-
-// Constant-time comparison.
-function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a[i] ^ b[i];
-  }
-  return diff === 0;
 }
 
 // Initialize the footer version link and tooltip.

@@ -5,7 +5,6 @@ package crypto
 import (
 	"bytes"
 	"context"
-	"io"
 	"net"
 	"testing"
 	"time"
@@ -115,9 +114,10 @@ func tcpConnPair(t *testing.T) (net.Conn, net.Conn) {
 	defer ln.Close()
 
 	var serverConn net.Conn
+	var acceptErr error
 	accepted := make(chan struct{})
 	go func() {
-		serverConn, err = ln.Accept()
+		serverConn, acceptErr = ln.Accept()
 		close(accepted)
 	}()
 
@@ -127,8 +127,8 @@ func tcpConnPair(t *testing.T) (net.Conn, net.Conn) {
 	}
 
 	<-accepted
-	if serverConn == nil {
-		t.Fatal("failed to accept connection")
+	if acceptErr != nil {
+		t.Fatalf("failed to accept connection: %v", acceptErr)
 	}
 
 	return clientConn, serverConn
@@ -216,30 +216,19 @@ func TestSendConfirmation_WrongKeys(t *testing.T) {
 
 func TestSendConfirmation_ContextCancel(t *testing.T) {
 	keys, senderPub, receiverPub := deriveTestKeys(t)
-
-	// Use an io.Pipe where only one side is used -- the write will block
-	// because nothing reads, then we cancel the context and close the pipe.
-	r, w := io.Pipe()
-
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-
 	errs := make(chan error, 1)
-	go func() {
-		errs <- SendConfirmation(ctx, &duplexPipe{r: r, w: w}, keys, senderPub, receiverPub, true)
-	}()
-
-	// Give the goroutine a moment to start, then cancel and unblock I/O.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	r.Close()
-	w.Close()
-
+	go func() { errs <- SendConfirmation(ctx, a, keys, senderPub, receiverPub, true) }()
+	cancel() // The implementation, not the test, must unblock the write.
 	select {
 	case err := <-errs:
-		if err == nil {
-			t.Fatal("expected an error after context cancellation")
+		if err != context.Canceled {
+			t.Fatalf("expected context cancellation, got %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for SendConfirmation to return")
+	case <-time.After(time.Second):
+		t.Fatal("key confirmation did not unblock on cancellation")
 	}
 }

@@ -5,8 +5,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   release:
@@ -22,7 +21,7 @@ jobs:
       has_darwin: ${{ steps.parse.outputs.has_darwin }}
       has_windows: ${{ steps.parse.outputs.has_windows }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -72,14 +71,14 @@ jobs:
 
           echo "Tag: $TAG → scope=$SCOPE clean_tag=$CLEAN_TAG clean_version=$CLEAN_VERSION"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: steps.parse.outputs.has_server == 'true'
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: web/package-lock.json
       - if: steps.parse.outputs.has_server == 'true'
@@ -93,7 +92,9 @@ jobs:
         run: |
           RCODESIGN_VERSION="0.27.0"
           curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F${RCODESIGN_VERSION}/apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-            | tar xz -C /tmp
+            -o /tmp/rcodesign.tar.gz
+          echo 'a0e0c548b313026abf4f40a6e06554d352c6f4e1add6a87d626c94134a4ee564  /tmp/rcodesign.tar.gz' | sha256sum -c -
+          tar xzf /tmp/rcodesign.tar.gz -C /tmp
           sudo mv /tmp/apple-codesign-*/rcodesign /usr/local/bin/
 
       - name: Set up Apple signing credentials
@@ -126,6 +127,7 @@ jobs:
         run: |
           YQ_VERSION="v4.44.6"
           curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq
+          echo '0c2b24e645b57d8e7c0566d18643a6d4f5580feeea3878127354a46f2a1e4598  /usr/local/bin/yq' | sha256sum -c -
           chmod +x /usr/local/bin/yq
 
       - name: Generate filtered goreleaser config
@@ -133,9 +135,9 @@ jobs:
           SCOPE: ${{ steps.parse.outputs.scope }}
         run: ./scripts/filter-goreleaser.sh "$SCOPE" /tmp/goreleaser.yaml
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
         with:
-          version: "~> v2"
+          version: v2.18.0
           args: release --clean --skip=publish,docker --config /tmp/goreleaser.yaml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -156,7 +158,7 @@ jobs:
         run: ./scripts/notarize-macos.sh
 
       - name: Upload release artifacts for Windows signing
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-dist-before-windows-signing
           path: dist/
@@ -169,7 +171,7 @@ jobs:
     environment: release
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-dist-before-windows-signing
           path: dist
@@ -195,7 +197,7 @@ jobs:
       # and AZURE_CLIENT_SECRET.
       - name: Sign Windows binaries with Azure Artifact Signing
         if: needs.release.outputs.has_windows == 'true'
-        uses: Azure/artifact-signing-action@v2
+        uses: Azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -244,7 +246,7 @@ jobs:
           Set-Content -Path dist/checksums.txt -Value $checksums -Encoding ascii
 
       - name: Upload signed release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-dist-signed
           path: dist/
@@ -255,18 +257,39 @@ jobs:
     needs: [release, sign-windows]
     runs-on: ubuntu-latest
     environment: release
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download signed release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-dist-signed
           path: dist
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Checksum final signed artifacts
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > checksums.txt
+
+      - name: Attest final artifacts and digest manifest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.deb
+            dist/*.rpm
+            dist/*.apk
+            dist/checksums.txt
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         if: needs.release.outputs.has_server == 'true'
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         if: needs.release.outputs.has_server == 'true'
         with:
           registry: ghcr.io

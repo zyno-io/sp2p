@@ -444,6 +444,17 @@ func TestParallelCountForRTT(t *testing.T) {
 }
 
 // TestResolveParallelCount verifies override vs auto behavior.
+func TestMalformedParallelCountsFailClosed(t *testing.T) {
+	for _, data := range [][]byte{nil, {0}, {7}, {1, 2}} {
+		if _, err := parseParallelCount(transfer.MsgParallelReady, data); err == nil {
+			t.Fatalf("accepted malformed count: %v", data)
+		}
+	}
+	if _, err := parseParallelCount(transfer.MsgMetadata, []byte{1}); err == nil {
+		t.Fatal("accepted out-of-phase frame")
+	}
+}
+
 func TestResolveParallelCount(t *testing.T) {
 	// With override.
 	if got := resolveParallelCount(3, 100*time.Millisecond); got != 3 {
