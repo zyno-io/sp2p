@@ -106,7 +106,7 @@ func TestShellBootstrapChecksums(t *testing.T) {
 						t.Fatal(err)
 					}
 					// Isolated PATH has no gh and selects each downloader/hash fallback.
-					for _, name := range []string{"uname", "tr", "mktemp", "rm", "cat", "awk", "tar", "chmod", "cp"} {
+					for _, name := range []string{"uname", "tr", "mktemp", "rm", "cat", "awk", "tar", "gzip", "chmod", "cp"} {
 						path, err := exec.LookPath(name)
 						if err != nil {
 							t.Fatal(err)

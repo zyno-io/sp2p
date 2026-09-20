@@ -61,9 +61,15 @@ func TestE2E_ProtocolCompatibility(t *testing.T) {
 	}
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	current := buildBinary(t)
-	servers := map[string]string{"new-server": startSignalServer(t)}
+	type compatibilityServer struct {
+		name  string
+		start func(*testing.T) string
+	}
+	servers := []compatibilityServer{{"new-server", startSignalServer}}
 	if binary := os.Getenv("SP2P_TEST_LEGACY_SERVER_BINARY"); binary != "" {
-		servers["old-server"] = startLegacyCompatibilityServer(t, binary)
+		servers = append(servers, compatibilityServer{"old-server", func(t *testing.T) string {
+			return startLegacyCompatibilityServer(t, binary)
+		}})
 	}
 	type pair struct {
 		name, sender, receiver string
@@ -74,82 +80,87 @@ func TestE2E_ProtocolCompatibility(t *testing.T) {
 	if old := os.Getenv("SP2P_TEST_LEGACY_BINARY"); old != "" {
 		pairs = append(pairs, pair{"old-new", old, current, 2, true, false}, pair{"new-old", current, old, 2, false, true}, pair{"old-old", old, old, 2, true, true})
 	}
-	for serverName, url := range servers {
+	for _, server := range servers {
 		for _, peers := range pairs {
-			for _, transport := range []string{"tcp", "webrtc", "auto"} {
-				for _, compression := range []int{0, 3, 9} {
-					if transport == "auto" && compression != 3 {
-						continue
+			// A peer pair opens 14 WebSockets across its seven cases, below the
+			// production server's 30-connection-per-minute limit.
+			t.Run(fmt.Sprintf("%s/%s", server.name, peers.name), func(t *testing.T) {
+				url := server.start(t)
+				for _, transport := range []string{"tcp", "webrtc", "auto"} {
+					for _, compression := range []int{0, 3, 9} {
+						if transport == "auto" && compression != 3 {
+							continue
+						}
+						t.Run(fmt.Sprintf("%s/compress%d", transport, compression), func(t *testing.T) {
+							// More than sixteen 256-KiB chunks detects accidental v3 credit waits.
+							data := bytes.Repeat([]byte("compatibility-0123456789\n"), 240000)
+							src := filepath.Join(t.TempDir(), "compatibility.bin")
+							if err := os.WriteFile(src, data, 0600); err != nil {
+								t.Fatal(err)
+							}
+							dest := t.TempDir()
+							ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+							defer cancel()
+							sendArgs := []string{"send", "-format", "json", "-server", url, "-transport", transport, "-compress", fmt.Sprint(compression)}
+							// Exercise forced parallel requests too: mixed peers must
+							// still connect automatically using a single TCP stream.
+							if transport == "tcp" && compression == 9 && !peers.senderOld {
+								sendArgs = append(sendArgs, "-parallel", "6")
+							}
+							sendArgs = append(sendArgs, src)
+							sender := exec.CommandContext(ctx, peers.sender, sendArgs...)
+							out := &compatibilityOutput{code: make(chan string, 1)}
+							sender.Stdout, sender.Stderr = out, out
+							if err := sender.Start(); err != nil {
+								t.Fatal(err)
+							}
+							done := make(chan error, 1)
+							go func() { done <- sender.Wait() }()
+							var code string
+							select {
+							case code = <-out.code:
+							case err := <-done:
+								t.Fatalf("sender exited: %v\n%s", err, out.String())
+							case <-ctx.Done():
+								t.Fatalf("registration timeout\n%s", out.String())
+							}
+							recvArgs := []string{"receive", "-format", "json", "-server", url, "-transport", transport, "-output", dest}
+							if transport == "tcp" && compression == 9 && !peers.receiverOld {
+								recvArgs = append(recvArgs, "-parallel", "6")
+							}
+							recvArgs = append(recvArgs, code)
+							receiver := exec.CommandContext(ctx, peers.receiver, recvArgs...)
+							recvOutput, recvErr := receiver.CombinedOutput()
+							if recvErr != nil {
+								cancel()
+							}
+							sendErr := <-done
+							if recvErr != nil || sendErr != nil {
+								t.Fatalf("sender: %v\n%s\nreceiver: %v\n%s", sendErr, out.String(), recvErr, recvOutput)
+							}
+							got, err := os.ReadFile(filepath.Join(dest, "compatibility.bin"))
+							if err != nil || !bytes.Equal(got, data) {
+								t.Fatalf("content mismatch: %v", err)
+							}
+							if peers.version == 2 {
+								if !peers.senderOld && !strings.Contains(out.String(), `"event":"warning"`) {
+									t.Fatal("missing sender warning")
+								}
+								if !peers.receiverOld && !bytes.Contains(recvOutput, []byte(`"event":"warning"`)) {
+									t.Fatal("missing receiver warning")
+								}
+							}
+							protocolEvent := fmt.Sprintf(`"event":"protocol","protocol":%d`, peers.version)
+							if !peers.senderOld && !strings.Contains(out.String(), protocolEvent) {
+								t.Fatalf("wrong sender protocol: %s", out.String())
+							}
+							if !peers.receiverOld && !bytes.Contains(recvOutput, []byte(protocolEvent)) {
+								t.Fatalf("wrong receiver protocol: %s", recvOutput)
+							}
+						})
 					}
-					t.Run(fmt.Sprintf("%s/%s/%s/compress%d", serverName, peers.name, transport, compression), func(t *testing.T) {
-						// More than sixteen 256-KiB chunks detects accidental v3 credit waits.
-						data := bytes.Repeat([]byte("compatibility-0123456789\n"), 240000)
-						src := filepath.Join(t.TempDir(), "compatibility.bin")
-						if err := os.WriteFile(src, data, 0600); err != nil {
-							t.Fatal(err)
-						}
-						dest := t.TempDir()
-						ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-						defer cancel()
-						sendArgs := []string{"send", "-format", "json", "-server", url, "-transport", transport, "-compress", fmt.Sprint(compression)}
-						// Exercise forced parallel requests too: mixed peers must
-						// still connect automatically using a single TCP stream.
-						if transport == "tcp" && compression == 9 && !peers.senderOld {
-							sendArgs = append(sendArgs, "-parallel", "6")
-						}
-						sendArgs = append(sendArgs, src)
-						sender := exec.CommandContext(ctx, peers.sender, sendArgs...)
-						out := &compatibilityOutput{code: make(chan string, 1)}
-						sender.Stdout, sender.Stderr = out, out
-						if err := sender.Start(); err != nil {
-							t.Fatal(err)
-						}
-						done := make(chan error, 1)
-						go func() { done <- sender.Wait() }()
-						var code string
-						select {
-						case code = <-out.code:
-						case err := <-done:
-							t.Fatalf("sender exited: %v\n%s", err, out.String())
-						case <-ctx.Done():
-							t.Fatalf("registration timeout\n%s", out.String())
-						}
-						recvArgs := []string{"receive", "-format", "json", "-server", url, "-transport", transport, "-output", dest}
-						if transport == "tcp" && compression == 9 && !peers.receiverOld {
-							recvArgs = append(recvArgs, "-parallel", "6")
-						}
-						recvArgs = append(recvArgs, code)
-						receiver := exec.CommandContext(ctx, peers.receiver, recvArgs...)
-						recvOutput, recvErr := receiver.CombinedOutput()
-						if recvErr != nil {
-							cancel()
-						}
-						sendErr := <-done
-						if recvErr != nil || sendErr != nil {
-							t.Fatalf("sender: %v\n%s\nreceiver: %v\n%s", sendErr, out.String(), recvErr, recvOutput)
-						}
-						got, err := os.ReadFile(filepath.Join(dest, "compatibility.bin"))
-						if err != nil || !bytes.Equal(got, data) {
-							t.Fatalf("content mismatch: %v", err)
-						}
-						if peers.version == 2 {
-							if !peers.senderOld && !strings.Contains(out.String(), `"event":"warning"`) {
-								t.Fatal("missing sender warning")
-							}
-							if !peers.receiverOld && !bytes.Contains(recvOutput, []byte(`"event":"warning"`)) {
-								t.Fatal("missing receiver warning")
-							}
-						}
-						protocolEvent := fmt.Sprintf(`"event":"protocol","protocol":%d`, peers.version)
-						if !peers.senderOld && !strings.Contains(out.String(), protocolEvent) {
-							t.Fatalf("wrong sender protocol: %s", out.String())
-						}
-						if !peers.receiverOld && !bytes.Contains(recvOutput, []byte(protocolEvent)) {
-							t.Fatalf("wrong receiver protocol: %s", recvOutput)
-						}
-					})
 				}
-			}
+			})
 		}
 	}
 }
