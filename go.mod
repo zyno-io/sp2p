@@ -5,7 +5,7 @@ go 1.26.8
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/huin/goupnp v1.3.0
-	github.com/klauspost/compress v1.19.2
+	github.com/klauspost/compress v1.20.0
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/pion/webrtc/v4 v4.2.18
 	golang.org/x/crypto v0.56.0
