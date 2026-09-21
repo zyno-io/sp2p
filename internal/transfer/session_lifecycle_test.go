@@ -169,3 +169,126 @@ func TestSessionFinAckWaitIsBoundedWithHeartbeats(t *testing.T) {
 		}
 	})
 }
+
+// A peer can receive Complete and close before the local WriteFrame returns.
+// Keep that write in flight until the read loop and its cancellation callbacks
+// have processed EOF, so the completion race is deterministic.
+type delayedCompleteFrameRW struct {
+	FrameReadWriter
+	release <-chan struct{}
+}
+
+func (f *delayedCompleteFrameRW) WriteFrame(kind byte, data []byte) error {
+	err := f.FrameReadWriter.WriteFrame(kind, data)
+	if kind == MsgComplete && err == nil {
+		<-f.release
+	}
+	return err
+}
+
+func TestSessionWriteTimeoutAfterPhysicalWrite(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		a, b := net.Pipe()
+		defer a.Close()
+		release := make(chan struct{})
+		s := NewSession(context.Background(), &delayedCompleteFrameRW{
+			FrameReadWriter: &PlaintextFrameRW{RW: b}, release: release,
+		}, b, false)
+		defer s.Close()
+		const timeout = 2 * time.Second
+		s.SetWriteTimeout(timeout)
+		written := make(chan error, 1)
+		go func() { written <- s.WriteFrame(MsgComplete, nil) }()
+		peer := &PlaintextFrameRW{RW: a}
+		if kind, _, err := peer.ReadFrame(); err != nil || kind != MsgComplete {
+			t.Fatalf("complete: %x %v", kind, err)
+		}
+		// The bytes arrived, but the physical write has not returned by its
+		// own deadline. Unlike a peer close, this must remain a timeout.
+		time.Sleep(timeout)
+		<-s.Context().Done()
+		synctest.Wait()
+		close(release)
+		if err := <-written; err == nil || !strings.Contains(err.Error(), "network write timed out") {
+			t.Fatalf("write: %v", err)
+		}
+	})
+}
+
+func TestSessionCompleteWriteSurvivesPeerClose(t *testing.T) {
+	for _, tt := range []struct {
+		streams int
+		ack     bool
+	}{{1, false}, {1, true}, {3, false}, {3, true}} {
+		t.Run(fmt.Sprintf("streams=%d/fin-ack=%v", tt.streams, tt.ack), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				release := make(chan struct{})
+				var peerFrames, receiverFrames []FrameReadWriter
+				var peerConns, receiverConns []MultiStreamConn
+				for i := 0; i < tt.streams; i++ {
+					a, b := net.Pipe()
+					peerFrames = append(peerFrames, &PlaintextFrameRW{RW: a})
+					receiverFrames = append(receiverFrames, &delayedCompleteFrameRW{
+						FrameReadWriter: &PlaintextFrameRW{RW: b}, release: release,
+					})
+					peerConns = append(peerConns, a)
+					receiverConns = append(receiverConns, b)
+				}
+				peer, receiverIO := peerFrames[0], receiverFrames[0]
+				var peerCloser, receiverCloser io.Closer = peerConns[0], receiverConns[0]
+				if tt.streams > 1 {
+					peerMulti := NewMultiStream(peerFrames, peerConns)
+					receiverMulti := NewMultiStream(receiverFrames, receiverConns)
+					peer, peerCloser = peerMulti, peerMulti
+					receiverIO, receiverCloser = receiverMulti, receiverMulti
+				}
+				defer peerCloser.Close()
+				r := NewSession(context.Background(), receiverIO, receiverCloser, false)
+				defer r.Close()
+				payload := []byte("verified before completion")
+				var output bytes.Buffer
+				finalized := false
+				receiver := NewReceiver(r)
+				receiver.Finalize = func() error { finalized = true; return nil }
+				received := make(chan error, 1)
+				go func() {
+					_, err := receiver.Receive(r.Context(), &output, nil)
+					received <- err
+				}()
+				if err := WriteMetadata(peer, &Metadata{Name: "file", Size: uint64(len(payload))}); err != nil {
+					t.Fatal(err)
+				}
+				if err := WriteData(peer, payload); err != nil {
+					t.Fatal(err)
+				}
+				if kind, _, err := peer.ReadFrame(); err != nil || kind != MsgCredit {
+					t.Fatalf("credit: %x %v", kind, err)
+				}
+				if err := WriteDone(peer, &Done{
+					TotalBytes: uint64(len(payload)), ChunkCount: 1,
+					SHA256: fmt.Sprintf("%x", sha256.Sum256(payload)),
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if kind, _, err := peer.ReadFrame(); err != nil || kind != MsgComplete {
+					t.Fatalf("complete: %x %v", kind, err)
+				}
+				if tt.ack {
+					if err := WriteFinAck(peer); err != nil {
+						t.Fatal(err)
+					}
+				}
+				peerCloser.Close()
+				<-r.Context().Done()
+				synctest.Wait()
+				close(release)
+				if err := <-received; err != nil {
+					t.Fatalf("verified transfer failed after Complete was written: %v", err)
+				}
+				if !finalized || !bytes.Equal(output.Bytes(), payload) {
+					t.Fatal("output was not verified and finalized")
+				}
+			})
+		})
+	}
+}

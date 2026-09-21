@@ -79,7 +79,8 @@ func (s *Session) SetWriteTimeout(timeout time.Duration) {
 }
 
 func (s *Session) writePhysicalFrame(frw FrameReadWriter, kind byte, data []byte) error {
-	writeCtx, cancel := context.WithTimeoutCause(s.ctx, time.Duration(s.writeTimeout.Load()), fmt.Errorf("network write timed out"))
+	timeoutErr := fmt.Errorf("network write timed out")
+	writeCtx, cancel := context.WithTimeoutCause(s.ctx, time.Duration(s.writeTimeout.Load()), timeoutErr)
 	fired := make(chan struct{})
 	stop := context.AfterFunc(writeCtx, func() {
 		s.fail(context.Cause(writeCtx))
@@ -90,7 +91,13 @@ func (s *Session) writePhysicalFrame(frw FrameReadWriter, kind byte, data []byte
 	// stopping its timer would allow a stale timeout to close a healthy stream.
 	if !stop() {
 		<-fired
-		err = context.Cause(writeCtx)
+		// Cancellation may follow a successful write: the peer can consume
+		// Complete and close before WriteFrame returns. Preserve that success,
+		// but still enforce this write's own timeout even if it returns nil.
+		cause := context.Cause(writeCtx)
+		if err != nil || cause == timeoutErr {
+			err = cause
+		}
 	}
 	cancel()
 	return err
