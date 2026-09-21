@@ -9,7 +9,7 @@
 
 ## Build, Test, and Development Commands
 
-Use the Go version in `go.mod` and Node.js 24. Install frontend dependencies with `npm --prefix web ci`.
+Use the Go version in `go.mod` and Node.js 25. Install frontend dependencies with `npm --prefix web ci`.
 
 - `make build`: build web assets plus `bin/sp2p` and `bin/sp2p-server`.
 - `make build-cli`: build only the CLI.
