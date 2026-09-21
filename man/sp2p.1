@@ -1,7 +1,7 @@
 .\" SPDX-License-Identifier: MIT
-.TH SP2P 1 "2025" "sp2p" "User Commands"
+.TH SP2P 1 "September 20, 2026" "sp2p" "User Commands"
 .SH NAME
-sp2p \- secure peer-to-peer file transfer
+sp2p \- secure peer-to-peer file transfer, rsync, and tunnels
 .SH SYNOPSIS
 .B sp2p send
 .RI [ flags ]
@@ -11,69 +11,97 @@ sp2p \- secure peer-to-peer file transfer
 .RI [ flags ]
 .I CODE
 .br
+.B sp2p rsync send
+.RI [ flags ]
+.B \-\-
+.I RSYNC_ARGS
+.br
+.B sp2p rsync send
+.RI [ flags ]
+.I DIRECTORY
+.br
+.B sp2p rsync recv
+.RI [ flags ]
+.I CODE DIRECTORY
+.br
+.B sp2p rsync recv
+.RI [ flags ]
+.I CODE
+.B \-\-
+.I RSYNC_ARGS
+.br
+.B sp2p tunnel serve
+.RI [ flags ]
+.BR \-\-to " ENDPOINT | " \-\-stdio
+.br
+.B sp2p tunnel connect
+.RI [ flags ]
+.BR \-\-listen " ENDPOINT " CODE " | " \-\-stdio " CODE"
+.br
 .B sp2p version
 .SH DESCRIPTION
 .B sp2p
-transfers files directly between two computers using WebRTC.
-Files are end-to-end encrypted; the signaling server never sees file contents.
+moves data directly between two computers over TCP or WebRTC.
+Everything is end-to-end encrypted; the signaling server only helps the two
+peers find each other and never sees the contents.
 .PP
-The sender generates a short code that the receiver enters to establish
-a direct peer-to-peer connection.
-If a direct connection cannot be established, a TURN relay is used
-(with user confirmation unless
+One side creates a session and gets a short code.
+The other side enters that code to connect.
+The code is a secret: anyone who has it can join the session.
+If no direct connection can be made, an encrypted TURN relay is offered
+(after confirmation, unless
 .B \-allow\-relay
 is given).
 .PP
-For automation and AI agents, use
+There are three kinds of session:
+.IP \(bu 2
+.B File transfer
+sends files, folders, or stdin in one direction, verified on arrival.
+The receiver can be the CLI or a browser.
+.IP \(bu 2
+.B Rsync
+carries an ordinary rsync run between two machines. See
+.BR RSYNC .
+.IP \(bu 2
+.B Tunnels
+forward one TCP port, Unix socket, or stdin/stdout pair. See
+.BR TUNNELS .
+.PP
+For scripts and AI agents, add
 .B \-format json
-to receive newline-delimited JSON lifecycle events. The sender's
-.B session
-event includes the transfer code; the final
-.B result
-event reports completion or failure. See
-.I https://sp2p.io/llm
-for the complete machine interface.
-.PP
-When direct connection fails, JSON mode emits a
-.B relay_required
-event containing the path of a temporary response file. Write
-.B allow
-or
-.B deny
-to that file to answer the relay prompt. The file is removed after it is read.
-.PP
-Healthy paused stdin and slow output finalization maintain peer heartbeats.
-Physical network writes have a two-minute timeout; this is not an idle-stdin limit.
-After sending Complete, a receiver waits at most five seconds for the final
-shutdown acknowledgement. Verified published output is retained if it is lost.
-.PP
-Bootstrap scripts require no GitHub CLI. Shell downloads use curl or wget and
-SHA-256 verification with sha256sum, shasum, or openssl (in that order);
-PowerShell uses built-in commands. By default, if no supported verifier is
-available, bootstrap stops without executing the CLI. The archive must match
-the checksum manifest from the same fixed GitHub release before extraction.
-This trusts the GitHub HTTPS release channel and bootstrap
-host; it does not independently verify signer identity or prevent rollback.
-.PP
-To explicitly opt out, pass
-.B \-\-insecure\-skip\-checksum
-as the first argument to the downloaded shell or PowerShell bootstrap script,
-before file paths, transfer codes, or CLI flags. This bootstrap-only option
-skips manifest/hash checks, prints a warning to stderr, and runs downloaded
-code without an archive integrity check. It is removed before invoking SP2P
-and does not disable TLS certificate checks or release/platform URL validation.
-It is not an option of the installed sp2p command.
+to any transfer command to get newline-delimited JSON events. See
+.BR "JSON EVENTS" .
 .SH COMMANDS
 .TP
 .B send
 Send one or more files or folders.
-A share code is displayed for the receiver.
+A transfer code is displayed for the receiver.
 Use
 .B \-
 to read from stdin.
 .TP
 .B receive
-Receive files using the share code provided by the sender.
+Receive a transfer using the sender's code.
+.B recv
+is accepted as an alias.
+.TP
+.B rsync send
+Create a code and act as the rsync source.
+Either run the rsync client with exact arguments after
+.BR \-\- ,
+or expose one directory read-only so the receiver can choose the options.
+.TP
+.B rsync recv
+Join the sender's code.
+Either expose a write-only destination directory, or run the rsync client with
+exact arguments after
+.BR \-\- .
+.TP
+.B tunnel serve
+Create a code and expose one fixed TCP or Unix target, or stdin/stdout.
+.TP
+.B tunnel connect
+Join a tunnel code and open one local TCP or Unix listener, or stdin/stdout.
 .TP
 .B version
 Print the version and exit.
@@ -91,10 +119,12 @@ Allow TURN relay connections without prompting.
 .TP
 .BI \-server " url"
 Signaling server URL.
+Give an https:// URL and the /ws path is added for you, or a full WebSocket
+endpoint such as wss://host/ws.
 Default: value of
 .B SP2P_SERVER
 or
-.IR http://localhost:8080 .
+.IR https://sp2p.io .
 .TP
 .BI \-url " url"
 Public base URL for share links.
@@ -108,6 +138,11 @@ Values:
 .BR auto ", " tcp ", " webrtc .
 Default:
 .BR auto .
+.TP
+.BI \-parallel " count"
+Parallel TCP connections: 0 for automatic, 1 for a single connection, or 2\(en6
+to force a count.
+Default: 0.
 .TP
 .B \-v
 Verbose diagnostic output.
@@ -147,7 +182,7 @@ Write received data to stdout instead of saving to a file.
 .BI \-max\-receive\-bytes " bytes"
 Maximum decoded transfer bytes, including unknown-size stdin.
 Default: 0, meaning 1 TiB (1099511627776 bytes), not unlimited.
-Use a larger positive finite byte count only for trusted transfers.
+Raise it only for transfers you trust.
 .TP
 .BI \-max\-extract\-bytes " bytes"
 Maximum expanded archive bytes, including sparse logical output.
@@ -158,10 +193,12 @@ Allow TURN relay connections without prompting.
 .TP
 .BI \-server " url"
 Signaling server URL.
+Give an https:// URL and the /ws path is added for you, or a full WebSocket
+endpoint such as wss://host/ws.
 Default: value of
 .B SP2P_SERVER
 or
-.IR http://localhost:8080 .
+.IR https://sp2p.io .
 .TP
 .BI \-transport " mode"
 Transport to use for the P2P connection.
@@ -169,6 +206,11 @@ Values:
 .BR auto ", " tcp ", " webrtc .
 Default:
 .BR auto .
+.TP
+.BI \-parallel " count"
+Parallel TCP connections: 0 for automatic, 1 for a single connection, or 2\(en6
+to force a count.
+Default: 0.
 .TP
 .B \-v
 Verbose diagnostic output.
@@ -197,34 +239,403 @@ Atomically write the latest private JSON status snapshot to
 .IR path .
 Requires
 .BR \-format " json."
-.SH OUTPUT AND COMPATIBILITY
-Transfer compatibility is automatic: two updated peers use v3, while
-mixed 0.4.0/0.5.0 peers use v2. No version flag or browser checkbox is needed.
-Both combinations work through either server version; signaling remains v2.
-Clients and servers can be upgraded independently.
+.SH RECEIVED OUTPUT
+Received content is verified against the sender's byte count and SHA-256,
+closed, and published before the sender is told the transfer succeeded.
 .PP
-Capabilities are bound to key derivation and confirmation; tampering fails
-authentication rather than silently downgrading updated peers.
+Existing files are never replaced.
+A colliding file name receives an available numbered name.
+An archive is extracted into one new directory and fails if that directory
+already exists; it is never merged into existing output.
+A single folder keeps its own name; several paths sent together get a wrapper
+directory.
+Filesystems that cannot publish without replacing fail explicitly.
+.PP
+Publication is not a power-loss durability guarantee.
+Output written to stdout cannot be rolled back.
+If the final acknowledgement is lost, the receiver may hold valid output while
+the sender reports failure.
+Healthy paused stdin and slow output finalization keep peer heartbeats
+flowing; physical network writes have a two-minute timeout.
+After sending Complete, a receiver waits at most five seconds for the final
+shutdown acknowledgement.
+.SH RSYNC
+.B sp2p rsync
+runs the rsync already installed on each machine over an encrypted SP2P
+stream, so an incremental sync works between machines that cannot reach each
+other directly. No SSH is involved.
+.PP
+The source always runs
+.B rsync send
+and creates the code; only
+.B rsync recv
+takes a code.
+Either side can supply the rsync options, and the other side just exposes a
+directory.
+.PP
+Sender-selected options:
+.PP
+.RS
+.nf
+$ sp2p rsync send -- -av --partial ./photos/ sp2p::share/
+$ mkdir -p ./backup
+$ sp2p rsync recv CODE ./backup
+.fi
+.RE
+.PP
+Receiver-selected options:
+.PP
+.RS
+.nf
+$ sp2p rsync send ./photos
+$ sp2p rsync recv CODE -- -av --partial sp2p::share/ ./photos/
+.fi
+.RE
+.PP
+Everything after the required
+.B \-\-
+boundary is passed to rsync unchanged, preserving order and quoting.
+Put SP2P flags such as
+.B \-\-server
+and
+.B \-\-rsync\-binary
+before it.
+.B sp2p::share/
+is a placeholder for the remote side:
+.B sp2p
+is the host and
+.B share
+is the fixed module name.
+.SS Platform support
+Rsync works on macOS and Linux, including Apple's built-in openrsync and the
+historical macOS rsync 2.6.9; no Homebrew replacement is required.
+On Windows, run both SP2P and rsync inside WSL; the native Windows adapter is
+not supported.
+Use
+.BI \-\-rsync\-binary " path"
+to select a specific executable.
+Available options, metadata behavior, cross-version interoperability, and rsync
+security fixes depend on the rsync implementations installed on both peers.
+.SS Notes
+.IP \(bu 2
+Each command pair performs one rsync invocation.
+Running again reuses the existing files and partials for rsync's delta
+comparison, but needs a new sender-created code.
+.IP \(bu 2
+A receiver that exposes a directory is write-only and refuses sender-requested
+deletion unless it is given
+.B \-\-allow\-delete
+before the code.
+A receiver running the rsync client controls deletion through its own rsync
+arguments.
+.IP \(bu 2
+Rsync controls file selection, metadata, compression, partial files, deltas,
+and link handling.
+SP2P's receive limits and no-replace publication do not apply.
+.IP \(bu 2
+Before serving, SP2P refuses a directory that contains a symlink resolving to
+a directory.
+File and dangling symlinks can remain links under
+.B \-a
+with munged targets, and peer-requested
+.BR copy-links ,
+.BR copy-unsafe-links ,
+.BR copy-dirlinks ,
+and
+.B keep-dirlinks
+behavior is refused.
+This is defense in depth, not an operating-system sandbox; control who can
+modify a served tree.
+.IP \(bu 2
+Write-only mode blocks downloads but does not hide the existing-file
+information that rsync's delta protocol exchanges.
+.IP \(bu 2
+SP2P configures rsync's transport itself:
+.B RSYNC_CONNECT_PROG
+for upstream rsync, or a fixed local
+.B \-e
+helper for openrsync.
+User-supplied
+.B \-e
+and remote-shell options are rejected.
+Do not set
+.B RSYNC_CONNECT_PROG
+or invoke SP2P's hidden helper yourself.
+.IP \(bu 2
+A connection or a partial file is not completion.
+Wait for both commands to exit successfully, or for a JSON
+.B result
+event with a completed outcome.
+.SH TUNNELS
+.B sp2p tunnel
+forwards one TCP port or Unix socket from one machine to another.
+.B tunnel serve
+runs on the machine that can reach the service and creates the code.
+.B tunnel connect
+joins with that code and opens one local listener.
+.PP
+.RS
+.nf
+$ sp2p tunnel serve --to tcp://127.0.0.1:5432
+$ sp2p tunnel connect --listen tcp://127.0.0.1:15432 CODE
+.fi
+.RE
+.PP
+Wait for the listener's ready message (or the JSON
+.B ready
+event) before starting a local client.
+Unix sockets work the same way, and the two ends may be mixed:
+.PP
+.RS
+.nf
+$ sp2p tunnel serve --to unix:///run/example/service.sock
+$ sp2p tunnel connect --listen unix:///tmp/sp2p-example.sock CODE
+
+$ sp2p tunnel serve --to unix:///run/example/service.sock
+$ sp2p tunnel connect --listen tcp://127.0.0.1:15432 CODE
+.fi
+.RE
+.PP
+.B \-\-stdio
+attaches the tunnel to stdin and stdout instead of a socket, giving a raw
+full-duplex byte stream between two processes:
+.PP
+.RS
+.nf
+$ sp2p tunnel serve --stdio
+$ sp2p tunnel connect --stdio CODE
+.fi
+.RE
+.SS Notes
+.IP \(bu 2
+Each code carries exactly one connection.
+The listener closes after accepting it and does not reconnect or replay;
+create a new code to connect again.
+.IP \(bu 2
+The serving side fixes the target.
+The connecting peer cannot choose a different host, port, or path, and SP2P
+dials the target only after the peer is authenticated and requests the stream.
+.IP \(bu 2
+TCP listeners need at least a port; an omitted host binds loopback, which is
+recommended anyway.
+A
+.B \-\-to
+Unix path must be an existing service socket, and a
+.B \-\-listen
+Unix path must not already exist.
+SP2P creates that listener privately and removes only the socket it created.
+.IP \(bu 2
+Directional EOF is preserved where the endpoint supports half-close, so one
+side can stop sending and continue receiving.
+Cancellation closes the stream and the local endpoints.
+.IP \(bu 2
+Stdio tunnels differ from
+.BR "sp2p send -" :
+file-transfer stdin is a finite, verified, one-way file, while tunnel stdio is
+full-duplex and unframed.
+Tunnel stdout carries payload only, so JSON mode requires
+.B \-\-event\-output stderr.
+.SH RSYNC AND TUNNEL FLAGS
+.TP
+.BI \-\-server " url"
+Signaling server URL: an https:// URL (the /ws path is added for you) or a
+full WebSocket endpoint such as wss://host/ws.
+Both peers must use the same server.
+.TP
+.BI \-\-transport " mode"
+Connection method:
+.BR auto ", " tcp ", or " webrtc .
+.TP
+.B \-\-allow\-relay
+Allow an encrypted TURN relay without prompting.
+.TP
+.BI \-\-format " format"
+Output format:
+.B human
+or newline-delimited
+.BR json .
+.TP
+.BI \-\-event\-output " stream"
+JSON event destination:
+.B stdout
+or
+.BR stderr .
+Stdio tunnels require stderr.
+.TP
+.BI \-\-status\-file " path"
+Atomically publish the latest private JSON snapshot. Requires JSON format.
+.TP
+.B \-\-v
+Emit verbose diagnostics.
+.TP
+.BI \-\-rsync\-binary " path"
+Rsync commands only. Select the installed rsync or openrsync executable.
+Default:
+.BR rsync .
+.TP
+.B \-\-allow\-delete
+Only for
+.BR "rsync recv CODE DIRECTORY" .
+Authorize sender-requested deletion inside that destination.
+.TP
+.BI \-\-to " endpoint"
+Tunnel serve only. Fixed
+.B tcp://HOST:PORT
+or
+.B unix:///PATH
+target.
+.TP
+.BI \-\-listen " endpoint"
+Tunnel connect only. One-use
+.B tcp://HOST:PORT
+or
+.B unix:///PATH
+listener.
+.TP
+.B \-\-stdio
+Tunnel only. Bridge the peer stream to stdin/stdout instead of a socket.
+.TP
+.BI \-\-accept\-timeout " duration"
+Tunnel only. Maximum wait for a local listener connection. Default: 5 minutes.
+.SH JSON EVENTS
+With
+.BR \-format " json,"
+every command writes one JSON object per line.
+Each event includes
+.BR schema_version " (1), " sequence ", " at ", " event ", and " role .
+Rsync and tunnel events also include
+.B service
+and
+.BR mode :
+tunnel role and mode are
+.B serve
+or
+.BR connect ;
+rsync roles are
+.B send
+or
+.B recv
+with mode
+.BR send-client ", " send-daemon ", " recv-client ", or " recv-daemon .
+.PP
+The side that creates the session
+.RB ( send ", " "rsync send" ", or " "tunnel serve" )
+emits a
+.B session
+event containing the secret code.
+Only file transfers also include a browser
+.BR share_url .
+A
+.B ready
+event reports local readiness; its
+.B endpoint
+identifies a socket listener or rsync daemon directory and can be absent in
+stdio or client modes.
+.B progress
+events report
+.B bytes_transferred
+and
+.B total_bytes
+for files, or cumulative
+.B bytes_sent
+and
+.B bytes_received
+for streams.
+.PP
+An
+.B error
+event is diagnostic, not terminal.
+Keep reading until exactly one
+.B result
+event arrives with an
+.B outcome
+of
+.B completed
+or
+.BR failed .
+Stream results include final byte counters; a failed subprocess is reported in
+the result's
+.BR error .
+.PP
+When a direct connection fails and a relay is available, a
+.B relay_required
+event names a temporary owner-only response file.
+Write
+.B allow
+or
+.B deny
+to that file to answer the prompt; SP2P removes it after reading.
+.PP
+In human rsync client modes, the child's stdin, stdout, and stderr are attached
+normally and SP2P preserves its numeric exit status.
+In daemon modes, the child's stdin and stdout carry the rsync protocol and its
+diagnostics go to stderr.
+In JSON mode, client stdout/stderr and daemon stderr are captured as
+.B subprocess_output
+events, with
+.B output_stream
+naming the stream and
+.B output_data
+holding the exact bytes in base64.
+.PP
+Rsync and tunnel
+.B \-\-help
+in JSON mode emits one
+.B result
+with a completed outcome, help mode, and the usage text in its
+.BR message ,
+without contacting the server.
+.PP
+The complete event contract with examples is published at
+.IR https://sp2p.io/llm .
+.SH PROTOCOL COMPATIBILITY
+Compatibility is automatic.
+Two updated peers use transfer protocol v3; a transfer with a 0.4.0 peer uses
+v2.
+Both work through either server version, and clients and servers can be
+upgraded independently.
+No version flag or browser checkbox is needed.
+.PP
+Capability markers are bound to key derivation and confirmation, so tampering
+fails authentication instead of silently downgrading updated peers.
 Every v3 peer, including browsers, authenticates connection candidates and
-sender selection. A server's claimed client type cannot disable authentication.
-Connection errors never trigger a lower-version retry.
-Legacy mode warns without prompting, omits v3 candidate authentication and
-receiver credits, and disables parallel TCP even if a larger count was requested.
-Updated peers retain local decoding, queue, quota, and output protections;
-old peers retain their old vulnerabilities. Legacy idle/backpressure behavior
-is weaker, and slow browser receivers can exceed their bounded input queues.
-JSON mode emits a protocol event after key confirmation; subsequent events
-and status snapshots report the authenticated version. Earlier records omit it.
+sender selection.
+Connection errors never trigger a retry at a lower version.
 .PP
-Received content is verified, closed, and published before acknowledgement.
-Existing files are not replaced; colliding file names receive an available
-numbered name. Archives publish as one new directory, without merging into
-existing output. A single matching folder keeps its root; multi-root archives
-get a wrapper. Unsupported no-replace filesystems fail explicitly.
+A v2 transfer warns without prompting (a
+.B warning
+event in JSON mode), disables parallel TCP, and lacks v3 candidate
+authentication and receive credits.
+Its idle and backpressure behavior is weaker, and a slow browser receiver can
+exceed its bounded input queue.
+Updated peers keep their local decoding, queue, quota, and output protections;
+old peers keep their old defects.
+Upgrade the older peer for the full protections.
+JSON mode emits a
+.B protocol
+event after key confirmation, and later events and status snapshots report the
+authenticated version.
+.SH BOOTSTRAP SCRIPTS
+The signaling server also serves shell and PowerShell scripts that download a
+fixed release of
+.BR sp2p ,
+run one transfer, and delete it, so that a peer can send or receive without
+installing anything.
+Shell scripts need curl or wget and one of sha256sum, shasum, or openssl;
+PowerShell uses built-in commands.
+The archive is checked against the same release's checksum manifest before
+extraction, and a missing hash tool or a bad checksum stops the script.
+This trusts the GitHub HTTPS release channel and the bootstrap host; it is not
+independent signer verification.
 .PP
-Close and publication do not guarantee power-loss durability. Stdout cannot
-roll back bytes. A lost acknowledgement may leave valid committed output even
-when the sender reports failure.
+The bootstrap-only option
+.BR \-\-insecure\-skip\-checksum ,
+given as the first script argument, skips the checksum step, prints a warning
+to stderr, and runs the downloaded code unverified.
+No hash tool is needed in that case; TLS certificate checks stay on.
+The script removes the option before running
+.BR sp2p ;
+it is not an option of the installed command.
 .SH ENVIRONMENT
 .TP
 .B SP2P_SERVER
@@ -264,6 +675,9 @@ allow-relay: false
 
 # Transport mode (auto, tcp, webrtc)
 transport: auto
+
+# Parallel TCP connections (0=auto, 1=single, 2-6=force count)
+parallel: 0
 
 # Default output directory for received files
 output: ~/Downloads
@@ -309,7 +723,7 @@ $ tar cf - src/ | sp2p send -name src.tar -
 .fi
 .RE
 .PP
-Receive a file using the share code:
+Receive a file using the transfer code:
 .PP
 .RS
 .nf
@@ -333,11 +747,11 @@ $ sp2p receive -stdout abc-def-ghi | tar xf -
 .fi
 .RE
 .PP
-Use a custom server:
+Use a self-hosted server:
 .PP
 .RS
 .nf
-$ sp2p send -server https://relay.example.com photo.jpg
+$ sp2p send -server https://sp2p.example.com photo.jpg
 .fi
 .RE
 .PP
@@ -346,6 +760,24 @@ Send with an agent-readable event stream:
 .RS
 .nf
 $ sp2p send -format json photo.jpg
+.fi
+.RE
+.PP
+Sync a directory with rsync:
+.PP
+.RS
+.nf
+$ sp2p rsync send -- -av ./photos/ sp2p::share/
+$ sp2p rsync recv CODE ./backup
+.fi
+.RE
+.PP
+Forward a database port:
+.PP
+.RS
+.nf
+$ sp2p tunnel serve --to tcp://127.0.0.1:5432
+$ sp2p tunnel connect --listen tcp://127.0.0.1:15432 CODE
 .fi
 .RE
 .SH SEE ALSO

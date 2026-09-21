@@ -11,6 +11,7 @@
   --success: #4caf50;
   --error: #ef5350;
   --radius: 8px;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 body {
@@ -27,6 +28,10 @@ body {
 main {
   width: 100%;
   max-width: 720px;
+}
+
+code, pre, kbd {
+  font-family: var(--font-mono);
 }
 
 header {
@@ -74,49 +79,146 @@ h1 {
   margin-top: 0.5rem;
 }
 
-/* CLI section */
-.cli-section {
-  margin: 1.5rem 0;
-  text-align: center;
+/* Usage tabs */
+.usage-section {
+  margin: 2rem 0;
 }
 
-.download-section,
-.agent-section {
-  margin: 3.5rem 0;
-  text-align: center;
-}
-
-.agent-section {
-  margin: 2.5rem 0;
-}
-
-.agent-note {
-  color: var(--text-dim);
-  font-size: 0.8rem;
-  margin: -0.25rem 0 0.75rem;
-}
-
-.agent-note a {
-  color: var(--accent);
-}
-
-.cli-divider {
-  display: flex;
-  align-items: center;
-  margin-bottom: 1rem;
-}
-
-.cli-divider::before,
-.cli-divider::after {
-  content: "";
-  flex: 1;
+.usage-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(max-content, 1fr));
+  overflow-x: auto;
+  scrollbar-width: thin;
   border-bottom: 1px solid var(--border);
 }
 
-.cli-divider span {
-  padding: 0 1rem;
+.usage-tab {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.88rem;
+  font-weight: 500;
+  padding: 0.75rem 0.8rem;
+  white-space: nowrap;
+  transition: color 0.2s;
+}
+
+.usage-tab:hover {
+  color: var(--text);
+}
+
+.usage-tab[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
+.usage-tab:focus-visible,
+.copy-box:focus-visible,
+.download-btn:focus-visible,
+.usage-link a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.usage-panel {
+  padding: 1.25rem 0.25rem 0;
+}
+
+.usage-panel[hidden] {
+  display: none;
+}
+
+.usage-intro,
+.usage-note,
+.usage-link,
+.usage-footnote,
+.usage-example p {
   color: var(--text-dim);
   font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+.usage-intro {
+  color: var(--text);
+}
+
+.usage-footnote {
+  font-size: 0.78rem;
+  margin-top: 1rem;
+}
+
+.usage-intro code,
+.usage-note code,
+.usage-steps > li > span code,
+.usage-example p code {
+  font-size: 0.92em;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+}
+
+.usage-intro {
+  margin-bottom: 0.75rem;
+}
+
+.usage-note,
+.usage-link {
+  margin-top: 0.75rem;
+}
+
+.usage-link a {
+  color: var(--accent);
+}
+
+.usage-steps {
+  margin-left: 1.3rem;
+}
+
+.usage-steps li {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  line-height: 1.55;
+  padding-left: 0.2rem;
+}
+
+.usage-steps li + li {
+  margin-top: 1rem;
+}
+
+.usage-example + .usage-example,
+.stdio-example,
+.rsync-alternative,
+.cli-section {
+  border-top: 1px solid var(--border);
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+}
+
+.usage-panel h2 {
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.stdio-example summary,
+.rsync-alternative summary {
+  color: var(--text);
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.cli-section,
+.download-section {
+  text-align: center;
+}
+
+.cli-section .usage-intro,
+.download-section .usage-intro {
+  margin-bottom: 0.75rem;
 }
 
 .cli-note {
@@ -155,6 +257,10 @@ h1 {
 .download-all a {
   color: var(--text-dim);
   text-decoration: none;
+}
+
+.download-all .footer-sep {
+  color: var(--text-dim);
 }
 
 .download-all a:hover {
@@ -208,7 +314,10 @@ h1 {
 }
 
 .copy-box code {
+  display: block;
   font-size: 0.85rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
   word-break: break-all;
 }
 
@@ -218,6 +327,32 @@ h1 {
   color: var(--text-dim);
   margin-top: 0.35rem;
   transition: color 0.2s;
+}
+
+.usage-panel .copy-hint,
+.usage-panel .copy-caption {
+  text-align: left;
+}
+
+.usage-panel .copy-box {
+  display: block;
+  width: 100%;
+  color: var(--text);
+  font: inherit;
+}
+
+.usage-panel .copy-box code {
+  text-align: left;
+  word-break: normal;
+}
+
+/* When a box has a caption, tuck the hint into the top-right corner so the
+   box is two lines (caption + command) instead of three. */
+.copy-box:has(.copy-caption) .copy-hint {
+  position: absolute;
+  top: 0.75rem;
+  right: 1rem;
+  margin: 0;
 }
 
 .copy-box:hover .copy-hint {
@@ -421,7 +556,6 @@ h1 {
 }
 
 .verify-code code {
-  font-family: "SF Mono", "Fira Code", monospace;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 4px;

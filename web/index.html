@@ -22,52 +22,175 @@
     <div class="drop-zone">
       <div class="drop-zone-content">
         <div class="drop-icon">+</div>
-        <p>Drop files/folders here or click to select</p>
+        <p>Drop files or folders here, or click to select</p>
         <p class="drop-hint">End-to-end encrypted. Your data stays private, even if relayed.</p>
       </div>
       <input type="file" class="file-input" hidden multiple>
     </div>
 
-    <div class="cli-section">
-      <div class="cli-divider"><span>or send from your terminal</span></div>
-      <div class="copy-box" data-copy="send-curl">
-        <span class="copy-caption">curl</span>
-        <code class="send-curl"></code>
-        <span class="copy-hint">click to copy</span>
+    <section class="usage-section" aria-label="Ways to use SP2P">
+      <div class="usage-tabs" role="tablist" aria-label="SP2P usage guides">
+        <button id="usage-tab-agent" class="usage-tab" type="button" role="tab" aria-selected="true" aria-controls="usage-panel-agent" tabindex="0">AI agent</button>
+        <button id="usage-tab-rsync" class="usage-tab" type="button" role="tab" aria-selected="false" aria-controls="usage-panel-rsync" tabindex="-1">rsync</button>
+        <button id="usage-tab-tunnel" class="usage-tab" type="button" role="tab" aria-selected="false" aria-controls="usage-panel-tunnel" tabindex="-1">Tunnels</button>
+        <button id="usage-tab-install" class="usage-tab" type="button" role="tab" aria-selected="false" aria-controls="usage-panel-install" tabindex="-1">Install</button>
       </div>
-      <div class="copy-box" data-copy="send-wget">
-        <span class="copy-caption">wget</span>
-        <code class="send-wget"></code>
-        <span class="copy-hint">click to copy</span>
-      </div>
-      <div class="copy-box" data-copy="send-powershell">
-        <span class="copy-caption">PowerShell</span>
-        <code class="send-powershell"></code>
-        <span class="copy-hint">click to copy</span>
-      </div>
-      <div class="cli-note">downloads a temporary SP2P CLI, sends the file, then cleans up</div>
-    </div>
 
-    <div class="download-section">
-      <div class="cli-divider"><span>install for anytime CLI use</span></div>
-      <a class="download-btn" href="#">
-        &#8595; Download SP2P CLI <span class="download-platform"></span>
-      </a>
-      <div class="download-all">
-        <a href="https://github.com/zyno-io/sp2p/releases/latest">All platforms &rarr;</a>
+      <div id="usage-panel-agent" class="usage-panel agent-section" role="tabpanel" aria-labelledby="usage-tab-agent">
+        <p class="usage-intro">Paste a prompt into your AI agent and fill in the bracketed parts. The agent reads the guide and runs the CLI for you.</p>
+        <button class="copy-box" type="button">
+          <span class="copy-caption">Send files or folders</span>
+          <code class="agent-send-prompt"></code>
+          <span class="copy-hint">click to copy</span>
+        </button>
+        <button class="copy-box" type="button">
+          <span class="copy-caption">Sync with rsync</span>
+          <code class="agent-rsync-prompt"></code>
+          <span class="copy-hint">click to copy</span>
+        </button>
+        <button class="copy-box" type="button">
+          <span class="copy-caption">Forward a socket</span>
+          <code class="agent-tunnel-prompt"></code>
+          <span class="copy-hint">click to copy</span>
+        </button>
+        <p class="usage-link"><a href="/llm">Read the complete agent guide &rarr;</a></p>
       </div>
-    </div>
 
-    <div class="agent-section">
-      <div class="cli-divider"><span>send with an AI agent</span></div>
-      <p class="agent-note">Copy this prompt into your agent and replace <code>[file]</code> with the file to send.</p>
-      <div class="copy-box">
-        <span class="copy-caption">AI Agent</span>
-        <code class="agent-send-prompt"></code>
-        <span class="copy-hint">click to copy</span>
+      <div id="usage-panel-rsync" class="usage-panel" role="tabpanel" aria-labelledby="usage-tab-rsync" hidden>
+        <p class="usage-intro">Sync a directory between two machines with the rsync you already have, over an encrypted SP2P connection. No SSH or open ports needed.</p>
+        <ol class="usage-steps">
+          <li>
+            <span>On the source machine, start the sync. This prints a transfer code.</span>
+            <button class="copy-box" type="button">
+              <span class="copy-caption">Sender</span>
+              <code class="rsync-send-command"></code>
+              <span class="copy-hint">click to copy</span>
+            </button>
+          </li>
+          <li>
+            <span>On the destination machine, create <code>./backup</code>, then run this with <code>CODE</code> replaced by that code.</span>
+            <button class="copy-box" type="button">
+              <span class="copy-caption">Receiver</span>
+              <code class="rsync-recv-command"></code>
+              <span class="copy-hint">click to copy</span>
+            </button>
+          </li>
+        </ol>
+        <p class="usage-note">Everything after <code>--</code> goes to rsync unchanged. Each run needs a fresh code from the sender.</p>
+        <details class="rsync-alternative">
+          <summary>Let the receiver choose the rsync options instead</summary>
+          <p class="usage-note">The sender exposes a read-only directory, and the receiver runs the rsync client:</p>
+          <button class="copy-box" type="button">
+            <span class="copy-caption">Sender: read-only directory</span>
+            <code class="rsync-serve-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+          <button class="copy-box" type="button">
+            <span class="copy-caption">Receiver: rsync options</span>
+            <code class="rsync-download-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+        </details>
+        <p class="usage-footnote">Works on macOS (built-in rsync or openrsync) and Linux. On Windows, run both SP2P and rsync inside WSL.</p>
+        <p class="usage-link"><a href="/llm#rsync-synchronization">Read the rsync guide &rarr;</a></p>
       </div>
-      <p class="agent-note"><a href="/llm">Read the agent transfer guide</a></p>
-    </div>
+
+      <div id="usage-panel-tunnel" class="usage-panel" role="tabpanel" aria-labelledby="usage-tab-tunnel" hidden>
+        <p class="usage-intro">Forward a TCP port or Unix socket from one machine to another. Run the CLI on both machines; the browser can't open local sockets.</p>
+        <div class="usage-example">
+          <h2>TCP</h2>
+          <p>On the machine that can reach the service:</p>
+          <button class="copy-box" type="button">
+            <span class="copy-caption">Serve a TCP service</span>
+            <code class="tunnel-serve-tcp-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+          <p>On the other machine, with <code>CODE</code> replaced. Once it says ready, connect to <code>localhost:15432</code>:</p>
+          <button class="copy-box" type="button">
+            <span class="copy-caption">Open a local listener</span>
+            <code class="tunnel-connect-tcp-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+        </div>
+        <div class="usage-example">
+          <h2>Unix sockets</h2>
+          <p>The target must be an existing socket. The listener path must not exist yet.</p>
+          <button class="copy-box" type="button">
+            <span class="copy-caption">Serve a Unix socket</span>
+            <code class="tunnel-serve-unix-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+          <button class="copy-box" type="button">
+            <span class="copy-caption">Open a local socket</span>
+            <code class="tunnel-connect-unix-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+        </div>
+        <details class="stdio-example">
+          <summary>Use stdin/stdout instead of a socket</summary>
+          <p class="usage-note">A raw two-way byte stream between two processes:</p>
+          <button class="copy-box" type="button">
+            <span class="copy-caption">Serve stdio</span>
+            <code class="tunnel-serve-stdio-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+          <button class="copy-box" type="button">
+            <span class="copy-caption">Connect stdio</span>
+            <code class="tunnel-connect-stdio-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+        </details>
+        <p class="usage-note">Each code carries exactly one connection. TCP and Unix ends can be mixed.</p>
+        <p class="usage-link"><a href="/llm#socket-forwarding">Read the tunnel guide &rarr;</a></p>
+      </div>
+
+      <div id="usage-panel-install" class="usage-panel install-section" role="tabpanel" aria-labelledby="usage-tab-install" hidden>
+        <div class="download-section">
+          <h2>Install the CLI</h2>
+          <p class="usage-intro">One binary for file transfers, rsync, and tunnels.</p>
+          <a class="download-btn" href="#">
+            &#8595; Download SP2P CLI <span class="download-platform"></span>
+          </a>
+          <div class="download-all">
+            <a href="https://github.com/zyno-io/sp2p/releases/latest">All platforms &rarr;</a>
+            <span class="footer-sep">&middot;</span>
+            <a href="https://github.com/zyno-io/sp2p#install">Package managers &rarr;</a>
+          </div>
+        </div>
+        <div class="cli-section">
+          <h2>Then send and receive from any terminal</h2>
+          <button class="copy-box" type="button" data-copy="cli-send">
+            <span class="copy-caption">Send</span>
+            <code class="cli-send-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+          <button class="copy-box" type="button" data-copy="cli-recv">
+            <span class="copy-caption">Receive</span>
+            <code class="cli-recv-command"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+        </div>
+        <div class="cli-section">
+          <h2>Or send one file without installing</h2>
+          <p class="usage-intro">These commands download a temporary SP2P CLI, send the file, then clean up.</p>
+          <button class="copy-box" type="button" data-copy="send-curl">
+            <span class="copy-caption">curl</span>
+            <code class="send-curl"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+          <button class="copy-box" type="button" data-copy="send-wget">
+            <span class="copy-caption">wget</span>
+            <code class="send-wget"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+          <button class="copy-box" type="button" data-copy="send-powershell">
+            <span class="copy-caption">PowerShell</span>
+            <code class="send-powershell"></code>
+            <span class="copy-hint">click to copy</span>
+          </button>
+        </div>
+      </div>
+    </section>
 
     <div class="share-display hidden">
       <p class="share-label">Share this link:</p>
@@ -133,6 +256,8 @@
   <footer>
     <span class="footer-version" data-version="<!--SP2P_VERSION-->" data-build-time="<!--SP2P_BUILD_TIME-->"></span>
     <a href="https://github.com/zyno-io/sp2p">GitHub</a>
+    <span class="footer-sep">&middot;</span>
+    <a href="https://github.com/zyno-io/sp2p#readme">Docs</a>
     <span class="footer-sep">&middot;</span>
     <span>by <a href="https://zyno.io">Zyno Consulting</a></span>
   </footer>

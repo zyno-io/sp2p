@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/zyno-io/sp2p/internal/cli"
 	"github.com/zyno-io/sp2p/internal/config"
@@ -25,6 +27,15 @@ func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
+	}
+	if os.Args[1] == "__rsync-stdio" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := cli.RsyncStdioHelper(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "SP2P rsync transport: %s\n", cli.SanitizeTerminalText(err.Error()))
+			os.Exit(1)
+		}
+		return
 	}
 
 	machineOutput, eventOutput := requestedMachineOutput(os.Args[2:])
@@ -76,7 +87,7 @@ func main() {
 	}
 	baseURL := envOr("SP2P_URL", baseURLDefault)
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	switch os.Args[1] {
@@ -84,6 +95,10 @@ func main() {
 		err = runSend(ctx, cfg, serverURL, baseURL)
 	case "receive", "recv":
 		err = runReceive(ctx, cfg, serverURL)
+	case "tunnel":
+		err = runTunnel(ctx, cfg, serverURL)
+	case "rsync":
+		err = runRsync(ctx, cfg, serverURL)
 	default:
 		err = fmt.Errorf("unknown command: %s", os.Args[1])
 		if !machineOutput {
@@ -97,7 +112,12 @@ func main() {
 		if !cli.MachineErrorReported(err) {
 			emitCommandError(machineOutput, eventOutput, os.Args[1], err)
 		}
-		os.Exit(1)
+		exitCode := 1
+		var childExit *exec.ExitError
+		if errors.As(err, &childExit) && childExit.ExitCode() > 0 {
+			exitCode = childExit.ExitCode()
+		}
+		os.Exit(exitCode)
 	}
 }
 
@@ -296,17 +316,21 @@ func printUsage() {
 	fmt.Fprintf(os.Stderr, `SP2P — Secure P2P File Transfer (v%s)
 
 Usage:
-  sp2p send [flags] <file|folder|...|-  Send file(s), folder, or stdin
-  sp2p receive [flags] <CODE>            Receive a file
-  sp2p version                           Show version
+  sp2p send [flags] <file|folder|...|->      Send files, a folder, or stdin
+  sp2p receive [flags] <CODE>                Receive a transfer
+  sp2p rsync send [flags] -- <rsync args>    Sync with rsync (creates the code)
+  sp2p rsync recv [flags] <CODE> <dir>       Receive an rsync sync
+  sp2p tunnel serve [flags] --to <endpoint>  Share a TCP/Unix endpoint or stdio
+  sp2p tunnel connect [flags] <CODE>         Open a local endpoint or stdio
+  sp2p version                               Show version
 
 Agent automation:
-  sp2p send -format json <file>          Emit JSON Lines lifecycle events
+  sp2p send -format json <file>              Emit JSON Lines lifecycle events
 
 Receive limits (also available in config.yaml):
   -max-receive-bytes N   Maximum decoded transfer bytes (0 = 1 TiB)
   -max-extract-bytes N   Maximum expanded archive bytes (0 = 1 TiB)
-  Existing files/directories are never replaced.
+  Existing files and directories are never replaced.
 
 Protocol compatibility:
   Automatic: v3 between updated peers, v2 with a 0.4.0 peer.
@@ -322,6 +346,12 @@ Run 'sp2p <command> --help' for flag details.
 }
 
 func emitCommandError(machineOutput bool, eventOutput, role string, err error) {
+	if machineOutput && (role == "rsync" || role == "tunnel") && len(os.Args) > 2 {
+		_, _, client := splitRsyncArgs(os.Args[3:])
+		output := cli.OutputConfig{Format: cli.OutputJSON, EventWriter: machineEventWriter(eventOutput)}
+		_ = streamCommandFailure(output, role, os.Args[2], client, err)
+		return
+	}
 	role = canonicalMachineRole(role)
 	if machineOutput {
 		cli.EmitMachineFailure(machineEventWriter(eventOutput), role, err)
@@ -359,6 +389,9 @@ func requestedMachineOutput(args []string) (bool, string) {
 	eventOutput := "stdout"
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		if arg == "--" {
+			break
+		}
 		if !strings.HasPrefix(arg, "-") {
 			continue
 		}

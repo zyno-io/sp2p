@@ -24,9 +24,69 @@ jobs:
       - run: cd web && npm ci
       - run: cd web && npx tsc --noEmit
       - run: make build-web
+      - name: Build pinned rsync integration fixture
+        shell: bash
+        run: |
+          fixture_dir=$(mktemp -d "$RUNNER_TEMP/sp2p-rsync.XXXXXX")
+          curl --fail --location --proto '=https' --tlsv1.2 https://download.samba.org/pub/rsync/src/rsync-3.4.1.tar.gz -o "$fixture_dir/rsync.tar.gz"
+          printf '2924bcb3a1ed8b551fc101f740b9f0fe0a202b115027647cf69850d65fd88c52  %s\n' "$fixture_dir/rsync.tar.gz" | sha256sum --check
+          tar -xzf "$fixture_dir/rsync.tar.gz" -C "$fixture_dir"
+          cd "$fixture_dir/rsync-3.4.1"
+          ./configure --disable-xxhash --disable-zstd --disable-lz4 --disable-openssl --disable-md2man
+          make -j2
+          printf 'SP2P_TEST_RSYNC=%s/rsync\n' "$PWD" >> "$GITHUB_ENV"
       - run: make test
+      - name: Build legacy macOS-era rsync protocol fixture
+        shell: bash
+        run: |
+          fixture_dir=$(mktemp -d "$RUNNER_TEMP/sp2p-rsync269.XXXXXX")
+          curl --fail --location --proto '=https' --tlsv1.2 https://download.samba.org/pub/rsync/src/rsync-2.6.9.tar.gz -o "$fixture_dir/rsync.tar.gz"
+          printf 'ca437301becd890e73300bc69a39189ff1564baa761948ff149b3dd7bde633f9  %s\n' "$fixture_dir/rsync.tar.gz" | sha256sum --check
+          tar -xzf "$fixture_dir/rsync.tar.gz" -C "$fixture_dir"
+          cd "$fixture_dir/rsync-2.6.9"
+          CFLAGS='-Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types' ./configure
+          make -j2
+          printf 'SP2P_TEST_RSYNC_PEER=%s/rsync\n' "$PWD" >> "$GITHUB_ENV"
+      - name: Check legacy and mixed-version rsync transfers
+        run: go test ./internal -run '^TestStreamCLI$/rsync' -count=1 -timeout=6m
       - run: go vet ./...
-      - run: go test -race ./internal/crypto ./internal/transfer ./internal/flow ./internal/conn ./internal/server ./internal/archive ./internal/fileutil
+      - run: go test -race ./internal/crypto ./internal/transfer ./internal/flow ./internal/conn ./internal/server ./internal/archive ./internal/fileutil ./internal/peer ./internal/stream ./internal/tunnel ./internal/rsync ./internal/cli
+
+  macos-rsync:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - run: make build-web
+      - name: Build upstream rsync for mixed-version tests
+        shell: bash
+        run: |
+          fixture_dir=$(mktemp -d "$RUNNER_TEMP/sp2p-rsync.XXXXXX")
+          curl --fail --location --proto '=https' --tlsv1.2 https://download.samba.org/pub/rsync/src/rsync-3.4.1.tar.gz -o "$fixture_dir/rsync.tar.gz"
+          printf '2924bcb3a1ed8b551fc101f740b9f0fe0a202b115027647cf69850d65fd88c52  %s\n' "$fixture_dir/rsync.tar.gz" | shasum -a 256 --check
+          tar -xzf "$fixture_dir/rsync.tar.gz" -C "$fixture_dir"
+          cd "$fixture_dir/rsync-3.4.1"
+          ./configure --disable-xxhash --disable-zstd --disable-lz4 --disable-openssl --disable-md2man
+          make -j2
+          printf 'SP2P_TEST_RSYNC_PEER=%s/rsync\n' "$PWD" >> "$GITHUB_ENV"
+      - name: Check built-in and mixed-version rsync transfers
+        run: go test ./internal -run '^TestStreamCLI$/rsync' -count=1 -timeout=6m
+        env:
+          # Do not use PATH: Homebrew must not mask a bundled-rsync regression.
+          SP2P_TEST_RSYNC: /usr/bin/rsync
+      - name: Check built-in rsync adapter policies
+        run: go test -race ./internal/rsync ./internal/tunnel ./internal/cli
+        env:
+          SP2P_TEST_RSYNC: /usr/bin/rsync
 
   browser-interop:
     runs-on: ubuntu-latest
@@ -85,7 +145,7 @@ jobs:
   build:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    needs: [test, browser-interop, protocol-compatibility]
+    needs: [test, macos-rsync, browser-interop, protocol-compatibility]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

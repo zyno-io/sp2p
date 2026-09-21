@@ -12,6 +12,16 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 - Configure explicit trusted proxy IPs/CIDRs when using `-trust-proxy`, and make container `/config` mounts writable by UID/GID 65532. Review [proxy, container, and relay migration](README.md#proxy-container-and-relay-migration) before rollout.
 - Receive and archive-expansion limits default to 1 TiB each; zero selects the finite default. Browser memory downloads are capped at 256 MiB. Archive destinations must not already exist; extraction no longer merges into existing directories.
 - Bootstrap verifies matching-release checksums by default without requiring `gh`. The bootstrap-only `--insecure-skip-checksum` flag is an explicit first-argument opt-out that warns before running unchecked downloaded code.
+- Rsync uses the implementation installed on each macOS or Linux peer. Apple's built-in openrsync and historical macOS rsync 2.6.9 are supported without a Homebrew replacement. Options, metadata behavior, cross-version interoperability, and rsync security fixes depend on the installed implementations; this does not guarantee every historical patch level or option combination. On Windows, run both SP2P and rsync inside WSL because the native Windows adapter remains unsupported. Rsync and tunnel streams require updated authenticated-v3 CLI peers and do not fall back to legacy file-transfer mode.
+
+### Added
+
+- Add authenticated full-duplex streams with directional EOF, bounded flow control, and terminal acknowledgements over direct TCP, WebRTC, or an explicitly authorized encrypted relay.
+- Add `sp2p rsync send|recv` for one-use incremental synchronization through an automatically configured installed rsync transport. The sender always creates the code; either peer can select exact rsync arguments, and `--rsync-binary` selects a specific executable. Upstream rsync uses `RSYNC_CONNECT_PROG`; Apple openrsync uses a fixed local `-e` helper without SSH or peer-selected remote commands.
+- Add `sp2p tunnel serve|connect` for one fixed TCP or Unix target and one local TCP or Unix listener, including mixed endpoint types and duplex stdin/stdout. Each code accepts one connection.
+- Add four homepage usage tabs for AI agents, rsync, tunnels, and installation, with current-server commands, accessible keyboard navigation, and copy controls.
+- Extend JSON schema 1 stream events with service/mode context, endpoint readiness, bidirectional byte counters, base64-exact rsync subprocess output, and private status snapshots.
+- Expand the agent guide, README, manual, and discovery index with files, archives, pipes, both rsync option-selection modes, TCP/Unix/mixed/stdio tunnels, relay consent, and terminal completion guidance.
 
 ### Security and correctness
 

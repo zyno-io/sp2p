@@ -211,35 +211,88 @@ function detectPlatform(): { os: string; arch: string; label: string } {
   return { os, arch, label: `${osLabel} (${arch})` };
 }
 
-function initCliSection(): void {
-  const section = document.querySelector(".cli-section");
+function initUsageSection(): void {
+  const section = document.querySelector<HTMLElement>(".usage-section");
   if (!section) return;
-
   const origin = location.origin;
 
-  // Populate bootstrap send commands.
-  const curlEl = section.querySelector(".send-curl");
-  const wgetEl = section.querySelector(".send-wget");
-  const psEl = section.querySelector(".send-powershell");
+  const setCommand = (selector: string, value: string, copyText = value): void => {
+    const element = section.querySelector<HTMLElement>(selector);
+    if (!element) return;
+    element.textContent = value;
+    element.dataset.copyText = copyText;
+  };
+
+  setCommand(".agent-send-prompt", `Please send [file] using ${origin}/llm`);
+  setCommand(".agent-rsync-prompt", `Please sync [source directory] to [destination directory] with rsync using ${origin}/llm`);
+  setCommand(".agent-tunnel-prompt", `Please forward [TCP or Unix target endpoint] to [TCP or Unix local listener endpoint] using ${origin}/llm`);
+
+  setCommand(".rsync-send-command", `sp2p rsync send --server ${origin} -- -av --partial ./photos/ sp2p::share/`);
+  setCommand(".rsync-recv-command", `sp2p rsync recv --server ${origin} CODE ./backup`);
+  setCommand(".rsync-serve-command", `sp2p rsync send --server ${origin} ./photos`);
+  setCommand(".rsync-download-command", `sp2p rsync recv --server ${origin} CODE -- -av --partial sp2p::share/ ./photos/`);
+  setCommand(".tunnel-serve-tcp-command", `sp2p tunnel serve --server ${origin} --to tcp://127.0.0.1:5432`);
+  setCommand(".tunnel-connect-tcp-command", `sp2p tunnel connect --server ${origin} --listen tcp://127.0.0.1:15432 CODE`);
+  setCommand(".tunnel-serve-unix-command", `sp2p tunnel serve --server ${origin} --to unix:///run/example/service.sock`);
+  setCommand(".tunnel-connect-unix-command", `sp2p tunnel connect --server ${origin} --listen unix:///tmp/sp2p-example.sock CODE`);
+  setCommand(".tunnel-serve-stdio-command", `sp2p tunnel serve --server ${origin} --stdio`);
+  setCommand(".tunnel-connect-stdio-command", `sp2p tunnel connect --server ${origin} --stdio CODE`);
+  setCommand(".cli-send-command", `sp2p send -server ${origin} <file>`, `sp2p send -server ${origin} `);
+  setCommand(".cli-recv-command", `sp2p receive -server ${origin} CODE`);
+
+  const curlEl = section.querySelector<HTMLElement>(".send-curl");
+  const wgetEl = section.querySelector<HTMLElement>(".send-wget");
+  const psEl = section.querySelector<HTMLElement>(".send-powershell");
   if (curlEl) {
     curlEl.textContent = `curl -f ${origin} | sh -s <file>`;
-    (curlEl as HTMLElement).dataset.copyText = `curl -f ${origin} | sh -s `;
+    curlEl.dataset.copyText = `curl -f ${origin} | sh -s `;
   }
   if (wgetEl) {
     wgetEl.textContent = `wget -O- ${origin} | sh -s <file>`;
-    (wgetEl as HTMLElement).dataset.copyText = `wget -O- ${origin} | sh -s `;
+    wgetEl.dataset.copyText = `wget -O- ${origin} | sh -s `;
   }
   if (psEl) {
     psEl.textContent = `& ([scriptblock]::Create((irm ${origin}/ps))) '<file>'`;
-    (psEl as HTMLElement).dataset.copyText = `& ([scriptblock]::Create((irm ${origin}/ps))) '`;
+    psEl.dataset.copyText = `& ([scriptblock]::Create((irm ${origin}/ps))) '`;
   }
 
-  // Set platform-specific download link (lives in its own section).
   const { os, arch, label } = detectPlatform();
-  const downloadBtn = document.querySelector(".download-btn") as HTMLAnchorElement | null;
-  const platformLabel = document.querySelector(".download-platform");
+  const downloadBtn = section.querySelector<HTMLAnchorElement>(".download-btn");
+  const platformLabel = section.querySelector(".download-platform");
   if (downloadBtn) downloadBtn.href = `/dl/${os}/${arch}`;
   if (platformLabel) platformLabel.textContent = `for ${label}`;
+
+  const tabs = Array.from(section.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+  const selectTab = (selectedTab: HTMLButtonElement, moveFocus: boolean): void => {
+    for (const tab of tabs) {
+      const isSelected = tab === selectedTab;
+      tab.setAttribute("aria-selected", String(isSelected));
+      tab.tabIndex = isSelected ? 0 : -1;
+      const panelId = tab.getAttribute("aria-controls");
+      const panel = panelId ? document.getElementById(panelId) : null;
+      if (panel) panel.hidden = !isSelected;
+    }
+    if (moveFocus) selectedTab.focus();
+  };
+
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => selectTab(tab, false));
+    tab.addEventListener("keydown", (event) => {
+      let nextIndex: number | null = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        nextIndex = (index + 1) % tabs.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        nextIndex = (index - 1 + tabs.length) % tabs.length;
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = tabs.length - 1;
+      }
+      if (nextIndex === null) return;
+      event.preventDefault();
+      selectTab(tabs[nextIndex], true);
+    });
+  });
 }
 
 // ─── SEND PAGE ───────────────────────────────────────────────
@@ -251,11 +304,10 @@ function showProtocol(protocol: 2 | 3): void {
 }
 
 async function initSend(): Promise<void> {
-  initCliSection();
+  initUsageSection();
 
   const dropZone = $(".drop-zone");
-  const cliSection = $(".cli-section");
-  const downloadSection = $(".download-section");
+  const usageSection = $(".usage-section");
   const fileInput = $(".file-input") as HTMLInputElement;
   const shareDisplay = $(".share-display");
   const shareUrl = $(".share-url");
@@ -264,13 +316,10 @@ async function initSend(): Promise<void> {
   const sharePowershell = $(".share-powershell");
   const shareCli = $(".share-cli");
   const shareAgent = $(".share-agent");
-  const agentSendPrompt = $(".agent-send-prompt");
-
-  agentSendPrompt.textContent = `Please send [file] using ${location.origin}/llm`;
 
   // Click-to-copy on share boxes.
   for (const box of document.querySelectorAll<HTMLElement>(".copy-box")) {
-    box.addEventListener("click", async () => {
+    const copy = async (): Promise<void> => {
       const code = box.querySelector("code") as HTMLElement | null;
       if (!code) return;
       const text = code.dataset.copyText || code.textContent;
@@ -285,7 +334,17 @@ async function initSend(): Promise<void> {
           box.classList.remove("copied");
         }, 2000);
       }
-    });
+    };
+    box.addEventListener("click", () => { void copy(); });
+    if (!(box instanceof HTMLButtonElement)) {
+      box.tabIndex = 0;
+      box.setAttribute("role", "button");
+      box.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        void copy();
+      });
+    }
   }
   const stepsContainer = $(".steps");
   const progressContainer = $(".progress-container");
@@ -318,8 +377,7 @@ async function initSend(): Promise<void> {
     let transferSize = file.size;
     let preparedArchive: TarArchive | undefined;
     hide(dropZone);
-    hide(cliSection);
-    hide(downloadSection);
+    hide(usageSection);
     show(stepsContainer);
 
     let sigClient: SignalClient | null = null;

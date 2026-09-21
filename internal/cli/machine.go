@@ -172,6 +172,13 @@ type machineEvent struct {
 	Protocol         int                `json:"protocol,omitempty"`
 	At               string             `json:"at"`
 	Role             string             `json:"role"`
+	Service          string             `json:"service,omitempty"`
+	Mode             string             `json:"mode,omitempty"`
+	Endpoint         string             `json:"endpoint,omitempty"`
+	BytesSent        *uint64            `json:"bytes_sent,omitempty"`
+	BytesReceived    *uint64            `json:"bytes_received,omitempty"`
+	OutputStream     string             `json:"output_stream,omitempty"`
+	OutputData       []byte             `json:"output_data,omitempty"`
 	Phase            string             `json:"phase,omitempty"`
 	SessionID        string             `json:"session_id,omitempty"`
 	Code             string             `json:"code,omitempty"`
@@ -220,6 +227,11 @@ type machineSnapshot struct {
 	SchemaVersion    int                `json:"schema_version"`
 	Protocol         int                `json:"protocol,omitempty"`
 	Role             string             `json:"role"`
+	Service          string             `json:"service,omitempty"`
+	Mode             string             `json:"mode,omitempty"`
+	Endpoint         string             `json:"endpoint,omitempty"`
+	BytesSent        uint64             `json:"bytes_sent,omitempty"`
+	BytesReceived    uint64             `json:"bytes_received,omitempty"`
 	UpdatedAt        string             `json:"updated_at"`
 	Phase            string             `json:"phase,omitempty"`
 	SessionID        string             `json:"session_id,omitempty"`
@@ -528,6 +540,12 @@ func (r *machineReporter) finish(err error, savedPath string) {
 
 func (r *machineReporter) emitLocked(event machineEvent) {
 	event.Protocol = r.protocol
+	event.Service = r.snapshot.Service
+	event.Mode = r.snapshot.Mode
+	if event.Event == "result" && r.snapshot.Service != "" {
+		sent, received := r.snapshot.BytesSent, r.snapshot.BytesReceived
+		event.BytesSent, event.BytesReceived = &sent, &received
+	}
 	r.snapshot.Protocol = event.Protocol
 	if event.Event == "result" {
 		// The result is terminal. Persist it before writing it to the event

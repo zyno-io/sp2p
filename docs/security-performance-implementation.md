@@ -1,6 +1,6 @@
 # Security and performance implementation results
 
-Status: local remediation implemented on 5 September 2026 against reviewed revision `7a616cd`, with follow-up fixes and repeated verification on 8 September 2026. No commit, tag, release, signing identity, or deployment was created. Production acceptance is not claimed.
+Implementation record: local remediation was implemented on 5 September 2026 against reviewed revision `7a616cd`, with follow-up fixes and repeated verification on 8 September 2026. The verification results below describe those runs, not the current CI status. This document retains the protocol design, implementation evidence, and outstanding acceptance/release checks; local verification does not establish production acceptance.
 
 Release preparation: the changes are assigned to [0.5.0](../CHANGELOG.md#050---unreleased), which is not yet released; set its release date when publication occurs. The intended tag is `v0.5.0`, not a component-scoped tag. Clients and servers can be upgraded independently; mixed peers negotiate compatibility automatically as described below. Build versions are injected from the tag; development defaults remain `dev`. Pushing the tag triggers artifact/image publication and server deployment in the existing release workflow, so release preparation does not push or create it. The outstanding validation gates below remain open.
 
@@ -101,7 +101,7 @@ The subsequent user-requested manual bypass is `--insecure-skip-checksum`, accep
 
 This deliberately changes the trust boundary: bootstrap trusts GitHub's HTTPS release channel and its own script host, not an independent signer. The explicit bypass additionally accepts archive execution without a checksum check. Release attestations remain available for optional manual verification, and a matching older release no longer needs an attestation to bootstrap. Development archives remain unavailable even with the bypass. The 0.4.0 changelog was also backfilled from the local `v0.3.0..v0.4.0` history; protocol-v3 remediation is prepared for 0.5.0, with publication still pending.
 
-Verification after removing `gh`: full `go test ./...`, race-instrumented bootstrap tests, `go vet ./...`, shell syntax checks, web build, all 16 UI/static-document Playwright tests, and `git diff --check` passed. The subsequent OpenSSL fallback passed the shell bootstrap/template/no-verifier regressions with LibreSSL 3.3.6 and a separate OpenSSL-only matrix with OpenSSL 3.6.3; `go vet ./internal/server`, shell syntax checks, web build, and `git diff --check` also passed. Downloads are fixture-backed in the bootstrap regressions; no live release was executed or published. Markdown passed mdxserve static validation, not rendered validation.
+Verification after removing `gh`: full `go test ./...`, race-instrumented bootstrap tests, `go vet ./...`, shell syntax checks, web build, all 16 UI/static-document Playwright tests, and `git diff --check` passed. The subsequent OpenSSL fallback passed the shell bootstrap/template/no-verifier regressions with LibreSSL 3.3.6 and a separate OpenSSL-only matrix with OpenSSL 3.6.3; `go vet ./internal/server`, shell syntax checks, web build, and `git diff --check` also passed. Downloads are fixture-backed in the bootstrap regressions; no live release was executed or published.
 
 The manual-bypass follow-up passed the full bootstrap regression set, including default checksum enforcement, opt-out without hash tools/manifests, skipped hash calls, stderr-only warnings, unchanged URL validation, flag removal, and argument preservation in shell and both PowerShell archive branches. A missing or non-leading flag does not enable the shell bypass, even with `SP2P_SKIP_CHECKSUM=1` in the environment. `go vet ./...`, shell syntax checks, the web build, and `git diff --check` also passed; these changes remain local and undeployed.
 
@@ -124,7 +124,7 @@ go test ./internal/crypto ./internal/transfer -run '^$' -bench 'BenchmarkDecrypt
 GOMAXPROCS=2 go test ./internal/transfer -run '^$' -fuzz FuzzBoundedZstd -fuzztime=10s
 ```
 
-Resource limits are not RSS claims: sender read/compression futures, codec state, transport buffering, in-flight decoding, and Blob construction add separately bounded or runtime-owned memory. Broad before/after RSS, CPU profiles, queue high-water telemetry, constrained-WAN throughput, and long slow-disk/browser soaks from the original plan remain acceptance work. Do not use the microbenchmarks as proof that every optimization improves every network workload.
+Resource limits are not RSS claims: sender read/compression futures, codec state, transport buffering, in-flight decoding, and Blob construction add separately bounded or runtime-owned memory. Broad before/after RSS, CPU profiles, queue high-water telemetry, constrained-WAN throughput, and long slow-disk/browser soaks remain acceptance work. Do not use the microbenchmarks as proof that every optimization improves every network workload.
 
 ## Migration and release gates
 
@@ -134,8 +134,20 @@ Read [README migration guidance](../README.md#proxy-container-and-relay-migratio
 
 - [ ] Publish a transition-release candidate with final artifact attestations, canary the updated server and automatic cross-version transfers before widening rollout, then independently test valid, tampered, absent, wrong-signer/platform, and approved-tag verification for manual provenance checks. Exercise bootstrap against real matching-release checksum manifests; attestations are not a bootstrap prerequisite.
 - [ ] Verify additional release filesystems and native Windows no-replace/failure behavior, and real native picker behavior on supported browser/OS combinations. Linux arm64 container and native macOS publication tests passed locally.
-- [ ] Validate coturn authentication, destination restrictions, allocation/bandwidth quotas, credential expiry/refresh, and non-root ACME renewal/config persistence in isolated staging. The example is not production provisioning.
-- [ ] Complete the broad performance/soak matrix and remaining hostile-input variants before making production capacity or performance guarantees. The targeted memory-limited checks above passed, but they are not a complete WAN/browser/slow-disk capacity study.
+- [ ] Validate coturn authentication, private/link-local/loopback destination restrictions, allocation/bandwidth/total-capacity quotas, credential expiry/refresh, and non-root ACME renewal/config persistence in isolated staging. Account for anonymous clients creating new sessions and reusing issued credentials elsewhere. The example is not production provisioning.
+- [ ] Exercise relay transfers across CLI/browser roles and rsync/tunnel adapters, including saturation, stalled consumers, disconnects, and cancellation. Verify TURN allocation refresh and credential expiry during long sessions before promising long-lived relay tunnels. Closing signaling after connection establishment does not itself limit stream duration; any credential-renewal policy needs a separate bounded design.
+- [ ] Complete the broad performance/soak matrix and remaining hostile-input variants before making production capacity or performance guarantees. Compare the original revision, secure baseline, and optimizations across file sizes, compressibility, tiny archive entries, asymmetric TCP streams, slow sinks, and constrained networks. Record throughput, first-byte and cancellation latency, CPU, allocations, peak RSS/browser memory, queue high-water marks, and repeated-run variance; verify fixed-window buffering stays bounded as payloads grow. The targeted memory-limited checks above are not a complete capacity study.
 - [ ] Obtain separate approval for release/tag publication or deployed proxy/TURN changes. Maintain an independently approved secure rollback version; bootstrap checksums do not enforce signer identity or freshness.
 
-Markdown validation uses the mdxserve skill. Static validation passed; rendered validation is unavailable without a running renderer.
+## Deferred stream work
+
+Reusable port forwarding remains a future feature. A negotiated `stream/2` could
+multiplex connections under one authenticated peer session, with connection IDs,
+independent open/ready/FIN/reset and credits, aggregate limits, fair scheduling,
+and a bounded connection count. Each connection would use the provider's fixed
+target, and a failed target connection would not close unrelated streams. This
+is distinct from parallel TCP file-transfer striping. UDP, SOCKS, arbitrary remote
+execution, automatic reconnect, and replay remain outside the current scope.
+
+Migrating existing file-transfer flows to `internal/peer` is also deferred; the
+current rsync/tunnel implementation preserves their v2 and parallel TCP behavior.

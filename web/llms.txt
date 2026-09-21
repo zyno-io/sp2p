@@ -1,12 +1,18 @@
 # SP2P
 
-> SP2P is an open-source, end-to-end encrypted peer-to-peer file-transfer service. Agents can use its CLI to send files, receive files, and track transfer state through JSON Lines events.
+> SP2P is an open-source, end-to-end encrypted peer-to-peer transfer service. Agents can use its CLI for files and folders, incremental rsync, and one-use TCP, Unix-socket, or stdio streams, with JSON Lines lifecycle events.
 
 Use the agent guide for the complete command contract. A transfer code is a secret capability: it lets its holder join the transfer and must not be placed in public logs or shared beyond the intended recipient.
 
 ## Agent integration
 
-- [SP2P agent guide](/llm): Commands, JSON event schema, relay consent, status snapshots, and security guidance for sending or receiving a file with an agent.
+- [Choose a workflow](/llm#choose-a-workflow): Map files, archives, pipes, rsync, sockets, and duplex stdio to the correct command.
+- [Files, folders, and pipes](/llm#files-folders-and-pipes): Browser-compatible file transfer, multiple-root archives, and one-way stdin/stdout.
+- [Rsync synchronization](/llm#rsync-synchronization): Two option-selection modes, prerequisites, update/delete behavior, and completion.
+- [Socket forwarding](/llm#socket-forwarding): TCP, Unix, mixed-endpoint, and duplex stdio tunnels.
+- [Automation events and status](/llm#automation-events-and-status): JSON schema 1, subprocess bytes, status snapshots, and terminal results.
+- [Relay decisions](/llm#respond-when-relay-is-required): Temporary response-file consent and unattended policy.
+- [Agent handoff prompts](/llm#agent-handoff-prompts): Required source, destination, endpoint, and code ownership context.
 - [Full agent guide](/llms-full.txt): The same complete guide in a conventional full-context location.
 
 ## Project resources

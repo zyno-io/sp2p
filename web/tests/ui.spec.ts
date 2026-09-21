@@ -4,7 +4,7 @@ test.describe("Send page", () => {
   test("shows drop zone", async ({ page }) => {
     await page.goto("/");
     await expect(page.locator(".drop-zone")).toBeVisible();
-    await expect(page.locator(".drop-zone")).toContainText("Drop files/folders here or click to select");
+    await expect(page.locator(".drop-zone")).toContainText("Drop files or folders here, or click to select");
   });
 
   test("shows header and subtitle", async ({ page }) => {
@@ -18,13 +18,117 @@ test.describe("Send page", () => {
     await expect(page.locator(".file-input")).toBeHidden();
   });
 
-  test("offers a copyable AI-agent handoff prompt", async ({ page }) => {
+  test("shows AI-agent prompts in the initially selected tab", async ({ page }) => {
     await page.goto("/");
     const agentGuide = new URL("/llm", page.url()).href;
-    await expect(page.locator(".agent-section")).toContainText(
+    const agentTab = page.getByRole("tab", { name: "AI agent" });
+    await expect(agentTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tabpanel", { name: "AI agent" })).toContainText(
       `Please send [file] using ${agentGuide}`
     );
+    await expect(page.locator(".agent-rsync-prompt")).toContainText(agentGuide);
+    await expect(page.locator(".agent-tunnel-prompt")).toContainText(
+      `Please forward [TCP or Unix target endpoint] to [TCP or Unix local listener endpoint] using ${agentGuide}`
+    );
     await expect(page.locator('.agent-section a[href="/llm"]')).toBeVisible();
+  });
+
+  test("selects usage tabs by click and roving keyboard focus", async ({ page }) => {
+    await page.goto("/");
+
+    const agentTab = page.getByRole("tab", { name: "AI agent" });
+    const rsyncTab = page.getByRole("tab", { name: "rsync" });
+    const tunnelTab = page.getByRole("tab", { name: "Tunnels" });
+    const installTab = page.getByRole("tab", { name: "Install", exact: true });
+
+    await rsyncTab.click();
+    await expect(rsyncTab).toHaveAttribute("aria-selected", "true");
+    await expect(page.getByRole("tabpanel", { name: "rsync" })).toBeVisible();
+    await expect(page.getByRole("tabpanel", { name: "AI agent" })).toBeHidden();
+    await expect(agentTab).toHaveAttribute("tabindex", "-1");
+
+    await rsyncTab.press("ArrowRight");
+    await expect(tunnelTab).toBeFocused();
+    await expect(tunnelTab).toHaveAttribute("aria-selected", "true");
+    await tunnelTab.press("End");
+    await expect(installTab).toBeFocused();
+    await expect(installTab).toHaveAttribute("aria-selected", "true");
+    await installTab.press("Home");
+    await expect(agentTab).toBeFocused();
+    await expect(agentTab).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("uses the current origin and placeholders in rsync and tunnel commands", async ({ page }) => {
+    await page.goto("/");
+    const origin = new URL(page.url()).origin;
+
+    await page.getByRole("tab", { name: "rsync" }).click();
+    await expect(page.locator(".rsync-send-command")).toHaveText(
+      `sp2p rsync send --server ${origin} -- -av --partial ./photos/ sp2p::share/`
+    );
+    await expect(page.locator(".rsync-recv-command")).toHaveText(
+      `sp2p rsync recv --server ${origin} CODE ./backup`
+    );
+    await expect(page.getByRole("tabpanel", { name: "rsync" })).toContainText(
+      "create ./backup"
+    );
+    await expect(page.locator(".rsync-serve-command")).toHaveText(
+      `sp2p rsync send --server ${origin} ./photos`
+    );
+    await expect(page.locator(".rsync-download-command")).toHaveText(
+      `sp2p rsync recv --server ${origin} CODE -- -av --partial sp2p::share/ ./photos/`
+    );
+
+    await page.getByRole("tab", { name: "Tunnels" }).click();
+    await expect(page.locator(".tunnel-serve-tcp-command")).toHaveText(
+      `sp2p tunnel serve --server ${origin} --to tcp://127.0.0.1:5432`
+    );
+    await expect(page.locator(".tunnel-connect-tcp-command")).toHaveText(
+      `sp2p tunnel connect --server ${origin} --listen tcp://127.0.0.1:15432 CODE`
+    );
+    const commandText = await page.getByRole("tabpanel", { name: "Tunnels" }).textContent();
+    expect(commandText).toContain(`--server ${origin}`);
+    expect(commandText).not.toMatch(/[23456789a-hj-np-z]{8}-[A-Za-z0-9_-]{20,}/);
+  });
+
+  test("copies a command from the keyboard and reports feedback", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: (text: string) => {
+            (window as typeof window & { copiedCommand?: string }).copiedCommand = text;
+            return Promise.resolve();
+          },
+        },
+      });
+    });
+    await page.goto("/");
+    await page.getByRole("tab", { name: "rsync" }).click();
+    const senderCommand = page.getByRole("button", { name: /Sender/ });
+    await senderCommand.focus();
+    await senderCommand.press("Enter");
+    await expect(senderCommand.locator(".copy-hint")).toHaveText("copied!");
+    const copiedCommand = await page.evaluate(() =>
+      (window as typeof window & { copiedCommand?: string }).copiedCommand
+    );
+    expect(copiedCommand).toContain("sp2p rsync send --server");
+  });
+
+  test("keeps platform download and one-time commands in Install", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("tab", { name: "Install", exact: true }).click();
+    await expect(page.locator(".download-btn")).toHaveAttribute("href", /^\/dl\/(linux|darwin|windows)\/(amd64|arm64)$/);
+    await expect(page.locator(".download-platform")).not.toBeEmpty();
+    await expect(page.locator(".cli-send-command")).toHaveText(
+      `sp2p send -server ${new URL(page.url()).origin} <file>`
+    );
+    await expect(page.locator(".cli-recv-command")).toHaveText(
+      `sp2p receive -server ${new URL(page.url()).origin} CODE`
+    );
+    await expect(page.locator(".send-curl")).toContainText(new URL(page.url()).origin);
+    await expect(page.locator(".send-wget")).toContainText(new URL(page.url()).origin);
+    await expect(page.locator(".send-powershell")).toContainText(new URL(page.url()).origin);
   });
 
   test("steps are initially hidden", async ({ page }) => {
@@ -45,6 +149,7 @@ test.describe("Send page", () => {
 
     // Drop zone should be hidden, steps should be visible.
     await expect(page.locator(".drop-zone")).toBeHidden();
+    await expect(page.locator(".usage-section")).toBeHidden();
     await expect(page.locator(".steps")).toBeVisible();
 
     // Should show connecting step.
@@ -152,6 +257,7 @@ test.describe("Health and static assets", () => {
   });
 
   test("serves agent documentation as Markdown", async ({ request }) => {
+    let canonicalGuide: string | undefined;
     for (const path of ["/llm", "/llm.md", "/llms.txt", "/llms-full.txt", "/agents.md"]) {
       const response = await request.get(path);
       expect(response.status(), path).toBe(200);
@@ -159,7 +265,17 @@ test.describe("Health and static assets", () => {
       const body = await response.text();
       expect(body).toContain("SP2P");
       expect(body).not.toContain("{{SP2P_SERVER_URL}}");
+      expect(body).toContain("rsync");
+      expect(body).toContain("socket");
       if (path !== "/llms.txt") {
+        if (canonicalGuide === undefined) {
+          canonicalGuide = body;
+        } else {
+          expect(body, path).toBe(canonicalGuide);
+        }
+        expect(body).toContain('sp2p rsync send --server "http://localhost:18090"');
+        expect(body).toContain("sp2p tunnel connect");
+        expect(body).toContain("subprocess_output");
         expect(body).toContain("curl -f");
         expect(body).toContain("wget -O-");
         expect(body).toContain("irm");
