@@ -4,7 +4,7 @@ All notable changes to SP2P are documented here.
 
 This project uses [Semantic Versioning](https://semver.org/). During early development (0.x), minor versions may contain breaking changes.
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-09-21
 
 ### Upgrade notes
 
@@ -128,7 +128,7 @@ Initial public release.
 - Homebrew, Scoop, AUR, Chocolatey, and WinGet packaging
 - Man pages for `sp2p` and `sp2p-server`
 
-[0.5.0]: https://github.com/zyno-io/sp2p/compare/v0.4.0...HEAD
+[0.5.0]: https://github.com/zyno-io/sp2p/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/zyno-io/sp2p/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/zyno-io/sp2p/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/zyno-io/sp2p/compare/v0.1.1-server...v0.2.0
