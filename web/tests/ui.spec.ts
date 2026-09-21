@@ -115,7 +115,69 @@ test.describe("Send page", () => {
     expect(copiedCommand).toContain("sp2p rsync send --server");
   });
 
-  test("keeps platform download and one-time commands in Install", async ({ page }) => {
+  for (const width of [1280, 390]) {
+    test(`keeps zero-install commands between the drop zone and tabs at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto("/");
+      const commands = page.getByRole("region", { name: "Send without installing" });
+      const origin = new URL(page.url()).origin;
+      await expect(commands.locator(".send-curl")).toHaveText(`curl -f ${origin} | sh -s <file>`);
+      await expect(commands.locator(".send-wget")).toHaveText(`wget -O- ${origin} | sh -s <file>`);
+      await expect(commands.locator(".send-powershell")).toHaveText(
+        `& ([scriptblock]::Create((irm ${origin}/ps))) '<file>'`
+      );
+      await expect(page.locator(".drop-zone + .zero-install-section + .usage-section")).toHaveCount(1);
+
+      for (const tab of ["AI agent", "rsync", "Tunnels", "Install"]) {
+        await page.getByRole("tab", { name: tab, exact: true }).click();
+        for (const command of ["send-curl", "send-wget", "send-powershell"]) {
+          await expect(commands.locator(`.${command}`)).toBeVisible();
+        }
+        const dropBox = await page.locator(".drop-zone").boundingBox();
+        const commandsBox = await commands.boundingBox();
+        const tabsBox = await page.getByRole("tablist").boundingBox();
+        expect(dropBox).not.toBeNull();
+        expect(commandsBox).not.toBeNull();
+        expect(tabsBox).not.toBeNull();
+        expect(commandsBox!.y).toBeGreaterThanOrEqual(dropBox!.y + dropBox!.height);
+        expect(tabsBox!.y).toBeGreaterThanOrEqual(commandsBox!.y + commandsBox!.height);
+      }
+    });
+  }
+
+  test("copies zero-install command prefixes without selecting a tab", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: (text: string) => {
+            (window as typeof window & { copiedCommand?: string }).copiedCommand = text;
+            return Promise.resolve();
+          },
+        },
+      });
+    });
+    await page.goto("/");
+    const origin = new URL(page.url()).origin;
+    const commands = [
+      ["send-curl", `curl -f ${origin} | sh -s `],
+      ["send-wget", `wget -O- ${origin} | sh -s `],
+      ["send-powershell", `& ([scriptblock]::Create((irm ${origin}/ps))) '`],
+    ];
+    for (const [name, prefix] of commands) {
+      const command = page.locator(`button[data-copy="${name}"]`);
+      await command.focus();
+      await command.press("Enter");
+      await expect(command.locator(".copy-hint")).toHaveText("copied!");
+      const copiedCommand = await page.evaluate(() =>
+        (window as typeof window & { copiedCommand?: string }).copiedCommand
+      );
+      expect(copiedCommand).toBe(prefix);
+    }
+    await expect(page.getByRole("tab", { name: "AI agent" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  test("keeps platform download and installed CLI commands in Install", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("tab", { name: "Install", exact: true }).click();
     await expect(page.locator(".download-btn")).toHaveAttribute("href", /^\/dl\/(linux|darwin|windows)\/(amd64|arm64)$/);
@@ -126,9 +188,7 @@ test.describe("Send page", () => {
     await expect(page.locator(".cli-recv-command")).toHaveText(
       `sp2p receive -server ${new URL(page.url()).origin} CODE`
     );
-    await expect(page.locator(".send-curl")).toContainText(new URL(page.url()).origin);
-    await expect(page.locator(".send-wget")).toContainText(new URL(page.url()).origin);
-    await expect(page.locator(".send-powershell")).toContainText(new URL(page.url()).origin);
+    await expect(page.getByRole("tabpanel", { name: "Install", exact: true }).locator(".send-curl, .send-wget, .send-powershell")).toHaveCount(0);
   });
 
   test("steps are initially hidden", async ({ page }) => {
@@ -149,6 +209,7 @@ test.describe("Send page", () => {
 
     // Drop zone should be hidden, steps should be visible.
     await expect(page.locator(".drop-zone")).toBeHidden();
+    await expect(page.locator(".zero-install-section")).toBeHidden();
     await expect(page.locator(".usage-section")).toBeHidden();
     await expect(page.locator(".steps")).toBeVisible();
 

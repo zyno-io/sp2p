@@ -28,6 +28,26 @@
       <input type="file" class="file-input" hidden multiple>
     </div>
 
+    <section class="zero-install-section" aria-label="Send without installing">
+      <div class="cli-divider"><span>or send from your terminal</span></div>
+      <button class="copy-box" type="button" data-copy="send-curl">
+        <span class="copy-caption">curl</span>
+        <code class="send-curl"></code>
+        <span class="copy-hint">click to copy</span>
+      </button>
+      <button class="copy-box" type="button" data-copy="send-wget">
+        <span class="copy-caption">wget</span>
+        <code class="send-wget"></code>
+        <span class="copy-hint">click to copy</span>
+      </button>
+      <button class="copy-box" type="button" data-copy="send-powershell">
+        <span class="copy-caption">PowerShell</span>
+        <code class="send-powershell"></code>
+        <span class="copy-hint">click to copy</span>
+      </button>
+      <p class="cli-note">downloads a temporary SP2P CLI, sends the file, then cleans up</p>
+    </section>
+
     <section class="usage-section" aria-label="Ways to use SP2P">
       <div class="usage-tabs" role="tablist" aria-label="SP2P usage guides">
         <button id="usage-tab-agent" class="usage-tab" type="button" role="tab" aria-selected="true" aria-controls="usage-panel-agent" tabindex="0">AI agent</button>
@@ -167,25 +187,6 @@
           <button class="copy-box" type="button" data-copy="cli-recv">
             <span class="copy-caption">Receive</span>
             <code class="cli-recv-command"></code>
-            <span class="copy-hint">click to copy</span>
-          </button>
-        </div>
-        <div class="cli-section">
-          <h2>Or send one file without installing</h2>
-          <p class="usage-intro">These commands download a temporary SP2P CLI, send the file, then clean up.</p>
-          <button class="copy-box" type="button" data-copy="send-curl">
-            <span class="copy-caption">curl</span>
-            <code class="send-curl"></code>
-            <span class="copy-hint">click to copy</span>
-          </button>
-          <button class="copy-box" type="button" data-copy="send-wget">
-            <span class="copy-caption">wget</span>
-            <code class="send-wget"></code>
-            <span class="copy-hint">click to copy</span>
-          </button>
-          <button class="copy-box" type="button" data-copy="send-powershell">
-            <span class="copy-caption">PowerShell</span>
-            <code class="send-powershell"></code>
             <span class="copy-hint">click to copy</span>
           </button>
         </div>

@@ -211,6 +211,27 @@ function detectPlatform(): { os: string; arch: string; label: string } {
   return { os, arch, label: `${osLabel} (${arch})` };
 }
 
+function initZeroInstallSection(): void {
+  const section = document.querySelector<HTMLElement>(".zero-install-section");
+  if (!section) return;
+  const origin = location.origin;
+  const curlEl = section.querySelector<HTMLElement>(".send-curl");
+  const wgetEl = section.querySelector<HTMLElement>(".send-wget");
+  const psEl = section.querySelector<HTMLElement>(".send-powershell");
+  if (curlEl) {
+    curlEl.textContent = `curl -f ${origin} | sh -s <file>`;
+    curlEl.dataset.copyText = `curl -f ${origin} | sh -s `;
+  }
+  if (wgetEl) {
+    wgetEl.textContent = `wget -O- ${origin} | sh -s <file>`;
+    wgetEl.dataset.copyText = `wget -O- ${origin} | sh -s `;
+  }
+  if (psEl) {
+    psEl.textContent = `& ([scriptblock]::Create((irm ${origin}/ps))) '<file>'`;
+    psEl.dataset.copyText = `& ([scriptblock]::Create((irm ${origin}/ps))) '`;
+  }
+}
+
 function initUsageSection(): void {
   const section = document.querySelector<HTMLElement>(".usage-section");
   if (!section) return;
@@ -239,22 +260,6 @@ function initUsageSection(): void {
   setCommand(".tunnel-connect-stdio-command", `sp2p tunnel connect --server ${origin} --stdio CODE`);
   setCommand(".cli-send-command", `sp2p send -server ${origin} <file>`, `sp2p send -server ${origin} `);
   setCommand(".cli-recv-command", `sp2p receive -server ${origin} CODE`);
-
-  const curlEl = section.querySelector<HTMLElement>(".send-curl");
-  const wgetEl = section.querySelector<HTMLElement>(".send-wget");
-  const psEl = section.querySelector<HTMLElement>(".send-powershell");
-  if (curlEl) {
-    curlEl.textContent = `curl -f ${origin} | sh -s <file>`;
-    curlEl.dataset.copyText = `curl -f ${origin} | sh -s `;
-  }
-  if (wgetEl) {
-    wgetEl.textContent = `wget -O- ${origin} | sh -s <file>`;
-    wgetEl.dataset.copyText = `wget -O- ${origin} | sh -s `;
-  }
-  if (psEl) {
-    psEl.textContent = `& ([scriptblock]::Create((irm ${origin}/ps))) '<file>'`;
-    psEl.dataset.copyText = `& ([scriptblock]::Create((irm ${origin}/ps))) '`;
-  }
 
   const { os, arch, label } = detectPlatform();
   const downloadBtn = section.querySelector<HTMLAnchorElement>(".download-btn");
@@ -304,9 +309,11 @@ function showProtocol(protocol: 2 | 3): void {
 }
 
 async function initSend(): Promise<void> {
+  initZeroInstallSection();
   initUsageSection();
 
   const dropZone = $(".drop-zone");
+  const zeroInstallSection = $(".zero-install-section");
   const usageSection = $(".usage-section");
   const fileInput = $(".file-input") as HTMLInputElement;
   const shareDisplay = $(".share-display");
@@ -377,6 +384,7 @@ async function initSend(): Promise<void> {
     let transferSize = file.size;
     let preparedArchive: TarArchive | undefined;
     hide(dropZone);
+    hide(zeroInstallSection);
     hide(usageSection);
     show(stepsContainer);
 

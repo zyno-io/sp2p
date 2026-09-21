@@ -79,6 +79,31 @@ h1 {
   margin-top: 0.5rem;
 }
 
+/* Zero-install send commands */
+.zero-install-section {
+  margin: 1.5rem 0;
+  text-align: center;
+}
+
+.cli-divider {
+  display: flex;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.cli-divider::before,
+.cli-divider::after {
+  content: "";
+  flex: 1;
+  border-bottom: 1px solid var(--border);
+}
+
+.cli-divider span {
+  padding: 0 1rem;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
 /* Usage tabs */
 .usage-section {
   margin: 2rem 0;
