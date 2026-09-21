@@ -4,12 +4,6 @@ All notable changes to SP2P are documented here.
 
 This project uses [Semantic Versioning](https://semver.org/). During early development (0.x), minor versions may contain breaking changes.
 
-## Unreleased
-
-### Changed
-
-- Update Go, Node.js, Go modules, web dependencies, GitHub Actions, and GoReleaser to their latest mutually compatible releases, and group future Dependabot updates by ecosystem.
-
 ## [0.5.0] - 2026-09-21
 
 ### Upgrade notes
@@ -28,6 +22,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 - Add four homepage usage tabs for AI agents, rsync, tunnels, and installation, with current-server commands, accessible keyboard navigation, and copy controls.
 - Extend JSON schema 1 stream events with service/mode context, endpoint readiness, bidirectional byte counters, base64-exact rsync subprocess output, and private status snapshots.
 - Expand the agent guide, README, manual, and discovery index with files, archives, pipes, both rsync option-selection modes, TCP/Unix/mixed/stdio tunnels, relay consent, and terminal completion guidance.
+
+### Changed
+
+- Update Go, Node.js, Go modules, web dependencies, GitHub Actions, and GoReleaser to their latest mutually compatible releases, and group future Dependabot updates by ecosystem.
 
 ### Fixed
 
