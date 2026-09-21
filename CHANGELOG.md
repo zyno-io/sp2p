@@ -23,6 +23,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 - Extend JSON schema 1 stream events with service/mode context, endpoint readiness, bidirectional byte counters, base64-exact rsync subprocess output, and private status snapshots.
 - Expand the agent guide, README, manual, and discovery index with files, archives, pipes, both rsync option-selection modes, TCP/Unix/mixed/stdio tunnels, relay consent, and terminal completion guidance.
 
+### Fixed
+
+- Keep zero-install command text readable in the dark homepage theme.
+
 ### Security and correctness
 
 - Negotiate transfer v3 between updated peers: authenticate transport candidates for CLI and browser peers, authenticate sender selection, bound confirmation, continuously drain controls, and enforce a 16-frame receive-credit window. Unauthenticated signaling client-type hints cannot bypass candidate authentication. Automatic v2 compatibility preserves updated peers' local decoding, queue, quota, and output protections, without claiming v3-only protections or repairs to old peers.
