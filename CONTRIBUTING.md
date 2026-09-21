@@ -4,7 +4,7 @@ Thanks for your interest in contributing!
 
 ## Development Setup
 
-**Requirements:** Go 1.25+, Node.js 20+
+**Requirements:** Go 1.27+, Node.js 25+
 
 ```bash
 git clone https://github.com/zyno-io/sp2p.git

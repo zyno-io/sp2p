@@ -8,7 +8,7 @@ Release preparation: the changes are assigned to [0.5.0](../CHANGELOG.md#050---u
 
 | Finding | Implementation |
 | --- | --- |
-| F01: vulnerable build inputs | Go 1.26.8 across builds; x/crypto 0.56.0; pinned container/action/tool inputs and automated update proposals |
+| F01: vulnerable build inputs | Go 1.27.0 across builds; x/crypto 0.57.0; pinned container/action/tool inputs and automated update proposals |
 | F02: decompression allocation | Go window/output caps and capacity-limited decoding; browser envelope validation before fzstd allocation, fixed output storage; 256 KiB decoded chunks |
 | F03: signaling resource abuse | Pre-upgrade global/per-IP admission, 10-second Hello deadline, traffic budgets, failed-ping closure, bounded IP maps |
 | F04: candidate authentication | Fresh per-candidate challenges, role/transcript-bound HMACs, authenticated sender selection and receiver acknowledgement, bounded deadlines/concurrency |
@@ -64,7 +64,7 @@ The automatic cross-release CLI matrix passed **56 cases** across both server ve
 - Bounded zstd fuzzing: **452,461 executions in 10 seconds**, two workers, no failure. This was a local bounded-input run, not a memory-limited production soak.
 - Go regressions for finalizer failure before Complete, metadata ahead of buffered data, duplicate/stale sequences, over-credit input, empty-file metadata, cancelled stdin, peer-error cancellation, parallel compressed transfers, a stalled secondary writer, socket admission/expiry, proxy spoofing, version-slot rejection, cached TURN credentials, archive quotas/wrappers, and no-replace file/directory publication.
 - Shell and PowerShell failure-injection tests prove checksum rejection prevents extraction. Shell checks run without `gh` on PATH and cover curl/wget plus sha256sum/shasum/openssl fallbacks; PowerShell covers both archive branches with mocked downloads/extraction and real hashing. Real signed-release wrong-identity/tamper verification remains a gate for the optional manual provenance workflow.
-- Linux and Windows amd64 cross-builds; native macOS arm64 builds; Linux arm64 server build. Binary metadata reports Go 1.26.8 and `CGO_ENABLED=0`.
+- Linux and Windows amd64 cross-builds; native macOS arm64 builds; Linux arm64 server build. Binary metadata reports Go 1.27.0 and `CGO_ENABLED=0`.
 - Both Dockerfiles built locally. Both ran as UID/GID 65532 and served health checks; the Alpine variant's `/config` write permission was checked. No image was pushed.
 - `npm audit`: zero vulnerabilities. `govulncheck`: zero called-symbol or imported-package vulnerabilities. The remaining module-only warning is **GO-2026-5932**, unmaintained `x/crypto/openpgp`, which is not imported. No advisory suppression was added. Recheck at release, after dependency/import changes, or by 5 October 2026.
 
@@ -88,7 +88,7 @@ The memory check is reproducible from the `web` directory (Docker required):
 ```bash
 CHECK_DIR=$(mktemp -d)
 npx esbuild tests/memory-soak.ts --bundle --platform=node --format=cjs --outfile="$CHECK_DIR/memory-soak.cjs"
-docker run --rm -i --network=none --memory=256m --memory-swap=256m --cpus=1 --read-only --cap-drop=ALL --security-opt=no-new-privileges --user=65532:65532 node:24-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e node --max-old-space-size=128 < "$CHECK_DIR/memory-soak.cjs"
+docker run --rm -i --network=none --memory=256m --memory-swap=256m --cpus=1 --read-only --cap-drop=ALL --security-opt=no-new-privileges --user=65532:65532 node:25-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 node --max-old-space-size=128 < "$CHECK_DIR/memory-soak.cjs"
 ```
 
 ## Bootstrap dependency follow-up

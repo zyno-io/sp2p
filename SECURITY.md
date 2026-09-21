@@ -69,6 +69,6 @@ Clients and servers can be upgraded independently. Signaling remains compatible 
 
 V2 compatibility is **not security-equivalent to v3**. It omits connection-candidate authentication and receiver credits, disables parallel TCP even if requested, and retains legacy idle/backpressure limitations. Updated peers still enforce local decoder, queue, quota, and output-publication protections. An old peer remains vulnerable to its old defects; a slow browser may reject a fast v2 sender when its bounded queue fills. Legacy warnings are unconditional and informational, including machine-readable `warning` events in JSON mode; they require no user response. Upgrade the older peer for the full v3 protections described above.
 
-Use a supported patched Go toolchain for every static binary/container rebuild. The remediation selects Go 1.26.8; security fixes still apply only to the latest SP2P release.
+Use a supported patched Go toolchain for every static binary/container rebuild. The remediation selects Go 1.27.0; security fixes still apply only to the latest SP2P release.
 
 Forwarded client identities require explicit trusted proxy IPs/CIDRs. TURN issuance is cached and rate-limited, but public anonymous relay use still needs coturn quotas, an egress firewall, monitoring, and staging checks of allocation expiry and refresh. Review [the example relay policy](deploy/turnserver.conf.example) and [migration guidance](README.md#proxy-container-and-relay-migration). Do not expose it unchanged.

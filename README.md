@@ -664,7 +664,7 @@ In JSON mode, SP2P creates a temporary owner-only response file and emits its pa
 
 ## Development
 
-**Requirements:** Go 1.26.8 (or a newer supported, security-patched toolchain) and Node.js 24 (for the web UI build). CI and release builds follow `go.mod`; containers pin builder and runtime digests. Dependabot proposes weekly dependency, action, and image updates. Rebuild static binaries after toolchain security updates.
+**Requirements:** Go 1.27.0 (or a newer supported, security-patched toolchain) and Node.js 25 (for the web UI build). CI and release builds follow `go.mod`; containers pin builder and runtime digests. Dependabot proposes weekly dependency, action, and image updates. Rebuild static binaries after toolchain security updates.
 
 ### Make Targets
 

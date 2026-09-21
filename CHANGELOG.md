@@ -4,6 +4,12 @@ All notable changes to SP2P are documented here.
 
 This project uses [Semantic Versioning](https://semver.org/). During early development (0.x), minor versions may contain breaking changes.
 
+## Unreleased
+
+### Changed
+
+- Update Go, Node.js, Go modules, web dependencies, GitHub Actions, and GoReleaser to their latest mutually compatible releases, and group future Dependabot updates by ecosystem.
+
 ## [0.5.0] - 2026-09-21
 
 ### Upgrade notes
