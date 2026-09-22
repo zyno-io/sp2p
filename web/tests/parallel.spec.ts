@@ -186,6 +186,19 @@ for (const hello of [
   });
 }
 
+test("malformed setup JSON does not echo private negotiation contents", async () => {
+  const p = await setup(1);
+  const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);
+  const result = negotiateParallelWebRTC(p.inbound[0] as unknown as RTCDataChannel,
+    { close() {} } as RTCPeerConnection, new EncryptedChannel(key, key), [],
+    {} as DerivedKeys, new Uint8Array(32), new Uint8Array(32), false, 4);
+  const rejected = expect(result).rejects.toThrow(/^Invalid WebRTC setup control$/);
+  try {
+    await p.send[0].writeFrame(0x0e, new TextEncoder().encode('{"sdp":"private-test-sentinel", INVALID'));
+    await rejected;
+  } finally { for (const lane of [...p.send, ...p.receive]) lane.close(); }
+});
+
 test("one-lane encrypted negotiation preserves primary nonce counters", async () => {
   const p = await setup(1);
   const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);

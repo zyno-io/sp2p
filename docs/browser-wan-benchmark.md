@@ -208,10 +208,13 @@ browser/CLI. These are measured RTTs under load, not a fixed latency setting.
 
 All parallel runs used unmodified Chromium, real SP2P encryption, and
 persisted-output SHA-256 verification. No socket shim or raw-byte shortcut was
-used. The latest benchmark build is `main-WWE34XGV.js` (SHA-256
+used. The final natural-WAN round used `main-WWE34XGV.js` (SHA-256
 `3c15f2789362165408f12aae56e94300217bdaf013a24538c0e70bcdf2b2f414`).
-The first runs preceded cleanup/encoded-frame-bound refinements; the final
-repeat round uses this build. The refinements do not change scheduling policy.
+The final controlled round uses `main-4WLHNADX.js` (SHA-256
+`06df38d40f42e7761171accd5f7b9da18bbc969e8f2eaed22ddbd314f6537026`);
+the intervening production change sanitizes malformed setup-JSON errors.
+The earliest runs preceded cleanup/encoded-frame-bound refinements. None of
+these refinements changes scheduling policy.
 
 In the natural-WAN parallel runs, maximum sampled browser timer lag was
 44.4 ms. No post-start delivery stall spanning a full five-second sampling
@@ -320,6 +323,8 @@ was skipped. A subsequent 35-test parallel run verified the encoded-frame bound
 with incompressible data, partial three-lane agreement, one-lane fallback,
 compressed CLI sending, slow sinks, disk errors, lost FinAck, malformed setup,
 setup deadlines, and cleanup when native DataChannel construction fails.
+A final 30-test Node-side run also verifies that malformed setup-JSON errors
+do not echo private negotiation contents; TypeScript and the rebuilt bundle pass.
 
 The pinned v0.4.0 source fixture matches all 140 tracked blobs at `7a616cd`;
 the original v0.5.0 fixture is pinned to `d303e1a`. Forced four-lane CLI/CLI and

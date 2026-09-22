@@ -146,7 +146,9 @@ export async function negotiateParallelWebRTC(
     const frame = await primary.readFrame();
     try {
       if (frame.msgType !== CONTROL || frame.data.length > 16 * 1024) throw new Error("Unexpected WebRTC setup control");
-      const value: Setup = JSON.parse(new TextDecoder().decode(frame.data));
+      let value: Setup;
+      try { value = JSON.parse(new TextDecoder().decode(frame.data)); }
+      catch { throw new Error("Invalid WebRTC setup control"); }
       if (value?.step !== step) throw new Error("Invalid WebRTC setup step");
       return value;
     } finally { frame.release?.(); }
