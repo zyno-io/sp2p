@@ -14,9 +14,10 @@ not demonstrate improvement in both directions and are not enabled.
 
 The follow-up implements authenticated parallel WebRTC in both the browser and
 CLI, with compatible fallback and aggregate flow-control/memory bounds. It is
-unreleased. Initial real 500 MB SP2P transfers verified at 8.24 MB/s local→Ubuntu
-and 8.97 MB/s Ubuntu→local; a fresh released-browser reverse control verified at
-1.84 MB/s. Repeated comparisons and controlled-RTT validation are tracked below.
+unreleased. Three-repeat real 500 MB SP2P tests have browser/browser medians of
+8.24 MB/s local→Ubuntu and 8.99 MB/s Ubuntu→local, compared with released-browser
+medians of 4.72 and 1.84 MB/s. Browser→CLI and CLI→browser also improve. The
+controlled-RTT validation is tracked below.
 These measurements are not a universal speed promise.
 
 ## Setup
@@ -187,22 +188,69 @@ native send threshold. Only run one WAN case at a time.
 ## Authenticated implementation and acceptance gates
 
 The implementation covers browser-to-browser **and** browser/CLI in both
-directions. The first verified secure-transfer measurements, including setup
-and five-second polling overhead, are:
+directions. The natural-WAN matrix completed three sequential, hash-verified
+500 MB transfers per case. Rates are decimal MB/s including setup and up to
+five seconds of completion-polling overhead.
 
-| Local / Ubuntu peer direction | First parallel run | First single-connection control |
-| --- | --- | --- |
-| Browser → browser | 500 MB / 60.690 s = 8.24 MB/s | Earlier release run: 6.18 MB/s; repeats vary |
-| Browser ← browser | 500 MB / 55.746 s = 8.97 MB/s | Fresh release: 500 MB / 272.238 s = 1.84 MB/s |
-| Browser → CLI | 500 MB / 25.024 s = 19.98 MB/s | Repeat matrix pending |
-| Browser ← CLI | 500 MB / 32.106 s = 15.57 MB/s | Repeat matrix pending |
+| Local / Ubuntu direction | Single median | Parallel median | Single runs | Parallel runs |
+| --- | ---: | ---: | --- | --- |
+| Browser → browser | 4.72 | 8.24 | 4.72, 4.72, 5.82 | 8.24, 8.25, 7.06 |
+| Browser ← browser | 1.84 | 8.99 | 1.84, 1.42, 1.94 | 8.97, 8.99, 10.91 |
+| Browser → CLI | 14.27 | 19.98 | 16.65, 14.27, 12.49 | 19.98, 19.92, 19.98 |
+| Browser ← CLI | 1.84 | 18.41 | 1.84, 1.60, 1.91 | 15.57, 18.48, 18.41 |
 
-All four parallel runs used unmodified Chromium, real SP2P encryption, and
+Single-connection controls use the released browser. CLI controls use the test
+CLI with `-parallel 1`, not a released CLI binary. Compression is disabled.
+One CLI→browser control was interrupted during an operator-requested pause;
+the table uses its completed retry and excludes the partial observation.
+Median sampled RTTs range from 30–58 ms for browser/browser and 30–100 ms for
+browser/CLI. These are measured RTTs under load, not a fixed latency setting.
+
+All parallel runs used unmodified Chromium, real SP2P encryption, and
 persisted-output SHA-256 verification. No socket shim or raw-byte shortcut was
 used. The latest benchmark build is `main-WWE34XGV.js` (SHA-256
 `3c15f2789362165408f12aae56e94300217bdaf013a24538c0e70bcdf2b2f414`).
 The first runs preceded cleanup/encoded-frame-bound refinements; the final
 repeat round uses this build. The refinements do not change scheduling policy.
+
+In the natural-WAN parallel runs, maximum sampled browser timer lag was
+44.4 ms. No post-start delivery stall spanning a full five-second sampling
+interval was detected in this repeat matrix; this does not exclude shorter
+stalls or supersede the earlier approximately 30-second baseline stall.
+Foreground visibility is explicitly asserted in the final repeat round.
+
+### Controlled RTT fixture
+
+The repeat matrix adds 70 ms to inbound IPv4 UDP inside a disposable bridged
+container, using an ingress IFB and `netem`. It does not delay the SSH/CDP or
+signaling TCP connections and does not change the host interface queue.
+Natural-WAN tests use a separate host-networked container.
+
+The first bridged fixture connected in the forward direction, but the released
+browser repeatedly failed reverse ICE setup, even with the delay removed.
+A replacement fixture publishes UDP ports 39140–39203 and confines ephemeral
+port allocation to that range **inside its own network namespace**. This
+restored direct reverse connectivity; it changes neither Chromium code nor
+socket-buffer sizes. The final controlled comparisons all use that same
+replacement fixture. Earlier unmatched fixture results and pre-transfer ICE
+failures are excluded from its throughput medians, not counted as completed
+transfers.
+
+Each remote browser container is limited to two CPUs and 3 GiB memory, with
+1 GiB shared memory. Container resource samples include native browser buffers,
+filesystem cache, and the independent whole-file verification probe; they are
+not measurements of the application receive-queue budget alone. Temporary
+Docker port mappings, namespaces, and browser processes are removed after testing.
+
+The controlled repeat matrix is still running. Its first pass completed and
+verified all eight 500 MB transfers; these are single-run results, not medians:
+
+| Local / Ubuntu direction | Single connection, MB/s | Parallel, MB/s |
+| --- | ---: | ---: |
+| Browser → browser | 2.83 | 5.49 |
+| Browser ← browser | 0.95 | 8.17 |
+| Browser → CLI | 9.08 | 14.27 |
+| Browser ← CLI | 0.78 | 9.63 |
 
 Acceptance checklist:
 
@@ -278,5 +326,6 @@ the original v0.5.0 fixture is pinned to `d303e1a`. Forced four-lane CLI/CLI and
 mixed old/new CLI tests also pass through old and new signaling servers.
 The new large-transfer browser group uses its own test signaling server to
 avoid consuming the existing suite's per-IP quota; production admission limits
-are unchanged. Production services, host firewall, and host network settings
-are untouched. Disposable WAN resources are removed when testing finishes.
+are unchanged. Production services and host-wide transport tuning are unchanged;
+temporary Docker port mappings and traffic shaping are scoped to the test
+containers. Disposable WAN resources are removed when testing finishes.

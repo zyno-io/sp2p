@@ -163,15 +163,21 @@ try {
     const p = window.__wan;
     const completion = document.querySelector(".complete");
     const result = { visibility: document.visibilityState, diagnostics: p.diagnostics, authenticatedLanes: p.authenticatedLanes, sentWireBytes: p.sentWireBytes, receivedWireBytes: p.receivedWireBytes, sentMessages: p.sentMessages, maxMessageBytes: p.maxMessageBytes, maxTimerLagMs: p.maxTimerLagMs, maxPaintGapMs: p.maxPaintGapMs, longTasks: p.longTasks, maxLongTaskMs: p.maxLongTaskMs, status: document.querySelector(".status-text")?.textContent, progress: document.querySelector(".progress-info")?.textContent, p2p: document.querySelector(".step-p2p")?.textContent, complete: !!completion && !completion.classList.contains("hidden"), error: !!document.querySelector(".error-message"), bufferedAmount: p.dcs.reduce((sum, dc) => sum + dc.bufferedAmount, 0), network: [] };
+    result.ice = [];
     for (const pc of p.pcs.filter(pc => pc.connectionState !== "closed")) {
       const report = await pc.getStats().catch(() => null);
       if (!report) continue; // Completion can close a connection during sampling.
+      const summary = { state: pc.iceConnectionState, local: {}, remote: {}, pairs: {} };
       report.forEach(stat => {
+        const group = stat.type === "local-candidate" ? summary.local : stat.type === "remote-candidate" ? summary.remote : stat.type === "candidate-pair" ? summary.pairs : null;
+        const category = stat.type === "candidate-pair" ? stat.state : stat.candidateType;
+        if (group && typeof category === "string") group[category] = (group[category] || 0) + 1;
         if ((stat.type === "candidate-pair" && stat.nominated) || stat.type === "data-channel" || stat.type === "sctp-transport") {
           // Numeric statistics only: no addresses, SDP, keys, or identifiers.
           result.network.push(Object.fromEntries(Object.entries(stat).filter(([key, value]) => key === "type" || typeof value === "number")));
         }
       });
+      result.ice.push(summary); // States/type counts only, never addresses or IDs.
     }
     return result;
   });
