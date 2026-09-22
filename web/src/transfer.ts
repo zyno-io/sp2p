@@ -7,6 +7,7 @@ import { createTar, type TarArchive } from "./tar";
 import { SHA256 } from "./sha256";
 import { decompressChunk } from "./bounded-zstd";
 import { BoundedMemorySink } from "./memory-sink";
+import { log } from "./log";
 
 // Message types (must match Go constants).
 export const MSG_METADATA = 0x01;
@@ -18,7 +19,10 @@ export const MSG_FINACK = 0x07;
 export const MSG_HEARTBEAT = 0x08;
 export const MSG_CANCEL = 0x09;
 export const MSG_CREDIT = 0x0c;
+export const MSG_RECEIVE_WINDOW = 0x0d;
 const CREDIT_WINDOW = 16;
+export const RECEIVE_WINDOW_VERSION = 1;
+export const RECEIVE_WINDOW_CHUNKS = 64;
 export const COMPLETION_ACK_TIMEOUT = 5000;
 const NETWORK_WRITE_TIMEOUT = 120000;
 type Frame = { msgType: number; data: Uint8Array };
@@ -49,8 +53,19 @@ function nowMs(): number {
 }
 
 function yieldToBrowser(): Promise<void> {
-  // A new task gives the browser an opportunity to paint without depending on
-  // requestAnimationFrame, which may pause in a background tab.
+  // Message tasks allow painting without background-tab timer clamping or a
+  // requestAnimationFrame callback that may pause while the tab is hidden.
+  if (typeof MessageChannel !== "undefined") {
+    return new Promise(resolve => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        channel.port2.close();
+        resolve();
+      };
+      channel.port2.postMessage(null);
+    });
+  }
   return new Promise((resolve) => { setTimeout(resolve, 0); });
 }
 
@@ -62,6 +77,7 @@ export interface Metadata {
   streamMode: boolean;
   fileCount?: number;
   compression?: string;
+  receiveWindow?: number;
 }
 
 export interface Done {
@@ -100,6 +116,31 @@ export class DataChannelTransport {
   private creditWait: (() => void) | null = null;
   private creditReject: ((err: Error) => void) | null = null;
   private bufferReject: ((err: Error) => void) | null = null;
+  private sendWindow = CREDIT_WINDOW;
+  private receiveWindow = CREDIT_WINDOW;
+  private receiveChunkLimit = MAX_FRAME_SIZE;
+  private windowOffered = false;
+  private windowGranted = false;
+  private metadataReceived = false;
+  private timings = { creditWaitMs: 0, bufferWaitMs: 0, encryptMs: 0, decryptMs: 0, readMs: 0, hashMs: 0, writeMs: 0 };
+
+  recordTiming(name: keyof DataChannelTransport["timings"], ms: number): void {
+    this.timings[name] += ms;
+  }
+
+  diagnostics() {
+    return {
+      ...this.timings,
+      sendWindow: this.sendWindow,
+      receiveWindow: this.receiveWindow,
+      outstandingChunks: this.sentChunks - this.creditedChunks,
+      unconsumedChunks: this.receivedChunks - this.consumedChunks,
+      queuedBytes: this.recvQueueBytes + this.appQueueBytes + this.recvBuffer.length,
+      bufferedBytes: this.dc.bufferedAmount,
+      sentChunks: this.sentChunks,
+      consumedChunks: this.consumedChunks,
+    };
+  }
 
   constructor(
     dc: RTCDataChannel,
@@ -314,22 +355,32 @@ export class DataChannelTransport {
   async sendFrame(msgType: number, data: Uint8Array): Promise<void> {
     if (this.protocol === 2 && msgType === MSG_CREDIT) throw new Error("Credits require protocol v3");
     if (this.protocol === 3 && msgType === MSG_DATA) {
-      while (this.sentChunks - this.creditedChunks >= CREDIT_WINDOW) {
+      if (this.windowOffered && data.length > SEND_CHUNK_SIZE) throw new Error("Data exceeds offered chunk limit");
+      while (this.sentChunks - this.creditedChunks >= this.sendWindow) {
         if (this.fatalError) throw this.fatalError;
-        await new Promise<void>((resolve, reject) => { this.creditWait = resolve; this.creditReject = reject; });
+        const start = nowMs();
+        try {
+          await new Promise<void>((resolve, reject) => { this.creditWait = resolve; this.creditReject = reject; });
+        } finally { this.timings.creditWaitMs += nowMs() - start; }
       }
       this.sentChunks++;
     }
     const p = this.writeQueue.then(async () => {
       if (this.fatalError) throw this.fatalError;
+      const encryptStart = nowMs();
       const frame = await this.enc.encryptFrame(msgType, data);
+      this.timings.encryptMs += nowMs() - encryptStart;
       // The encrypted wire frame is larger than its plaintext payload and can
       // therefore exceed SCTP's negotiated max-message-size. DataChannel
       // messages are transport chunks; the length-prefixed frame is reassembled
       // by tryParseFrames() on the receiving side.
       for (let offset = 0; offset < frame.length; offset += this.maxDataChannelMessageSize) {
         const end = Math.min(offset + this.maxDataChannelMessageSize, frame.length);
-        await this.waitForBufferDrain();
+        if (this.dc.bufferedAmount > SEND_HIGH_WATER) {
+          const start = nowMs();
+          try { await this.waitForBufferDrain(); }
+          finally { this.timings.bufferWaitMs += nowMs() - start; }
+        }
         this.dc.send(frame.subarray(offset, end));
       }
       // Legacy peers do not send controls continuously. Successful data writes
@@ -346,7 +397,9 @@ export class DataChannelTransport {
     try {
       while (!this.fatalError) {
         const payload = await this.nextFrame();
+        const decryptStart = nowMs();
         const frame = await this.enc.decryptFrame(payload);
+        this.timings.decryptMs += nowMs() - decryptStart;
         if (this.fatalError) return;
         if (frame.msgType !== MSG_DATA && frame.data.length > 4096) throw new Error("Control frame too large");
         if (frame.msgType === MSG_HEARTBEAT) {
@@ -367,14 +420,47 @@ export class DataChannelTransport {
           this.touchHeartbeat();
           continue;
         }
+        if (frame.msgType === MSG_RECEIVE_WINDOW) {
+          if (this.protocol !== 3 || !this.windowOffered || this.windowGranted || frame.data.length !== 12) {
+            throw new Error("Unexpected receive window grant");
+          }
+          const view = new DataView(frame.data.buffer, frame.data.byteOffset, 12);
+          if (view.getUint32(0) !== RECEIVE_WINDOW_VERSION || view.getUint32(4) !== RECEIVE_WINDOW_CHUNKS || view.getUint32(8) !== SEND_CHUNK_SIZE) {
+            throw new Error("Invalid receive window grant");
+          }
+          this.windowGranted = true;
+          this.sendWindow = RECEIVE_WINDOW_CHUNKS;
+          const ready = this.creditWait;
+          this.creditWait = null; this.creditReject = null;
+          ready?.();
+          this.touchHeartbeat();
+          log("receive window granted: 64 × 64 KiB (4 MiB)");
+          continue;
+        }
         if (frame.msgType === MSG_CANCEL) throw new Error("Peer cancelled transfer");
         if (frame.msgType === MSG_ERROR) {
           const peerError = JSON.parse(new TextDecoder().decode(frame.data));
           throw new Error(`Peer error: ${peerError.message}`);
         }
         if (frame.msgType === MSG_DATA) {
-          if (!frame.data.length || (this.protocol === 3 && this.receivedChunks - this.consumedChunks >= CREDIT_WINDOW)) throw new Error("Data exceeds receiver credit");
+          if (!frame.data.length || frame.data.length > this.receiveChunkLimit || (this.protocol === 3 && this.receivedChunks - this.consumedChunks >= this.receiveWindow)) throw new Error("Data exceeds receiver credit or chunk limit");
           this.receivedChunks++;
+        } else if (frame.msgType === MSG_METADATA) {
+          if (this.metadataReceived) throw new Error("Repeated transfer metadata");
+          this.metadataReceived = true;
+          const meta: Metadata = JSON.parse(new TextDecoder().decode(frame.data));
+          if (this.protocol === 3 && meta.receiveWindow === RECEIVE_WINDOW_VERSION && !meta.compression) {
+            // The encrypted offer proves the sender understands this control.
+            // Install limits before granting; queued data stays within 8 MiB.
+            this.receiveWindow = RECEIVE_WINDOW_CHUNKS;
+            this.receiveChunkLimit = SEND_CHUNK_SIZE;
+            const grant = new Uint8Array(12);
+            const view = new DataView(grant.buffer);
+            view.setUint32(0, RECEIVE_WINDOW_VERSION);
+            view.setUint32(4, RECEIVE_WINDOW_CHUNKS);
+            view.setUint32(8, SEND_CHUNK_SIZE);
+            await this.sendFrame(MSG_RECEIVE_WINDOW, grant);
+          }
         } else if (![MSG_METADATA, MSG_DONE, MSG_COMPLETE, MSG_ERROR, MSG_FINACK].includes(frame.msgType)) {
           throw new Error("Unexpected transfer control");
         }
@@ -430,6 +516,10 @@ export class DataChannelTransport {
 
   // Send metadata.
   async sendMetadata(meta: Metadata): Promise<void> {
+    if (this.protocol === 3 && !meta.compression) {
+      this.windowOffered = true;
+      meta = { ...meta, receiveWindow: RECEIVE_WINDOW_VERSION };
+    }
     const json = new TextEncoder().encode(JSON.stringify(meta));
     await this.sendFrame(MSG_METADATA, json);
   }
@@ -539,9 +629,13 @@ export async function sendFile(
   while (offset < file.size) {
     const end = Math.min(offset + SEND_CHUNK_SIZE, file.size);
     const blob = file.slice(offset, end);
+    const readStart = nowMs();
     const buffer = await blob.arrayBuffer();
+    transport.recordTiming?.("readMs", nowMs() - readStart);
     const chunk = new Uint8Array(buffer);
+    const hashStart = nowMs();
     hasher.update(chunk);
+    transport.recordTiming?.("hashMs", nowMs() - hashStart);
     await transport.sendData(chunk);
     offset = end;
     chunkCount++;
@@ -708,11 +802,15 @@ export async function receiveFile(
         throw new Error("Transfer exceeds declared size");
       }
       if (writer) {
+        const writeStart = nowMs();
         await writer.write(data);
+        transport.recordTiming?.("writeMs", nowMs() - writeStart);
       } else {
         memory!.write(data);
       }
+      const hashStart = nowMs();
       hasher.update(data);
+      transport.recordTiming?.("hashMs", nowMs() - hashStart);
       totalBytes += data.length;
       chunkCount++;
       await transport.consumeData();

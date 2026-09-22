@@ -21,8 +21,8 @@ import (
 
 const (
 	// tcpPreferThreshold is the file size above which auto mode prefers TCP
-	// over WebRTC. SCTP congestion control in pion limits WebRTC throughput
-	// to ~3-15 MB/s, while OS-stack TCP easily does 50-100+ MB/s.
+	// over WebRTC. Kernel TCP and optional parallel streams can improve bulk
+	// throughput; actual speeds depend on the path, latency, loss, and sinks.
 	tcpPreferThreshold = 64 * 1024 * 1024 // 64 MiB
 
 	// tcpPreferWait is how long to hold a WebRTC connection to let TCP

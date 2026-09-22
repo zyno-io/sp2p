@@ -43,13 +43,14 @@ const (
 
 // Metadata describes the file being transferred.
 type Metadata struct {
-	Name        string `json:"name"`
-	Size        uint64 `json:"size"`                  // 0 for streams
-	Type        string `json:"type"`                  // MIME type
-	IsFolder    bool   `json:"isFolder"`
-	StreamMode  bool   `json:"streamMode"`
-	FileCount   int    `json:"fileCount,omitempty"`   // number of files (for folders/multi-file sends)
-	Compression string `json:"compression,omitempty"` // compression algorithm (e.g. "zstd")
+	Name          string `json:"name"`
+	Size          uint64 `json:"size"` // 0 for streams
+	Type          string `json:"type"` // MIME type
+	IsFolder      bool   `json:"isFolder"`
+	StreamMode    bool   `json:"streamMode"`
+	FileCount     int    `json:"fileCount,omitempty"`     // number of files (for folders/multi-file sends)
+	Compression   string `json:"compression,omitempty"`   // compression algorithm (e.g. "zstd")
+	ReceiveWindow uint32 `json:"receiveWindow,omitempty"` // optional authenticated receive-window profile
 }
 
 // Done signals transfer completion with verification data.

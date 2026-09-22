@@ -32,10 +32,12 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 - Keep zero-install command text readable in the dark homepage theme.
 - Keep browser-to-browser receive progress responsive on slow transfers.
 - Show one capability-appropriate browser receive action, restore its normal font weight, and timestamp browser diagnostic logs.
+- Remove one-use receive commands when a browser starts receiving, clear sender waiting text during active transfers, and display WebRTC negotiation stages and the selected direct/relay path.
+- Publish fresh signed artifacts on re-release and use curated changelog notes without generated author mentions or contributor announcements.
 
 ### Security and correctness
 
-- Negotiate transfer v3 between updated peers: authenticate transport candidates for CLI and browser peers, authenticate sender selection, bound confirmation, continuously drain controls, and enforce a 16-frame receive-credit window. Unauthenticated signaling client-type hints cannot bypass candidate authentication. Automatic v2 compatibility preserves updated peers' local decoding, queue, quota, and output protections, without claiming v3-only protections or repairs to old peers.
+- Negotiate transfer v3 between updated peers: authenticate transport candidates for CLI and browser peers, authenticate sender selection, bound confirmation, continuously drain controls, and enforce bounded receive credits (16 frames by default; 64 small frames with an explicit supported grant). Unauthenticated signaling client-type hints cannot bypass candidate authentication. Automatic v2 compatibility preserves updated peers' local decoding, queue, quota, and output protections, without claiming v3-only protections or repairs to old peers.
 - Start receiver key confirmation immediately after authenticated sender selection, preventing large auto-mode transfers from timing out when WebRTC connects but TCP is unavailable.
 - Drain parallel-transfer controls only into the remaining pending-queue capacity, so valid credit bursts followed by Heartbeat and Complete do not fail the connection.
 - Bound decompression, browser queues, signaling admission/traffic, reassembly, decoded receive bytes, and archive expansion. Receive/extraction default to 1 TiB each; browser memory downloads are limited to 256 MiB.
@@ -52,6 +54,7 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ### Performance
 
+- Negotiate a bounded 4 MiB receive window for updated browser senders while retaining 64 KiB progress updates and automatic compatibility with existing v2/v3 clients. Add sampled transport, credit-wait, crypto, file-read, and disk-write diagnostics to investigate slow connections.
 - Stream single browser files with incremental hashing; coalesce archive reads while retaining interactive stdin latency.
 - Bound parallel compression to four workers, give each parallel stream its own write worker, and decrypt owned frame payloads in place.
 - Close/join partial secondary connections and bound UPnP cleanup, including mappings discovered after transfer teardown.

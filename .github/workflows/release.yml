@@ -331,22 +331,29 @@ jobs:
 
       - name: Publish release
         run: |
-          ASSETS=$(find dist/ -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' -o -name 'checksums.txt' \) -type f)
-          if [ -z "$ASSETS" ]; then
+          mapfile -t ASSETS < <(find dist/ -maxdepth 1 \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -type f | sort)
+          if [ "${#ASSETS[@]}" -eq 0 ] || [ ! -s dist/checksums.txt ]; then
             echo "No release assets found"
             exit 1
           fi
-          # shellcheck disable=SC2086
-          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
-            echo "Release already exists; retaining its published artifacts."
+          bash scripts/release-notes.sh "$CLEAN_TAG" > "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            # Build/sign/attest first, then replace artifacts. Publish the new
+            # manifest last: bootstrap always fails closed on a hash mismatch.
+            gh release upload "$RELEASE_TAG" "${ASSETS[@]}" --clobber
+            gh release upload "$RELEASE_TAG" dist/checksums.txt --clobber
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
-            gh release create "${{ github.ref_name }}" \
-              --title "${{ steps.title.outputs.title }}" \
-              --generate-notes \
-              $ASSETS
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              "${ASSETS[@]}" dist/checksums.txt
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          CLEAN_TAG: ${{ needs.release.outputs.clean_tag }}
+          RELEASE_TITLE: ${{ steps.title.outputs.title }}
 
       - name: Deploy to server
         if: needs.release.outputs.has_server == 'true'

@@ -5,6 +5,7 @@
 
 import { SignalClient, PROTOCOL_VERSION, Envelope } from "./signal";
 import { establishWebRTC, ICEServerConfig, splitIceServers } from "./webrtc";
+import { monitorTransfer } from "./diagnostics";
 import { confirmDataChannel } from "./handshake";
 import {
   generateKeyPair,
@@ -98,7 +99,8 @@ async function establishP2PWithRetry(
   isSender: boolean,
   iceServers: ICEServerConfig[] | undefined,
   turnAvailable: boolean,
-  confirmRelay: () => Promise<boolean>
+  confirmRelay: () => Promise<boolean>,
+  onStage: (detail: string) => void,
 ): Promise<{ dc: RTCDataChannel; pc: RTCPeerConnection }> {
   const { stun } = splitIceServers(iceServers);
 
@@ -115,7 +117,7 @@ async function establishP2PWithRetry(
   // Attempt 1: STUN only.
   log(`P2P attempt 1: STUN only (${stun.length} servers, isSender=${isSender})`);
   try {
-    return await establishWebRTC(sigClient, isSender, undefined, undefined, 15000, stun);
+    return await establishWebRTC(sigClient, isSender, (_method, _state, detail) => { if (detail) onStage(detail); }, undefined, 15000, stun);
   } catch (err) {
     log(`P2P attempt 1 failed: ${(err as Error).message}`);
     if (peerLeft || sigClient.closed) {
@@ -139,6 +141,7 @@ async function establishP2PWithRetry(
   // immediately so they can show their own relay prompt in parallel with ours,
   // rather than waiting for us to click OK first.
   log("P2P: requesting TURN relay credentials");
+  onStage("Direct connection failed; requesting relay access");
   sigClient.send("relay-retry", {});
 
   // Ask user for consent while the peer is being notified in parallel.
@@ -163,6 +166,7 @@ async function establishP2PWithRetry(
   log(`P2P: received ${turnServers.length} TURN servers`);
 
   log("P2P: waiting for peer to agree to relay retry");
+  onStage("Waiting for peer to allow the relay");
   const relayDeniedPromise = sigClient.waitFor("relay-denied", 120000);
   relayDeniedPromise.catch(() => {});
   const peerResult = await Promise.race([
@@ -175,7 +179,7 @@ async function establishP2PWithRetry(
   await new Promise((r) => setTimeout(r, 500));
 
   log("P2P attempt 2: TURN relay");
-  return await establishWebRTC(sigClient, isSender, undefined, undefined, 15000, [...stun, ...turnServers]);
+  return await establishWebRTC(sigClient, isSender, (_method, _state, detail) => { if (detail) onStage(`Relay attempt: ${detail}`); }, undefined, 15000, [...stun, ...turnServers]);
 }
 
 // ─── PLATFORM DETECTION ──────────────────────────────────────
@@ -451,6 +455,7 @@ async function initSend(): Promise<void> {
       setStepStatus($(".step-wait"), "active");
       statusText.textContent = "Waiting for receiver...";
       await sigClient.waitFor("peer-joined", 300000);
+      statusText.textContent = "Exchanging encryption keys...";
       closeQRModal();
       setStepStatus($(".step-wait"), "done");
 
@@ -486,6 +491,7 @@ async function initSend(): Promise<void> {
       show(verifyEl);
 
       // Step 6: Establish WebRTC (with automatic retry on failure).
+      statusText.textContent = "";
       setStepStatus($(".step-p2p"), "active");
       const { dc, pc: peerConn } = await establishP2PWithRetry(
         sigClient,
@@ -495,22 +501,26 @@ async function initSend(): Promise<void> {
         () => Promise.resolve(confirm(
           "Direct P2P connection failed. Allow relaying encrypted data through the server?\n\n" +
           "Your data remains end-to-end encrypted, but the relay server will see connection metadata."
-        ))
+        )),
+        detail => { $(".step-p2p").textContent = `Establishing P2P connection — ${detail}`; },
       );
       pc = peerConn;
-      $(".step-p2p").textContent = "P2P connected via WebRTC";
-      setStepStatus($(".step-p2p"), "done");
+      $(".step-p2p").textContent = "Establishing P2P connection — Authenticating peer";
 
       // Step 7: All v3 peers authenticate the candidate before key confirmation.
       log("authenticating and confirming data channel");
       const extraBuffered = await confirmDataChannel(dc, keys, myPub, peerPub, true, protocol);
       log("key confirmation successful");
       showProtocol(protocol);
+      $(".step-p2p").textContent = "P2P connected via WebRTC";
+      setStepStatus($(".step-p2p"), "done");
 
       // Step 8: Transfer file(s).
       log("establishing encrypted stream");
       setStepStatus($(".step-transfer"), "active");
       show(progressContainer);
+      statusText.textContent = "Sending file...";
+      shareDisplay.remove();
 
       const enc = new EncryptedChannel(
         keys.senderToReceiver,
@@ -530,6 +540,9 @@ async function initSend(): Promise<void> {
 
       // Start heartbeat for peer liveness detection over P2P.
       transport.startHeartbeat(() => pc?.close());
+      const stopDiagnostics = monitorTransfer(pc, transport, relay => {
+        $(".step-p2p").textContent = relay ? "Connected via WebRTC (TURN relay)" : "P2P connected via WebRTC (direct)";
+      });
 
       // Best-effort cancel on tab close.
       const onBeforeUnload = () => { transport.sendCancel(); };
@@ -543,6 +556,7 @@ async function initSend(): Promise<void> {
         if (isSingleFile) {
           await sendFile(transport, file, (bytesSent) => {
             updateProgress(progressBar, progressInfo, bytesSent, file.size, startTime);
+            if (bytesSent === file.size) statusText.textContent = "Waiting for receiver to verify...";
           });
           sentBytes = file.size;
         } else {
@@ -552,11 +566,13 @@ async function initSend(): Promise<void> {
             MULTI_FILE_ARCHIVE_NAME,
             (bytesSent) => {
               updateProgress(progressBar, progressInfo, bytesSent, transferSize, startTime);
+              if (bytesSent === transferSize) statusText.textContent = "Waiting for receiver to verify...";
             },
             preparedArchive
           );
         }
       } finally {
+        stopDiagnostics();
         transport.stopHeartbeat();
         window.removeEventListener("beforeunload", onBeforeUnload);
       }
@@ -729,7 +745,7 @@ async function initReceive(): Promise<void> {
       };
       downloadButton.addEventListener("click", () => { void choose(); }, { once: true });
     });
-    hide(confirmContainer);
+    confirmContainer.remove();
     show(stepsContainer);
     sigClient = await SignalClient.connect(getWsUrl());
     setStepStatus($(".step-connect"), "done");
@@ -785,17 +801,19 @@ async function initReceive(): Promise<void> {
       () => Promise.resolve(confirm(
         "Direct P2P connection failed. Allow relaying encrypted data through the server?\n\n" +
         "Your data remains end-to-end encrypted, but the relay server will see connection metadata."
-      ))
+      )),
+      detail => { $(".step-p2p").textContent = `Establishing P2P connection — ${detail}`; },
     );
     pc = peerConn;
-    $(".step-p2p").textContent = "P2P connected via WebRTC";
-    setStepStatus($(".step-p2p"), "done");
+    $(".step-p2p").textContent = "Establishing P2P connection — Authenticating peer";
 
     // All v3 peers authenticate the candidate before key confirmation.
     log("authenticating and confirming data channel");
     const extraBuffered = await confirmDataChannel(dc, keys, peerPub, myPub, false, protocol);
     log("key confirmation successful");
     showProtocol(protocol);
+    $(".step-p2p").textContent = "P2P connected via WebRTC";
+    setStepStatus($(".step-p2p"), "done");
 
     // Receive file.
     log("establishing encrypted stream");
@@ -821,6 +839,9 @@ async function initReceive(): Promise<void> {
 
     // Start heartbeat for peer liveness detection over P2P.
     transport.startHeartbeat(() => pc?.close());
+    const stopDiagnostics = monitorTransfer(pc, transport, relay => {
+      $(".step-p2p").textContent = relay ? "Connected via WebRTC (TURN relay)" : "P2P connected via WebRTC (direct)";
+    });
 
     // Best-effort cancel on tab close.
     const onBeforeUnload = () => { transport.sendCancel(); };
@@ -851,6 +872,7 @@ async function initReceive(): Promise<void> {
         }
       );
     } finally {
+      stopDiagnostics();
       transport.stopHeartbeat();
       window.removeEventListener("beforeunload", onBeforeUnload);
     }
