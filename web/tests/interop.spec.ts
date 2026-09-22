@@ -24,6 +24,33 @@ async function maybeConfirmBrowserDownload(page: { locator: (selector: string) =
 
 // ── Browser → Browser ───────────────────────────────────────────────────────
 
+test("sender removes the one-use share section before WebRTC negotiation finishes", async ({ browser }) => {
+  const sender = await browser.newPage();
+  const receiver = await browser.newPage();
+  // Hold offer creation after the receiver joins, proving removal does not
+  // depend on the data channel opening or payload transmission beginning.
+  await sender.addInitScript(() => {
+    RTCPeerConnection.prototype.createOffer = () => new Promise(() => {});
+  });
+  await receiver.addInitScript(() => { delete (window as any).showSaveFilePicker; });
+  try {
+    await sender.goto("/");
+    await sender.locator(".file-input").setInputFiles({ name: "join.txt", mimeType: "text/plain", buffer: Buffer.from("one use") });
+    const code = await extractCodeFromShareUrl(sender);
+    await sender.locator(".qr-btn").click();
+    await expect(sender.locator(".qr-overlay")).toBeVisible();
+    await receiver.goto(`/r#${code}`);
+    await receiver.locator(".confirm-btn").click();
+    await expect(sender.locator(".step-p2p")).toContainText("Creating connection offer");
+    await expect(sender.locator(".share-display")).toHaveCount(0);
+    await expect(sender.locator(".qr-overlay")).toHaveCount(0);
+    await expect(sender.locator(".step-transfer")).not.toHaveClass(/step-active/);
+  } finally {
+    await sender.close();
+    await receiver.close();
+  }
+});
+
 test("browser sender → browser receiver transfers a file", async ({
   browser,
 }) => {

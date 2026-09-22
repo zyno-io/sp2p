@@ -29,7 +29,7 @@ type ReceiveConfig struct {
 	RelayOK         bool      // Allow TURN relay without prompting
 	ClientVersion   string    // Client version for update check
 	Transport       string    // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
-	Parallel        int       // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	Parallel        int       // connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)
 	MaxReceiveBytes uint64    // zero = 1 TiB
 	MaxExtractBytes uint64    // zero = 1 TiB
 }
@@ -93,10 +93,11 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	// peers start incompatible secondary negotiation before we can skip it.
 	// The sender will only echo it back for CLI-to-CLI transfers (after
 	// seeing PeerJoined with clientType), so browser receivers will never
-	// enter parallel negotiation.
+	// enter parallel TCP negotiation. WebRTC has a separate optional hint.
 	if err := sigClient.Send(ctx, signal.TypeCrypto, signal.CryptoExchange{
-		PublicKey:     kp.Public,
-		ParallelTCPV3: cfg.Parallel != 1,
+		PublicKey:      kp.Public,
+		ParallelTCPV3:  cfg.Parallel != 1,
+		ParallelWebRTC: cfg.Parallel != 1,
 	}); err != nil {
 		return nil, fmt.Errorf("sending public key: %w", err)
 	}
@@ -105,6 +106,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	var senderPub []byte
 	var senderPreferTCP bool
 	var senderParallelTCP bool
+	var senderParallelWebRTC bool
 	var iceServers []signal.ICEServer
 	var turnAvailable bool
 	var peerClientType string
@@ -134,6 +136,7 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 				senderPub = ce.PublicKey
 				senderPreferTCP = ce.PreferTCP
 				senderParallelTCP = ce.ParallelTCPV3
+				senderParallelWebRTC = ce.ParallelWebRTC
 			case signal.TypePeerLeft:
 				h.OnError("Sender disconnected")
 				return nil, fmt.Errorf("peer disconnected")
@@ -304,6 +307,23 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 					defer ms.Close()
 				}
 			}
+		}
+	}
+
+	if rtc, ok := p2pConn.(*conn.WebRTCConn); ok && protocol == 3 && senderParallelWebRTC && cfg.Parallel != 1 {
+		count := webRTCParallelLimit
+		if cfg.Parallel > 0 {
+			count = min(cfg.Parallel, webRTCParallelLimit)
+		}
+		h.OnVerbose("negotiating authenticated parallel WebRTC connections")
+		ms, e := negotiateWebRTC(ctx, rtc, encStream, keys, senderPub, kp.Public, false, count)
+		if e != nil {
+			return nil, fmt.Errorf("parallel WebRTC setup: %w", e)
+		}
+		if ms != nil {
+			frw, deadliner, multiStream = ms, ms, ms
+			h.OnParallelStreams(ms.StreamCount())
+			defer ms.Close()
 		}
 	}
 

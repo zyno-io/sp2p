@@ -44,7 +44,7 @@ type Handler interface {
 	// OnError reports a user-facing error message.
 	OnError(message string)
 
-	// OnParallelStreams reports the number of parallel TCP streams in use.
+	// OnParallelStreams reports the number of parallel TCP or WebRTC streams in use.
 	// Called after parallel negotiation succeeds (count > 1).
 	OnParallelStreams(count int)
 

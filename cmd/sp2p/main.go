@@ -147,7 +147,7 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 	if cfg.Parallel != nil {
 		parallelDefault = *cfg.Parallel
 	}
-	parallel := fs.Int("parallel", parallelDefault, "parallel TCP connections: 0=auto, 1=single, 2-6=force count")
+	parallel := fs.Int("parallel", parallelDefault, "parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
 	format := fs.String("format", "human", "output format: human or json")
@@ -246,7 +246,7 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 	if cfg.Parallel != nil {
 		parallelDefault = *cfg.Parallel
 	}
-	parallel := fs.Int("parallel", parallelDefault, "parallel TCP connections: 0=auto, 1=single, 2-6=force count")
+	parallel := fs.Int("parallel", parallelDefault, "parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
 	format := fs.String("format", "human", "output format: human or json")
@@ -335,7 +335,7 @@ Receive limits (also available in config.yaml):
 Protocol compatibility:
   Automatic: v3 between updated peers, v2 with a 0.4.0 peer.
   No version flag or coordinated server/client upgrade is needed.
-  Legacy transfers warn, disable parallel TCP, and have fewer protections.
+  Legacy transfers warn, disable parallel connections, and have fewer protections.
 
 Environment variables:
   SP2P_SERVER   Signaling server URL            (default: %s)

@@ -140,8 +140,10 @@ Default:
 .BR auto .
 .TP
 .BI \-parallel " count"
-Parallel TCP connections: 0 for automatic, 1 for a single connection, or 2\(en6
-to force a count.
+Parallel connections: 0 for automatic, 1 for a single connection, or 2\(en6
+to request a count. WebRTC uses at most four independent authenticated
+connections when both peers support them; automatic mode enables them for
+files of at least 64 MiB. Older peers retain a single WebRTC connection.
 Default: 0.
 .TP
 .B \-v
@@ -208,8 +210,10 @@ Default:
 .BR auto .
 .TP
 .BI \-parallel " count"
-Parallel TCP connections: 0 for automatic, 1 for a single connection, or 2\(en6
-to force a count.
+Parallel connections: 0 for automatic, 1 for a single connection, or 2\(en6
+to request a count. WebRTC uses at most four independent authenticated
+connections when both peers support them; automatic mode enables them for
+files of at least 64 MiB. Older peers retain a single WebRTC connection.
 Default: 0.
 .TP
 .B \-v
@@ -604,7 +608,7 @@ Connection errors never trigger a retry at a lower version.
 .PP
 A v2 transfer warns without prompting (a
 .B warning
-event in JSON mode), disables parallel TCP, and lacks v3 candidate
+event in JSON mode), disables parallel connections, and lacks v3 candidate
 authentication and receive credits.
 Its idle and backpressure behavior is weaker, and a slow browser receiver can
 exceed its bounded input queue.
@@ -676,7 +680,7 @@ allow-relay: false
 # Transport mode (auto, tcp, webrtc)
 transport: auto
 
-# Parallel TCP connections (0=auto, 1=single, 2-6=force count)
+# Parallel connections (0=auto, 1=single, 2-6=request; WebRTC max 4)
 parallel: 0
 
 # Default output directory for received files

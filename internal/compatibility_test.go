@@ -107,6 +107,9 @@ func TestE2E_ProtocolCompatibility(t *testing.T) {
 							if transport == "tcp" && compression == 9 && !peers.senderOld {
 								sendArgs = append(sendArgs, "-parallel", "6")
 							}
+							if transport == "webrtc" && compression == 9 && !peers.senderOld {
+								sendArgs = append(sendArgs, "-parallel", "4")
+							}
 							sendArgs = append(sendArgs, src)
 							sender := exec.CommandContext(ctx, peers.sender, sendArgs...)
 							out := &compatibilityOutput{code: make(chan string, 1)}
@@ -128,6 +131,9 @@ func TestE2E_ProtocolCompatibility(t *testing.T) {
 							if transport == "tcp" && compression == 9 && !peers.receiverOld {
 								recvArgs = append(recvArgs, "-parallel", "6")
 							}
+							if transport == "webrtc" && compression == 9 && !peers.receiverOld {
+								recvArgs = append(recvArgs, "-parallel", "4")
+							}
 							recvArgs = append(recvArgs, code)
 							receiver := exec.CommandContext(ctx, peers.receiver, recvArgs...)
 							recvOutput, recvErr := receiver.CombinedOutput()
@@ -141,6 +147,12 @@ func TestE2E_ProtocolCompatibility(t *testing.T) {
 							got, err := os.ReadFile(filepath.Join(dest, "compatibility.bin"))
 							if err != nil || !bytes.Equal(got, data) {
 								t.Fatalf("content mismatch: %v", err)
+							}
+							if transport == "webrtc" && compression == 9 && peers.version == 3 {
+								if !strings.Contains(out.String(), `"event":"parallel_streams","protocol":3`) ||
+									!strings.Contains(out.String(), `"parallel_streams":4`) || !bytes.Contains(recvOutput, []byte(`"parallel_streams":4`)) {
+									t.Fatal("updated CLI peers did not negotiate four WebRTC lanes")
+								}
 							}
 							if peers.version == 2 {
 								if !peers.senderOld && !strings.Contains(out.String(), `"event":"warning"`) {

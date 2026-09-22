@@ -41,14 +41,16 @@ var (
 )
 
 // MultiStream multiplexes data frames across N encrypted streams for
-// parallel TCP throughput. Control frames always use stream 0 (primary).
+// parallel TCP or WebRTC throughput. Control frames always use stream 0 (primary).
 // Data frames get an 8-byte global sequence prefix (inside encryption)
-// and are round-robin distributed across streams. The read side
+// and are distributed across streams. Session uses availability-based routing
+// for WebRTC and preserves round-robin scheduling for TCP. The read side
 // reassembles data frames in global order.
 type MultiStream struct {
-	streams []FrameReadWriter // [0]=primary, [1..N-1]=secondary
-	conns   []MultiStreamConn // underlying connections for Close/SetDeadline
-	n       int
+	streams  []FrameReadWriter // [0]=primary, [1..N-1]=secondary
+	conns    []MultiStreamConn // underlying connections for Close/SetDeadline
+	n        int
+	balanced bool // WebRTC only; preserve the existing TCP scheduling policy.
 
 	// Write side
 	globalSeq atomic.Uint64         // global data frame counter
@@ -79,6 +81,17 @@ type controlFrame struct {
 // NewMultiStream creates a MultiStream from the given encrypted streams
 // and their underlying connections. streams[0] is the primary.
 func NewMultiStream(streams []FrameReadWriter, conns []MultiStreamConn) *MultiStream {
+	return newMultiStream(streams, conns, false)
+}
+
+// NewWebRTCMultiStream uses the same authenticated data sequence prefix and
+// terminal barriers as parallel TCP, with a shared 8 MiB encoded-frame budget and
+// availability-based scheduling. Session still owns one aggregate credit window.
+func NewWebRTCMultiStream(streams []FrameReadWriter, conns []MultiStreamConn) *MultiStream {
+	return newMultiStream(streams, conns, true)
+}
+
+func newMultiStream(streams []FrameReadWriter, conns []MultiStreamConn, balanced bool) *MultiStream {
 	if len(streams) != len(conns) {
 		panic("MultiStream: streams and conns must have same length")
 	}
@@ -89,11 +102,19 @@ func NewMultiStream(streams []FrameReadWriter, conns []MultiStreamConn) *MultiSt
 		streams:    streams,
 		conns:      conns,
 		n:          n,
+		balanced:   balanced,
 		seqMap:     make(map[uint64]seqMapping),
 		reassembly: newReassembler(),
 		readCancel: cancel,
 		readDone:   make(chan struct{}),
 		controlCh:  make(chan controlFrame, maxPendingControls),
+	}
+	if balanced {
+		ms.reassembly.maxAhead = 64
+		// Compressed wire chunks can exceed MaxChunkSize; decoded chunks and
+		// credits retain their existing separate limits in Receiver/Session.
+		ms.reassembly.maxBytes = 8 * 1024 * 1024
+		ms.reassembly.strict = true
 	}
 
 	// Start N reader goroutines.
@@ -528,6 +549,7 @@ type reassembler struct {
 	maxAhead int // cap to prevent unbounded memory
 	bytes    int
 	maxBytes int
+	strict   bool
 	err      error
 }
 
@@ -567,6 +589,10 @@ func (r *reassembler) insert(ctx context.Context, seq uint64, data []byte) error
 		if len(data) > MaxFrameSize || seq-r.nextSeq > 4096 {
 			r.mu.Unlock()
 			return fmt.Errorf("data exceeds reassembly window")
+		}
+		if r.strict && (len(data) == 0 || seq-r.nextSeq >= uint64(r.maxAhead) || len(data) > r.maxBytes-r.bytes) {
+			r.mu.Unlock()
+			return fmt.Errorf("data exceeds WebRTC reassembly budget")
 		}
 		if (r.maxAhead <= 0 || seq-r.nextSeq < uint64(r.maxAhead)) &&
 			(seq == r.nextSeq || len(data) <= r.maxBytes-r.bytes) {

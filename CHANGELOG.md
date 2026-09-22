@@ -4,6 +4,8 @@ All notable changes to SP2P are documented here.
 
 This project uses [Semantic Versioning](https://semver.org/). During early development (0.x), minor versions may contain breaking changes.
 
+## [Unreleased]
+
 ## [0.5.0] - 2026-09-21
 
 ### Upgrade notes
@@ -33,6 +35,7 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 - Keep browser-to-browser receive progress responsive on slow transfers.
 - Show one capability-appropriate browser receive action, restore its normal font weight, and timestamp browser diagnostic logs.
 - Remove one-use receive commands when a browser starts receiving, clear sender waiting text during active transfers, and display WebRTC negotiation stages and the selected direct/relay path.
+- Remove the sender's one-use share commands as soon as a receiver joins, before WebRTC negotiation finishes.
 - Publish fresh signed artifacts on re-release and use curated changelog notes without generated author mentions or contributor announcements.
 
 ### Security and correctness
@@ -54,6 +57,8 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ### Performance
 
+- Negotiate up to four independently authenticated WebRTC connections for large browser/browser and browser/CLI transfers, with shared credits, bounded reassembly, per-lane keys, availability-based scheduling, and compatibility fallback. CLI `-parallel 1` keeps one connection; existing parallel TCP behavior is unchanged.
+- Sample aggregate browser UDP socket-discard and network-byte counters across active connections without logging peer addresses. Add opt-in, hash-verified 500 MB WAN tests and a separate raw WebRTC control; experimental fixed queue/message-size tuning is not enabled.
 - Negotiate a bounded 4 MiB receive window for updated browser senders while retaining 64 KiB progress updates and automatic compatibility with existing v2/v3 clients. Add sampled transport, credit-wait, crypto, file-read, and disk-write diagnostics to investigate slow connections.
 - Stream single browser files with incremental hashing; coalesce archive reads while retaining interactive stdin latency.
 - Bound parallel compression to four workers, give each parallel stream its own write worker, and decrypt owned frame payloads in place.

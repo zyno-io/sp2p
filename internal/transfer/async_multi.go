@@ -21,8 +21,9 @@ type streamWrite struct {
 	state atomic.Uint32
 }
 type asyncMultiWriter struct {
-	queues  []chan *streamWrite
-	pending []chan error
+	queues      []chan *streamWrite
+	pending     []chan error
+	queuedBytes []atomic.Int64
 }
 
 // WriteSessionFrame is called only by Session's serialized dispatcher. Network
@@ -36,7 +37,7 @@ func (ms *MultiStream) WriteSessionFrame(ctx context.Context, kind byte, data []
 
 func (ms *MultiStream) writeSessionFrame(ctx context.Context, kind byte, data []byte, write func(FrameReadWriter, byte, []byte) error) error {
 	if ms.asyncWriter == nil {
-		w := &asyncMultiWriter{queues: make([]chan *streamWrite, ms.n)}
+		w := &asyncMultiWriter{queues: make([]chan *streamWrite, ms.n), queuedBytes: make([]atomic.Int64, ms.n)}
 		for i := range w.queues {
 			q := make(chan *streamWrite, CreditWindow)
 			w.queues[i] = q
@@ -54,9 +55,11 @@ func (ms *MultiStream) writeSessionFrame(ctx context.Context, kind byte, data []
 						return
 					case job := <-q:
 						if !job.state.CompareAndSwap(streamWriteQueued, streamWriteStarted) {
+							w.queuedBytes[index].Add(-int64(len(job.data)))
 							continue
 						}
 						err := write(ms.streams[index], job.kind, job.data)
+						w.queuedBytes[index].Add(-int64(len(job.data)))
 						job.done <- err
 						if err != nil {
 							ms.readErr.CompareAndSwap(nil, &err)
@@ -117,6 +120,22 @@ drained:
 		}
 		seq := ms.globalSeq.Add(1) - 1
 		target = int(seq % uint64(ms.n))
+		if ms.balanced {
+			load := func(i int) uint64 {
+				queued := uint64(max(0, w.queuedBytes[i].Load()))
+				if c, ok := ms.conns[i].(BufferedAmounter); ok {
+					queued += c.BufferedAmount()
+				}
+				return queued
+			}
+			best := load(target)
+			for offset := 1; offset < ms.n; offset++ {
+				i := int((seq + uint64(offset)) % uint64(ms.n))
+				if candidate := load(i); candidate < best {
+					target, best = i, candidate
+				}
+			}
+		}
 		payload := make([]byte, globalSeqSize+len(data))
 		binary.BigEndian.PutUint64(payload, seq)
 		copy(payload[globalSeqSize:], data)
@@ -125,9 +144,11 @@ drained:
 		data = append([]byte(nil), data...)
 	}
 	job := &streamWrite{kind: kind, data: data, done: make(chan error, 1)}
+	w.queuedBytes[target].Add(int64(len(data)))
 	select {
 	case w.queues[target] <- job:
 	case <-ctx.Done():
+		w.queuedBytes[target].Add(-int64(len(data)))
 		return context.Cause(ctx)
 	}
 	if kind == MsgData {

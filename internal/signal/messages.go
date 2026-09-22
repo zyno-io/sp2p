@@ -107,7 +107,10 @@ type Candidate struct {
 type CryptoExchange struct {
 	PublicKey     []byte `json:"publicKey"`               // 32-byte X25519 public key
 	ParallelTCPV3 bool   `json:"parallelTCPv3,omitempty"` // v3-only capability; old peers must not start parallel negotiation
-	PreferTCP     bool   `json:"preferTCP,omitempty"`     // hint: prefer TCP for large transfers
+	// An optimization hint only. Activation requires encrypted negotiation and
+	// fresh per-lane authentication after primary v3 authentication.
+	ParallelWebRTC bool `json:"parallelWebRTC,omitempty"`
+	PreferTCP      bool `json:"preferTCP,omitempty"` // hint: prefer TCP for large transfers
 }
 
 // DirectEndpoint carries direct connection addresses for TCP.

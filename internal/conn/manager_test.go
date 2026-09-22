@@ -237,11 +237,14 @@ func TestConnectConfigDefaults(t *testing.T) {
 // correctly with the channel-based buffer.
 func TestWebRTCConnReadWrite(t *testing.T) {
 	conn := &WebRTCConn{
-		readBuf: make(chan []byte, 256),
-		closed:  make(chan struct{}),
+		readBuf:       make(chan []byte, 256),
+		closed:        make(chan struct{}),
+		receiveBudget: &webRTCReceiveBudget{},
 	}
 
 	// Simulate receiving data.
+	conn.receiveBudget.reserve(5)
+	conn.receiveBudget.reserve(6)
 	conn.readBuf <- []byte("hello")
 	conn.readBuf <- []byte(" world")
 
@@ -277,11 +280,13 @@ func TestWebRTCConnReadWrite(t *testing.T) {
 // with the readLeft buffer.
 func TestWebRTCConnPartialRead(t *testing.T) {
 	conn := &WebRTCConn{
-		readBuf: make(chan []byte, 256),
-		closed:  make(chan struct{}),
+		readBuf:       make(chan []byte, 256),
+		closed:        make(chan struct{}),
+		receiveBudget: &webRTCReceiveBudget{},
 	}
 
 	// Send a 10-byte message.
+	conn.receiveBudget.reserve(10)
 	conn.readBuf <- []byte("0123456789")
 
 	// Read only 3 bytes at a time.

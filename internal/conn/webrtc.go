@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -52,12 +53,15 @@ func DefaultSTUNServers() []string {
 
 // WebRTCConn wraps a WebRTC DataChannel as a P2PConn.
 type WebRTCConn struct {
-	pc *webrtc.PeerConnection
-	dc *webrtc.DataChannel
+	pc   *webrtc.PeerConnection
+	dc   *webrtc.DataChannel
+	dcMu sync.RWMutex
 
-	readBuf  chan []byte
-	readLeft []byte
-	readMu   sync.Mutex
+	readBuf       chan []byte
+	readLeft      []byte
+	readMu        sync.Mutex
+	receiveBudget *webRTCReceiveBudget
+	enqueueMu     sync.Mutex
 
 	writeMu       sync.Mutex
 	flowMu        sync.Mutex
@@ -66,6 +70,7 @@ type WebRTCConn struct {
 	closeOnce     sync.Once
 	deadlineMu    sync.Mutex
 	deadlineTimer *time.Timer
+	bufferLimit   atomic.Uint64
 }
 
 // EstablishWebRTC creates a WebRTC connection using the signaling client.
@@ -113,9 +118,10 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 	}
 
 	conn := &WebRTCConn{
-		pc:      pc,
-		readBuf: make(chan []byte, 256),
-		closed:  make(chan struct{}),
+		pc:            pc,
+		readBuf:       make(chan []byte, 256),
+		closed:        make(chan struct{}),
+		receiveBudget: &webRTCReceiveBudget{},
 	}
 	conn.flowCond = sync.NewCond(&conn.flowMu)
 
@@ -159,7 +165,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 			reportFailed(cfg.OnStatus, "WebRTC", err)
 			return nil, fmt.Errorf("creating data channel: %w", err)
 		}
-		conn.dc = dc
+		conn.setDataChannel(dc)
 		setupDataChannel(dc, conn, dcReady, &dcOnce)
 
 		offer, err := pc.CreateOffer(nil)
@@ -197,7 +203,10 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 	} else {
 		// Receiver waits for data channel.
 		pc.OnDataChannel(func(dc *webrtc.DataChannel) {
-			conn.dc = dc
+			if !conn.setDataChannel(dc) {
+				go conn.Close()
+				return
+			}
 			setupDataChannel(dc, conn, dcReady, &dcOnce)
 		})
 	}
@@ -351,10 +360,13 @@ func processSignaling(ctx context.Context, sigClient *signal.Client, pc *webrtc.
 }
 
 func setupDataChannel(dc *webrtc.DataChannel, conn *WebRTCConn, ready chan struct{}, closeOnce *sync.Once) {
+	conn.bufferLimit.Store(dataChannelBuffer)
 	dc.SetBufferedAmountLowThreshold(dataChannelBuffer / 2)
 
 	dc.OnBufferedAmountLow(func() {
+		conn.flowMu.Lock()
 		conn.flowCond.Broadcast()
+		conn.flowMu.Unlock()
 	})
 
 	dc.OnOpen(func() {
@@ -362,18 +374,32 @@ func setupDataChannel(dc *webrtc.DataChannel, conn *WebRTCConn, ready chan struc
 	})
 
 	dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+		conn.enqueueMu.Lock()
+		defer conn.enqueueMu.Unlock()
+		select {
+		case <-conn.closed:
+			return
+		default:
+		}
+		if msg.IsString || len(msg.Data) == 0 || len(msg.Data) > sctpMaxMsgSize || !conn.receiveBudget.reserve(len(msg.Data)) {
+			go conn.Close()
+			return
+		}
 		data := make([]byte, len(msg.Data))
 		copy(data, msg.Data)
 		select {
 		case conn.readBuf <- data:
 		case <-conn.closed:
+			conn.receiveBudget.release(len(data), true)
 		}
 	})
 
 	dc.OnClose(func() {
 		conn.closeOnce.Do(func() {
 			close(conn.closed)
+			conn.flowMu.Lock()
 			conn.flowCond.Broadcast()
+			conn.flowMu.Unlock()
 		})
 	})
 }
@@ -386,6 +412,7 @@ func (c *WebRTCConn) Read(p []byte) (int, error) {
 	if len(c.readLeft) > 0 {
 		n := copy(p, c.readLeft)
 		c.readLeft = c.readLeft[n:]
+		c.receiveBudget.release(n, len(c.readLeft) == 0)
 		return n, nil
 	}
 
@@ -397,6 +424,7 @@ func (c *WebRTCConn) Read(p []byte) (int, error) {
 		if n < len(data) {
 			c.readLeft = data[n:]
 		}
+		c.receiveBudget.release(n, n == len(data))
 		return n, nil
 	default:
 	}
@@ -408,6 +436,7 @@ func (c *WebRTCConn) Read(p []byte) (int, error) {
 		if n < len(data) {
 			c.readLeft = data[n:]
 		}
+		c.receiveBudget.release(n, n == len(data))
 		return n, nil
 	case <-c.closed:
 		// One final drain attempt.
@@ -417,6 +446,7 @@ func (c *WebRTCConn) Read(p []byte) (int, error) {
 			if n < len(data) {
 				c.readLeft = data[n:]
 			}
+			c.receiveBudget.release(n, n == len(data))
 			return n, nil
 		default:
 			return 0, io.EOF
@@ -427,12 +457,20 @@ func (c *WebRTCConn) Read(p []byte) (int, error) {
 // BufferedAmount returns the number of bytes queued in the DataChannel's
 // send buffer that have not yet been transmitted to the peer.
 func (c *WebRTCConn) BufferedAmount() uint64 {
-	return c.dc.BufferedAmount()
+	dc := c.dataChannel()
+	if dc == nil {
+		return 0
+	}
+	return dc.BufferedAmount()
 }
 
 func (c *WebRTCConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	dc := c.dataChannel()
+	if dc == nil {
+		return 0, io.ErrClosedPipe
+	}
 
 	// Keep outgoing DataChannel messages browser-compatible. The transfer
 	// protocol's length prefix allows receivers to reassemble these chunks.
@@ -447,7 +485,7 @@ func (c *WebRTCConn) Write(p []byte) (int, error) {
 		// Wait until the DataChannel buffer drains below the threshold
 		// to avoid unbounded memory growth.
 		c.flowMu.Lock()
-		for c.dc.BufferedAmount() > uint64(dataChannelBuffer) {
+		for dc.BufferedAmount() > c.bufferLimit.Load() {
 			select {
 			case <-c.closed:
 				c.flowMu.Unlock()
@@ -458,7 +496,7 @@ func (c *WebRTCConn) Write(p []byte) (int, error) {
 		}
 		c.flowMu.Unlock()
 
-		if err := c.dc.Send(chunk); err != nil {
+		if err := dc.Send(chunk); err != nil {
 			return total, err
 		}
 		total += len(chunk)
@@ -467,13 +505,27 @@ func (c *WebRTCConn) Write(p []byte) (int, error) {
 	return total, nil
 }
 
+// SetSendBufferLimit is used only once authenticated parallel negotiation has
+// committed. The single-connection default remains unchanged.
+func (c *WebRTCConn) SetSendBufferLimit(limit uint64) {
+	c.bufferLimit.Store(limit)
+	if dc := c.dataChannel(); dc != nil {
+		dc.SetBufferedAmountLowThreshold(limit / 2)
+	}
+	c.flowMu.Lock()
+	c.flowCond.Broadcast()
+	c.flowMu.Unlock()
+}
+
 func (c *WebRTCConn) Close() error {
 	c.closeOnce.Do(func() {
 		close(c.closed)
+		c.flowMu.Lock()
 		c.flowCond.Broadcast()
+		c.flowMu.Unlock()
 	})
-	if c.dc != nil {
-		c.dc.Close()
+	if dc := c.dataChannel(); dc != nil {
+		dc.Close()
 	}
 	return c.pc.Close()
 }

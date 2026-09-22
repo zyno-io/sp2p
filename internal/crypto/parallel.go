@@ -5,10 +5,41 @@ package crypto
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"strconv"
 
 	"golang.org/x/crypto/hkdf"
 )
+
+// DeriveWebRTCLaneKeys domain-separates each additional WebRTC connection from
+// both the primary stream and parallel TCP. Confirm already binds the session
+// and both public keys. A fresh, encrypted setup nonce additionally binds the
+// keys to this one negotiation; indices are the original lane IDs, not the
+// positions of surviving lanes after partial setup.
+func DeriveWebRTCLaneKeys(confirm, setupNonce []byte, index int) (*DerivedKeys, error) {
+	if len(confirm) != 32 || len(setupNonce) != 32 || index < 1 || index > 3 {
+		return nil, fmt.Errorf("invalid WebRTC lane key parameters")
+	}
+	derive := func(label string) ([]byte, error) {
+		info := []byte("sp2p/v3/webrtc/lane/" + strconv.Itoa(index) + "/" + label)
+		out := make([]byte, 32)
+		_, err := io.ReadFull(hkdf.New(sha256.New, confirm, setupNonce, info), out)
+		return out, err
+	}
+	s2r, err := derive("sender-to-receiver")
+	if err != nil {
+		return nil, err
+	}
+	r2s, err := derive("receiver-to-sender")
+	if err != nil {
+		return nil, err
+	}
+	proof, err := derive("key-confirm")
+	if err != nil {
+		return nil, err
+	}
+	return &DerivedKeys{SenderToReceiver: s2r, ReceiverToSender: r2s, Confirm: proof}, nil
+}
 
 // DeriveParallelKeys derives a write/read key pair for a secondary parallel
 // TCP stream at the given index. Stream 0 (primary) uses the original keys;

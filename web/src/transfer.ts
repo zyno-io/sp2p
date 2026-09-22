@@ -8,6 +8,7 @@ import { SHA256 } from "./sha256";
 import { decompressChunk } from "./bounded-zstd";
 import { BoundedMemorySink } from "./memory-sink";
 import { log } from "./log";
+import type { FrameIO } from "./frame-io";
 
 // Message types (must match Go constants).
 export const MSG_METADATA = 0x01;
@@ -129,14 +130,16 @@ export class DataChannelTransport {
   }
 
   diagnostics() {
+    const io = this.frameIO?.diagnostics();
     return {
       ...this.timings,
+      ...io,
       sendWindow: this.sendWindow,
       receiveWindow: this.receiveWindow,
       outstandingChunks: this.sentChunks - this.creditedChunks,
       unconsumedChunks: this.receivedChunks - this.consumedChunks,
-      queuedBytes: this.recvQueueBytes + this.appQueueBytes + this.recvBuffer.length,
-      bufferedBytes: this.dc.bufferedAmount,
+      queuedBytes: this.recvQueueBytes + this.appQueueBytes + this.recvBuffer.length + (io?.queuedBytes ?? 0),
+      bufferedBytes: io?.bufferedBytes ?? this.dc.bufferedAmount,
       sentChunks: this.sentChunks,
       consumedChunks: this.consumedChunks,
     };
@@ -147,7 +150,8 @@ export class DataChannelTransport {
     enc: EncryptedChannel,
     initialData?: Uint8Array[],
     maxDataChannelMessageSize?: number,
-    private protocol: 2 | 3 = 3
+    private protocol: 2 | 3 = 3,
+    private frameIO?: FrameIO,
   ) {
     this.dc = dc;
     this.enc = enc;
@@ -159,6 +163,12 @@ export class DataChannelTransport {
       this.maxDataChannelMessageSize = maxDataChannelMessageSize;
     } else {
       this.maxDataChannelMessageSize = FALLBACK_MAX_DATA_CHANNEL_MESSAGE_SIZE;
+    }
+
+    if (frameIO) {
+      frameIO.setExternalQueue(() => ({ bytes: this.appQueueBytes, frames: this.appQueue.length }));
+      void this.decodeLoop();
+      return;
     }
 
     // Replay any data buffered during key confirmation.
@@ -227,6 +237,8 @@ export class DataChannelTransport {
     return this.protocol;
   }
 
+  close(): void { this.fail(new Error("Transfer closed")); }
+
   private fail(err: Error): void {
     if (this.fatalError) return;
     this.fatalError = err;
@@ -247,6 +259,7 @@ export class DataChannelTransport {
     this.recvReject = null;
     this.recvResolve = null;
     reject?.(err);
+    this.frameIO?.close(err);
     this.dc.close();
   }
 
@@ -367,6 +380,10 @@ export class DataChannelTransport {
     }
     const p = this.writeQueue.then(async () => {
       if (this.fatalError) throw this.fatalError;
+      if (this.frameIO) {
+        await this.frameIO.writeFrame(msgType, data);
+        return;
+      }
       const encryptStart = nowMs();
       const frame = await this.enc.encryptFrame(msgType, data);
       this.timings.encryptMs += nowMs() - encryptStart;
@@ -396,84 +413,94 @@ export class DataChannelTransport {
   private async decodeLoop(): Promise<void> {
     try {
       while (!this.fatalError) {
-        const payload = await this.nextFrame();
-        const decryptStart = nowMs();
-        const frame = await this.enc.decryptFrame(payload);
-        this.timings.decryptMs += nowMs() - decryptStart;
-        if (this.fatalError) return;
-        if (frame.msgType !== MSG_DATA && frame.data.length > 4096) throw new Error("Control frame too large");
-        if (frame.msgType === MSG_HEARTBEAT) {
-          if (frame.data.length) throw new Error("Invalid heartbeat");
-          this.touchHeartbeat();
-          continue;
-        }
-        if (frame.msgType === MSG_CREDIT) {
-          if (this.protocol !== 3) throw new Error("Unexpected legacy credit frame");
-          if (frame.data.length !== 8) throw new Error("Invalid credit frame");
-          const view = new DataView(frame.data.buffer, frame.data.byteOffset, 8);
-          const value = Number(view.getBigUint64(0));
-          if (!Number.isSafeInteger(value) || value <= this.creditedChunks || value > this.sentChunks) throw new Error("Invalid receiver credit");
-          this.creditedChunks = value;
-          const ready = this.creditWait;
-          this.creditWait = null; this.creditReject = null;
-          ready?.();
-          this.touchHeartbeat();
-          continue;
-        }
-        if (frame.msgType === MSG_RECEIVE_WINDOW) {
-          if (this.protocol !== 3 || !this.windowOffered || this.windowGranted || frame.data.length !== 12) {
-            throw new Error("Unexpected receive window grant");
-          }
-          const view = new DataView(frame.data.buffer, frame.data.byteOffset, 12);
-          if (view.getUint32(0) !== RECEIVE_WINDOW_VERSION || view.getUint32(4) !== RECEIVE_WINDOW_CHUNKS || view.getUint32(8) !== SEND_CHUNK_SIZE) {
-            throw new Error("Invalid receive window grant");
-          }
-          this.windowGranted = true;
-          this.sendWindow = RECEIVE_WINDOW_CHUNKS;
-          const ready = this.creditWait;
-          this.creditWait = null; this.creditReject = null;
-          ready?.();
-          this.touchHeartbeat();
-          log("receive window granted: 64 × 64 KiB (4 MiB)");
-          continue;
-        }
-        if (frame.msgType === MSG_CANCEL) throw new Error("Peer cancelled transfer");
-        if (frame.msgType === MSG_ERROR) {
-          const peerError = JSON.parse(new TextDecoder().decode(frame.data));
-          throw new Error(`Peer error: ${peerError.message}`);
-        }
-        if (frame.msgType === MSG_DATA) {
-          if (!frame.data.length || frame.data.length > this.receiveChunkLimit || (this.protocol === 3 && this.receivedChunks - this.consumedChunks >= this.receiveWindow)) throw new Error("Data exceeds receiver credit or chunk limit");
-          this.receivedChunks++;
-        } else if (frame.msgType === MSG_METADATA) {
-          if (this.metadataReceived) throw new Error("Repeated transfer metadata");
-          this.metadataReceived = true;
-          const meta: Metadata = JSON.parse(new TextDecoder().decode(frame.data));
-          if (this.protocol === 3 && meta.receiveWindow === RECEIVE_WINDOW_VERSION && !meta.compression) {
-            // The encrypted offer proves the sender understands this control.
-            // Install limits before granting; queued data stays within 8 MiB.
-            this.receiveWindow = RECEIVE_WINDOW_CHUNKS;
-            this.receiveChunkLimit = SEND_CHUNK_SIZE;
-            const grant = new Uint8Array(12);
-            const view = new DataView(grant.buffer);
-            view.setUint32(0, RECEIVE_WINDOW_VERSION);
-            view.setUint32(4, RECEIVE_WINDOW_CHUNKS);
-            view.setUint32(8, SEND_CHUNK_SIZE);
-            await this.sendFrame(MSG_RECEIVE_WINDOW, grant);
-          }
-        } else if (![MSG_METADATA, MSG_DONE, MSG_COMPLETE, MSG_ERROR, MSG_FINACK].includes(frame.msgType)) {
-          throw new Error("Unexpected transfer control");
-        }
-        this.touchHeartbeat();
-        if (this.appResolve) {
-          const resolve = this.appResolve;
-          this.appResolve = null; this.appReject = null;
-          resolve(frame);
+        let frame: Frame;
+        let release: (() => void) | undefined;
+        if (this.frameIO) {
+          const received = await this.frameIO.readFrame();
+          frame = received;
+          release = received.release;
         } else {
-          if (this.appQueue.length + this.recvQueue.length >= MAX_QUEUE_FRAMES || frame.data.length > MAX_QUEUE_BYTES - this.appQueueBytes - this.recvQueueBytes) throw new Error("Receive queue capacity exceeded");
-          this.appQueue.push(frame);
-          this.appQueueBytes += frame.data.length;
+          const payload = await this.nextFrame();
+          const decryptStart = nowMs();
+          frame = await this.enc.decryptFrame(payload);
+          this.timings.decryptMs += nowMs() - decryptStart;
         }
+        try {
+          if (this.fatalError) return;
+          if (frame.msgType !== MSG_DATA && frame.data.length > 4096) throw new Error("Control frame too large");
+          if (frame.msgType === MSG_HEARTBEAT) {
+            if (frame.data.length) throw new Error("Invalid heartbeat");
+            this.touchHeartbeat();
+            continue;
+          }
+          if (frame.msgType === MSG_CREDIT) {
+            if (this.protocol !== 3) throw new Error("Unexpected legacy credit frame");
+            if (frame.data.length !== 8) throw new Error("Invalid credit frame");
+            const view = new DataView(frame.data.buffer, frame.data.byteOffset, 8);
+            const value = Number(view.getBigUint64(0));
+            if (!Number.isSafeInteger(value) || value <= this.creditedChunks || value > this.sentChunks) throw new Error("Invalid receiver credit");
+            this.creditedChunks = value;
+            const ready = this.creditWait;
+            this.creditWait = null; this.creditReject = null;
+            ready?.();
+            this.touchHeartbeat();
+            continue;
+          }
+          if (frame.msgType === MSG_RECEIVE_WINDOW) {
+            if (this.protocol !== 3 || !this.windowOffered || this.windowGranted || frame.data.length !== 12) {
+              throw new Error("Unexpected receive window grant");
+            }
+            const view = new DataView(frame.data.buffer, frame.data.byteOffset, 12);
+            if (view.getUint32(0) !== RECEIVE_WINDOW_VERSION || view.getUint32(4) !== RECEIVE_WINDOW_CHUNKS || view.getUint32(8) !== SEND_CHUNK_SIZE) {
+              throw new Error("Invalid receive window grant");
+            }
+            this.windowGranted = true;
+            this.sendWindow = RECEIVE_WINDOW_CHUNKS;
+            const ready = this.creditWait;
+            this.creditWait = null; this.creditReject = null;
+            ready?.();
+            this.touchHeartbeat();
+            log("receive window granted: 64 × 64 KiB (4 MiB)");
+            continue;
+          }
+          if (frame.msgType === MSG_CANCEL) throw new Error("Peer cancelled transfer");
+          if (frame.msgType === MSG_ERROR) {
+            const peerError = JSON.parse(new TextDecoder().decode(frame.data));
+            throw new Error(`Peer error: ${peerError.message}`);
+          }
+          if (frame.msgType === MSG_DATA) {
+            if (!frame.data.length || frame.data.length > this.receiveChunkLimit || (this.protocol === 3 && this.receivedChunks - this.consumedChunks >= this.receiveWindow)) throw new Error("Data exceeds receiver credit or chunk limit");
+            this.receivedChunks++;
+          } else if (frame.msgType === MSG_METADATA) {
+            if (this.metadataReceived) throw new Error("Repeated transfer metadata");
+            this.metadataReceived = true;
+            const meta: Metadata = JSON.parse(new TextDecoder().decode(frame.data));
+            if (this.protocol === 3 && meta.receiveWindow === RECEIVE_WINDOW_VERSION && !meta.compression) {
+              // The encrypted offer proves the sender understands this control.
+              // Install limits before granting; queued data stays within 8 MiB.
+              this.receiveWindow = RECEIVE_WINDOW_CHUNKS;
+              this.receiveChunkLimit = SEND_CHUNK_SIZE;
+              const grant = new Uint8Array(12);
+              const view = new DataView(grant.buffer);
+              view.setUint32(0, RECEIVE_WINDOW_VERSION);
+              view.setUint32(4, RECEIVE_WINDOW_CHUNKS);
+              view.setUint32(8, SEND_CHUNK_SIZE);
+              await this.sendFrame(MSG_RECEIVE_WINDOW, grant);
+            }
+          } else if (![MSG_METADATA, MSG_DONE, MSG_COMPLETE, MSG_ERROR, MSG_FINACK].includes(frame.msgType)) {
+            throw new Error("Unexpected transfer control");
+          }
+          this.touchHeartbeat();
+          if (this.appResolve) {
+            const resolve = this.appResolve;
+            this.appResolve = null; this.appReject = null;
+            resolve(frame);
+          } else {
+            if (this.appQueue.length + this.recvQueue.length >= MAX_QUEUE_FRAMES || frame.data.length > MAX_QUEUE_BYTES - this.appQueueBytes - this.recvQueueBytes) throw new Error("Receive queue capacity exceeded");
+            this.appQueue.push(frame);
+            this.appQueueBytes += frame.data.length;
+          }
+        } finally { release?.(); }
       }
     } catch (err) { this.fail(err as Error); }
   }

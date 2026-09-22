@@ -18,6 +18,25 @@ export interface DerivedKeys {
   verifyCode: string;
 }
 
+// Matches crypto.DeriveWebRTCLaneKeys. The primary confirmation key already
+// binds both peers and the session; the fresh encrypted setup nonce and lane
+// index keep additional connections independent from one another and TCP.
+export async function deriveWebRTCLaneKeys(confirm: Uint8Array, setupNonce: Uint8Array, index: number): Promise<DerivedKeys> {
+  if (confirm.length !== 32 || setupNonce.length !== 32 || !Number.isInteger(index) || index < 1 || index > 3) throw new Error("Invalid WebRTC lane key parameters");
+  const source = await crypto.subtle.importKey("raw", bufferSource(confirm), "HKDF", false, ["deriveBits"]);
+  const derive = async (label: string) => {
+    const info = new TextEncoder().encode(`sp2p/v3/webrtc/lane/${index}/${label}`);
+    const bits = await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: bufferSource(setupNonce), info }, source, 256);
+    return new Uint8Array(bits);
+  };
+  const s2r = await derive("sender-to-receiver");
+  const r2s = await derive("receiver-to-sender");
+  const proof = await derive("key-confirm");
+  const senderToReceiver = await crypto.subtle.importKey("raw", s2r, "AES-GCM", false, ["encrypt", "decrypt"]);
+  const receiverToSender = await crypto.subtle.importKey("raw", r2s, "AES-GCM", false, ["encrypt", "decrypt"]);
+  return { senderToReceiver, receiverToSender, confirm: proof, verifyCode: "" };
+}
+
 // Generate an X25519 key pair.
 export async function generateKeyPair(): Promise<CryptoKeyPair> {
   return crypto.subtle.generateKey("X25519", true, [
