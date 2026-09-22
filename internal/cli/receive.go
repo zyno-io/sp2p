@@ -20,7 +20,7 @@ type ReceiveConfig struct {
 	Verbose         bool   // Enable verbose diagnostic output
 	ClientVersion   string // Client version for update check
 	Transport       string // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
-	Parallel        int    // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	Parallel        int    // connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)
 	Output          OutputConfig
 	MaxReceiveBytes uint64
 	MaxExtractBytes uint64

@@ -7,6 +7,7 @@ import { SignalClient, PROTOCOL_VERSION, Envelope } from "./signal";
 import { establishWebRTC, ICEServerConfig, splitIceServers } from "./webrtc";
 import { monitorTransfer } from "./diagnostics";
 import { confirmDataChannel } from "./handshake";
+import { negotiateParallelWebRTC, PARALLEL_MIN_BYTES } from "./webrtc-parallel";
 import {
   generateKeyPair,
   exportTransferPublicKey,
@@ -455,6 +456,8 @@ async function initSend(): Promise<void> {
       setStepStatus($(".step-wait"), "active");
       statusText.textContent = "Waiting for receiver...";
       await sigClient.waitFor("peer-joined", 300000);
+      // Joining claims the one-use session; the code cannot admit another peer.
+      shareDisplay.remove();
       statusText.textContent = "Exchanging encryption keys...";
       closeQRModal();
       setStepStatus($(".step-wait"), "done");
@@ -467,7 +470,7 @@ async function initSend(): Promise<void> {
       log("generating X25519 key pair");
       const kp = await generateKeyPair();
       const myPub = await exportTransferPublicKey(kp.publicKey);
-      sigClient.send("crypto", { publicKey: bytesToBase64(myPub) });
+      sigClient.send("crypto", { publicKey: bytesToBase64(myPub), parallelWebRTC: true });
 
       const cryptoMsg = await cryptoPromise;
       const peerPub = base64ToBytes(cryptoMsg.payload.publicKey);
@@ -512,27 +515,29 @@ async function initSend(): Promise<void> {
       const extraBuffered = await confirmDataChannel(dc, keys, myPub, peerPub, true, protocol);
       log("key confirmation successful");
       showProtocol(protocol);
-      $(".step-p2p").textContent = "P2P connected via WebRTC";
-      setStepStatus($(".step-p2p"), "done");
-
-      // Step 8: Transfer file(s).
       log("establishing encrypted stream");
-      setStepStatus($(".step-transfer"), "active");
-      show(progressContainer);
-      statusText.textContent = "Sending file...";
-      shareDisplay.remove();
-
       const enc = new EncryptedChannel(
         keys.senderToReceiver,
         keys.receiverToSender
       );
+      const frameIO = protocol === 3 && cryptoMsg.payload.parallelWebRTC === true
+        ? await negotiateParallelWebRTC(dc, pc, enc, extraBuffered, keys, myPub, peerPub, true,
+          transferSize >= PARALLEL_MIN_BYTES ? 4 : 1,
+          detail => { $(".step-p2p").textContent = `Establishing P2P connection — ${detail}`; })
+        : undefined;
       const transport = new DataChannelTransport(
         dc,
         enc,
         extraBuffered,
         pc.sctp?.maxMessageSize,
-        protocol
+        protocol,
+        frameIO,
       );
+      $(".step-p2p").textContent = "P2P connected via WebRTC";
+      setStepStatus($(".step-p2p"), "done");
+      setStepStatus($(".step-transfer"), "active");
+      show(progressContainer);
+      statusText.textContent = "Sending file...";
 
       // Close signaling — no longer needed after P2P + key confirmation.
       log("closing signaling connection (P2P established)");
@@ -540,9 +545,11 @@ async function initSend(): Promise<void> {
 
       // Start heartbeat for peer liveness detection over P2P.
       transport.startHeartbeat(() => pc?.close());
+      const connectionCount = frameIO?.diagnostics().connections ?? 1;
+      const connectionDetail = connectionCount > 1 ? `, ${connectionCount} connections` : "";
       const stopDiagnostics = monitorTransfer(pc, transport, relay => {
-        $(".step-p2p").textContent = relay ? "Connected via WebRTC (TURN relay)" : "P2P connected via WebRTC (direct)";
-      });
+        $(".step-p2p").textContent = relay ? `Connected via WebRTC (TURN relay${connectionDetail})` : `P2P connected via WebRTC (direct${connectionDetail})`;
+      }, frameIO?.peerConnections() ?? [pc]);
 
       // Best-effort cancel on tab close.
       const onBeforeUnload = () => { transport.sendCancel(); };
@@ -574,6 +581,7 @@ async function initSend(): Promise<void> {
       } finally {
         stopDiagnostics();
         transport.stopHeartbeat();
+        transport.close();
         window.removeEventListener("beforeunload", onBeforeUnload);
       }
 
@@ -767,7 +775,7 @@ async function initReceive(): Promise<void> {
     log("generating X25519 key pair");
     const kp = await generateKeyPair();
     const myPub = await exportTransferPublicKey(kp.publicKey);
-    sigClient.send("crypto", { publicKey: bytesToBase64(myPub) });
+    sigClient.send("crypto", { publicKey: bytesToBase64(myPub), parallelWebRTC: true });
 
     const cryptoMsg = await cryptoPromise;
     const peerPub = base64ToBytes(cryptoMsg.payload.publicKey);
@@ -812,26 +820,28 @@ async function initReceive(): Promise<void> {
     const extraBuffered = await confirmDataChannel(dc, keys, peerPub, myPub, false, protocol);
     log("key confirmation successful");
     showProtocol(protocol);
-    $(".step-p2p").textContent = "P2P connected via WebRTC";
-    setStepStatus($(".step-p2p"), "done");
-
-    // Receive file.
     log("establishing encrypted stream");
-    setStepStatus($(".step-transfer"), "active");
-    show(progressContainer);
-    statusText.textContent = "Receiving file...";
-
     const enc = new EncryptedChannel(
       keys.receiverToSender,
       keys.senderToReceiver
     );
+    const frameIO = protocol === 3 && cryptoMsg.payload.parallelWebRTC === true
+      ? await negotiateParallelWebRTC(dc, pc, enc, extraBuffered, keys, peerPub, myPub, false, 4,
+        detail => { $(".step-p2p").textContent = `Establishing P2P connection — ${detail}`; })
+      : undefined;
     const transport = new DataChannelTransport(
       dc,
       enc,
       extraBuffered,
       pc.sctp?.maxMessageSize,
-      protocol
+      protocol,
+      frameIO,
     );
+    $(".step-p2p").textContent = "P2P connected via WebRTC";
+    setStepStatus($(".step-p2p"), "done");
+    setStepStatus($(".step-transfer"), "active");
+    show(progressContainer);
+    statusText.textContent = "Receiving file...";
 
     // Close signaling — no longer needed after P2P + key confirmation.
     log("closing signaling connection (P2P established)");
@@ -839,9 +849,11 @@ async function initReceive(): Promise<void> {
 
     // Start heartbeat for peer liveness detection over P2P.
     transport.startHeartbeat(() => pc?.close());
+    const connectionCount = frameIO?.diagnostics().connections ?? 1;
+    const connectionDetail = connectionCount > 1 ? `, ${connectionCount} connections` : "";
     const stopDiagnostics = monitorTransfer(pc, transport, relay => {
-      $(".step-p2p").textContent = relay ? "Connected via WebRTC (TURN relay)" : "P2P connected via WebRTC (direct)";
-    });
+      $(".step-p2p").textContent = relay ? `Connected via WebRTC (TURN relay${connectionDetail})` : `P2P connected via WebRTC (direct${connectionDetail})`;
+    }, frameIO?.peerConnections() ?? [pc]);
 
     // Best-effort cancel on tab close.
     const onBeforeUnload = () => { transport.sendCancel(); };
@@ -874,6 +886,7 @@ async function initReceive(): Promise<void> {
     } finally {
       stopDiagnostics();
       transport.stopHeartbeat();
+      transport.close();
       window.removeEventListener("beforeunload", onBeforeUnload);
     }
 

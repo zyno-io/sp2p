@@ -23,7 +23,7 @@ type SendConfig struct {
 	ClientVersion string   // Client version for update check
 	CompressLevel int      // zstd compression level (0=disabled, 1-9)
 	Transport     string   // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
-	Parallel      int      // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	Parallel      int      // connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)
 	Output        OutputConfig
 }
 

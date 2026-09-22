@@ -28,7 +28,11 @@ jobs:
         shell: bash
         run: |
           fixture_dir=$(mktemp -d "$RUNNER_TEMP/sp2p-rsync.XXXXXX")
-          curl --fail --location --proto '=https' --tlsv1.2 https://download.samba.org/pub/rsync/src/rsync-3.4.1.tar.gz -o "$fixture_dir/rsync.tar.gz"
+          # Bound upstream outages; the same pinned checksum gates either source.
+          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --retry 1 \
+            https://download.samba.org/pub/rsync/src/rsync-3.4.1.tar.gz -o "$fixture_dir/rsync.tar.gz" || \
+            curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --retry 1 \
+              https://slackware.mirror.garr.it/rsync/src/rsync-3.4.1.tar.gz -o "$fixture_dir/rsync.tar.gz"
           printf '2924bcb3a1ed8b551fc101f740b9f0fe0a202b115027647cf69850d65fd88c52  %s\n' "$fixture_dir/rsync.tar.gz" | sha256sum --check
           tar -xzf "$fixture_dir/rsync.tar.gz" -C "$fixture_dir"
           cd "$fixture_dir/rsync-3.4.1"
@@ -40,7 +44,11 @@ jobs:
         shell: bash
         run: |
           fixture_dir=$(mktemp -d "$RUNNER_TEMP/sp2p-rsync269.XXXXXX")
-          curl --fail --location --proto '=https' --tlsv1.2 https://download.samba.org/pub/rsync/src/rsync-2.6.9.tar.gz -o "$fixture_dir/rsync.tar.gz"
+          # Bound upstream outages; the same pinned checksum gates either source.
+          curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --retry 1 \
+            https://download.samba.org/pub/rsync/src/rsync-2.6.9.tar.gz -o "$fixture_dir/rsync.tar.gz" || \
+            curl --fail --location --proto '=https' --tlsv1.2 --connect-timeout 10 --max-time 30 --retry 1 \
+              https://slackware.mirror.garr.it/rsync/src/rsync-2.6.9.tar.gz -o "$fixture_dir/rsync.tar.gz"
           printf 'ca437301becd890e73300bc69a39189ff1564baa761948ff149b3dd7bde633f9  %s\n' "$fixture_dir/rsync.tar.gz" | sha256sum --check
           tar -xzf "$fixture_dir/rsync.tar.gz" -C "$fixture_dir"
           cd "$fixture_dir/rsync-2.6.9"

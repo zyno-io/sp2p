@@ -2,6 +2,13 @@
 
 Baseline: `d303e1a947ca8ef6bb000dfe8660e7a05c7738cd`, the previous v0.5.0. Compatibility fixtures pin this commit because the release tag is being replaced. The protocol and benchmark details are in [receive-window negotiation](receive-window.md).
 
+The receive-window re-release was completed at `1e36613`. The subsequent
+sender-at-join UI fix, aggregate socket-discard diagnostics, and authenticated
+parallel WebRTC extension complete the follow-up implementation. See the
+[parallel protocol](parallel-webrtc.md) and [WAN results](browser-wan-benchmark.md);
+48 hash-verified 500 MB acceptance transfers cover both directions and increased
+RTT. Experimental fixed queue/message-size tuning is not enabled.
+
 ## Findings
 
 The reported Miami–LA baseline is approximately 1.1 MB/s for both browser-to-browser and browser-to-CLI P2P WebRTC. This does not identify the bottleneck. Browser-to-browser transfers use browser WebRTC implementations, so Pion-specific behavior cannot explain both paths by itself.
@@ -16,7 +23,7 @@ Previously, 64 KiB browser chunks and 16 outstanding frames gave browser sends a
 - [x] Enforce the same limits in Go and TypeScript, retain separate queue bounds, and return credits only after consumption.
 - [x] Sample direct/relay path, available RTT, DataChannel counters, queues, credit/buffer waits, encryption/decryption, single-file reads, hashing, and disk writes. Stop sampling on termination; omit raw addresses, codes, keys, and payloads.
 - [x] Replace timer-based cooperative yielding with message tasks, keeping receive work responsive without depending on animation callbacks or background timer schedules.
-- [x] Remove receive commands when accepting a transfer and sender share commands when sending starts.
+- [x] Remove receive commands when accepting a transfer and sender share commands as soon as a receiver joins.
 - [x] Show sending and final verification status, detailed offer/answer/ICE/authentication stages, and the selected direct or relay path.
 - [x] Replace unsupported universal speed claims with measured, qualified results.
 
@@ -31,16 +38,19 @@ An adaptive or 8 MiB window is not part of this iteration: it would require diff
 - [x] Use real encryption and final file verification in a three-repeat simulated credit-latency benchmark: approximately 3.2× at 100 ms and 3.3× at 200 ms.
 - [x] WebKit passes all four transfer/active-UI scenarios. Local Firefox ICE setup fails before transfer on both this change and the unmodified baseline; Firefox end-to-end validation remains unavailable in this environment.
 
-The benchmark is an application-credit test, not an Internet/WebRTC speed forecast. Real Miami–LA measurements remain a follow-up requiring access to those endpoints.
+The benchmark is an application-credit test, not an Internet/WebRTC speed forecast.
+The subsequent [500 MB WAN investigation](browser-wan-benchmark.md) isolates
+Chrome UDP socket pressure and transport recovery on an operator-provided Ubuntu
+host and a local Mac. These are not the exact Miami–LA endpoints.
 
-## Release procedure
+## Completed receive-window release procedure
 
 - [x] Include changes in the v0.5.0 changelog.
 - [x] Generate curated release notes from the changelog instead of GitHub author/contributor announcements.
 - [x] Update the workflow to build, sign, and attest before replacing downloads; publish the new checksum manifest last.
-- [ ] Merge after CI passes and save the previous release body, asset manifest, downloads, and tag target.
-- [ ] Move `v0.5.0` to the verified commit; refresh all 19 assets, both server container tags, and the deployment.
-- [ ] Verify downloaded checksums, the tag target, live bundle/health, and the published notes. Remove every requested author mention and the entire New Contributors section from release prose; preserve Git authorship.
+- [x] Merge after CI passes and save the previous release body, asset manifest, downloads, and tag target.
+- [x] Move `v0.5.0` to the verified commit; refresh all 19 assets, both server container tags, and the deployment.
+- [x] Verify downloaded checksums, the tag target, live bundle/health, and the published notes. Remove every requested author mention and the entire New Contributors section from release prose; preserve Git authorship.
 
 ## Follow-up measurement plan
 

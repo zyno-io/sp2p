@@ -29,7 +29,7 @@ type SendConfig struct {
 	ClientVersion string             // Client version for update check
 	CompressLevel int                // zstd compression level (0=disabled, 1-9)
 	Transport     string             // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
-	Parallel      int                // parallel TCP connections: 0=auto, 1=single, 2-6=force count
+	Parallel      int                // connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)
 }
 
 // Send runs the complete send orchestration.
@@ -127,6 +127,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	var receiverPub []byte
 	var peerClientType string
 	var peerParallelTCP bool
+	var peerParallelWebRTC bool
 	for receiverPub == nil {
 		select {
 		case env := <-sigClient.Incoming:
@@ -142,7 +143,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 				h.OnVerbose(fmt.Sprintf("peer joined (clientType=%s)", peerClientType))
 				h.OnPhaseChanged(PhasePeerJoined)
 				h.OnPhaseChanged(PhaseKeyExchange)
-				ce := signal.CryptoExchange{PublicKey: kp.Public}
+				ce := signal.CryptoExchange{PublicKey: kp.Public, ParallelWebRTC: cfg.Parallel != 1}
 				if cfg.Transport == conn.TransportAuto && meta.Size >= tcpPreferThreshold {
 					ce.PreferTCP = true
 				}
@@ -164,6 +165,7 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 				}
 				receiverPub = ce.PublicKey
 				peerParallelTCP = ce.ParallelTCPV3
+				peerParallelWebRTC = ce.ParallelWebRTC
 			case signal.TypePeerLeft:
 				h.OnError("Receiver disconnected")
 				return fmt.Errorf("peer disconnected")
@@ -338,6 +340,26 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 					defer ms.Close()
 				}
 			}
+		}
+	}
+
+	if rtc, ok := p2pConn.(*conn.WebRTCConn); ok && protocol == 3 && peerParallelWebRTC && cfg.Parallel != 1 {
+		count := webRTCParallelLimit
+		if cfg.Parallel > 0 {
+			count = min(cfg.Parallel, webRTCParallelLimit)
+		}
+		if cfg.Parallel == 0 && meta.Size < parallelMinFileSize {
+			count = 1
+		}
+		h.OnVerbose("negotiating authenticated parallel WebRTC connections")
+		ms, e := negotiateWebRTC(ctx, rtc, encStream, keys, kp.Public, receiverPub, true, count)
+		if e != nil {
+			return fmt.Errorf("parallel WebRTC setup: %w", e)
+		}
+		if ms != nil {
+			frw, deadliner, multiStream = ms, ms, ms
+			h.OnParallelStreams(ms.StreamCount())
+			defer ms.Close()
 		}
 	}
 

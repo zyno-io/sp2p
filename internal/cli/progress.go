@@ -62,7 +62,7 @@ type Progress struct {
 	phase           Phase
 	methods         []conn.MethodStatus
 	connectedVia    string // connection method that won the race
-	parallelStreams int    // number of parallel TCP streams (0 = not parallel)
+	parallelStreams int    // number of parallel TCP/WebRTC streams (0 = not parallel)
 	fileName        string
 	fileSize        uint64
 	fileCount       int
@@ -157,7 +157,7 @@ func (p *Progress) SetError(msg string) {
 	p.render()
 }
 
-// SetParallelStreams records the number of parallel TCP streams and prints
+// SetParallelStreams records the number of parallel TCP/WebRTC streams and prints
 // the stream count as permanent output.
 func (p *Progress) SetParallelStreams(count int) {
 	p.mu.Lock()
