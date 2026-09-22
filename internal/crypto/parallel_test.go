@@ -5,11 +5,50 @@ package crypto
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/hex"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
+
+type replayedLaneCandidate struct {
+	*bytes.Reader
+}
+
+func (*replayedLaneCandidate) Write(p []byte) (int, error) { return len(p), nil }
+func (*replayedLaneCandidate) SetDeadline(time.Time) error { return nil }
+
+func TestWebRTCLaneRejectsReplayedCandidateProof(t *testing.T) {
+	keys, err := DeriveWebRTCLaneKeys(bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	senderPub, receiverPub := []byte("sender"), []byte("receiver")
+	oldSenderNonce, oldReceiverNonce := bytes.Repeat([]byte{3}, 32), bytes.Repeat([]byte{4}, 32)
+	for _, sender := range []bool{true, false} {
+		// Replay a valid challenge/proof from a previous candidate with the
+		// same lane keys. The fresh local challenge must invalidate that proof.
+		role, peerNonce := "receiver", oldReceiverNonce
+		if !sender {
+			role, peerNonce = "sender", oldSenderNonce
+		}
+		mac := hmac.New(sha256.New, keys.Confirm)
+		mac.Write([]byte("sp2p/v3/candidate/" + role))
+		mac.Write(senderPub)
+		mac.Write(receiverPub)
+		mac.Write(oldSenderNonce)
+		mac.Write(oldReceiverNonce)
+		transcript := append(append([]byte(nil), peerNonce...), mac.Sum(nil)...)
+		peer := &replayedLaneCandidate{Reader: bytes.NewReader(transcript)}
+		_, err := AuthenticateCandidate(context.Background(), peer, keys, senderPub, receiverPub, sender)
+		if err == nil || !strings.Contains(err.Error(), "candidate authentication failed") {
+			t.Fatalf("sender=%v accepted replay or failed for another reason: %v", sender, err)
+		}
+	}
+}
 
 func TestWebRTCLaneProofRejectsCrossLaneSetupAndSession(t *testing.T) {
 	for _, mismatch := range []string{"lane", "setup", "session"} {
