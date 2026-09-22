@@ -98,6 +98,7 @@ for (const [oldCLI,oldBrowser] of [[false,false],[true,false],[false,true]]) {
       const exited = new Promise<number|null>((resolve,reject)=>{cli.once("error",reject);cli.once("exit",resolve);});
       try {
         const code = await codeReady;
+        await page.addInitScript(() => { delete (window as any).showSaveFilePicker; });
         if (oldBrowser) await serveLegacyBrowser(page);
         await page.goto(`/r#${code}`);
         if (!oldBrowser) {
@@ -105,7 +106,7 @@ for (const [oldCLI,oldBrowser] of [[false,false],[true,false],[false,true]]) {
           await expect(page.locator(".confirm-cli")).not.toContainText("-protocol");
         }
         const downloaded = page.waitForEvent("download");
-        await page.locator(".memory-download-btn, .confirm-btn").last().click();
+        await page.locator(".confirm-btn").click();
         await expect(page.locator(".complete")).toBeVisible({timeout:30000});
         const download = await downloaded;
         const path = await download.path();

@@ -3,7 +3,8 @@
 import { test, expect } from "@playwright/test";
 import { decompressChunk } from "../src/bounded-zstd";
 import { createTar } from "../src/tar";
-import { DataChannelTransport, receiveFile, sendFile, sendFiles, MSG_METADATA, MSG_DATA, MSG_DONE, MSG_COMPLETE, MSG_FINACK } from "../src/transfer";
+import { DataChannelTransport, receiveFile, sendFile, sendFiles, SEND_CHUNK_SIZE, MSG_METADATA, MSG_DATA, MSG_DONE, MSG_COMPLETE, MSG_FINACK } from "../src/transfer";
+import { log } from "../src/log";
 import { createHash } from "node:crypto";
 
 test("zstd is bounded before window allocation and across output blocks", () => {
@@ -57,11 +58,55 @@ test("single-file sending never reads the entire File", async () => {
   file.arrayBuffer = async()=>{throw new Error("whole-file read");};
   let done: any;
   let chunks = 0;
-  const transport = {sendMetadata:async()=>{},sendData:async(data:Uint8Array)=>{expect(data.length).toBeLessThanOrEqual(256*1024);chunks++;},
+  const transport = {sendMetadata:async()=>{},sendData:async(data:Uint8Array)=>{expect(data.length).toBeLessThanOrEqual(SEND_CHUNK_SIZE);chunks++;},
     sendDone:async(totalBytes:number,chunkCount:number,sha256:string)=>{done={totalBytes,chunkCount,sha256};},
     readFrame:async()=>({msgType:MSG_COMPLETE,data:new TextEncoder().encode(JSON.stringify(done))}),sendFrame:async()=>{}} as any;
   await sendFile(transport,file);
-  expect(chunks).toBe(4);
+  expect(chunks).toBe(16);
+});
+
+test("browser logs include an ISO timestamp after the prefix", () => {
+  const originalLog = console.log;
+  let values: unknown[] = [];
+  console.log = (...args: unknown[]) => { values = args; };
+  try {
+    log("connected", { transport: "webrtc" });
+  } finally {
+    console.log = originalLog;
+  }
+  expect(values[0]).toMatch(/^\[sp2p\] \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z connected$/);
+  expect(values[1]).toEqual({ transport: "webrtc" });
+});
+
+test("receiving yields to the browser while draining queued data", async () => {
+  const bytes = new TextEncoder().encode("abc");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+  const frames = [
+    { msgType: MSG_METADATA, data: json({ name: "file", size: bytes.length, type: "text/plain" }) },
+    { msgType: MSG_DATA, data: bytes },
+    { msgType: MSG_DONE, data: json({ totalBytes: bytes.length, chunkCount: 1, sha256: hash }) },
+    { msgType: MSG_FINACK, data: new Uint8Array() },
+  ];
+  const transport = {
+    readFrame: async () => frames.shift()!,
+    consumeData: async () => {},
+    sendComplete: async () => {},
+    sendError: async () => {},
+  } as any;
+  let browserTaskRan = false;
+  setTimeout(() => { browserTaskRan = true; }, 0);
+
+  const result = await receiveFile(transport, (received) => {
+    if (received === 0) return;
+    const end = performance.now() + 60;
+    while (performance.now() < end) {
+      // Simulate a long queue-drain task so the cooperative yield is due.
+    }
+  });
+
+  expect(result.totalBytes).toBe(bytes.length);
+  expect(browserTaskRan).toBe(true);
 });
 
 test("browser TAR sends exact metadata as a bounded transfer", async () => {
@@ -176,12 +221,23 @@ test("picker cancellation uses live activation and never opens signaling", async
   await page.goto("/r#abcdefgh-1");
   const button = page.getByRole("button",{name:"Choose file and save to disk"});
   await expect(button).toBeVisible();
+  await expect(page.locator(".confirm-btn")).toHaveCount(1);
+  await expect(button).toHaveCSS("font-weight", "400");
   expect(sockets).toBe(0);
   await button.click();
   await expect(page.locator(".error-message")).toBeVisible();
   const activated = await page.evaluate(()=>(window as any).__pickerActivated);
   expect(activated).toBe(true);
   expect(sockets).toBe(0);
+});
+
+test("receive action falls back to one bounded browser-download button", async ({page}) => {
+  await page.addInitScript(() => { delete (window as any).showSaveFilePicker; });
+  await page.goto("/r#abcdefgh-1");
+  const button = page.getByRole("button", { name: "Download in browser (up to 256 MiB)" });
+  await expect(button).toBeVisible();
+  await expect(page.locator(".confirm-btn")).toHaveCount(1);
+  await expect(button).toHaveCSS("font-weight", "400");
 });
 
 test("hostile initial queue closes once and releases pending input", async () => {

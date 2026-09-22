@@ -710,22 +710,16 @@ async function initReceive(): Promise<void> {
     hide(stepsContainer);
     show(confirmContainer);
     const downloadButton = confirmContainer.querySelector<HTMLButtonElement>(".confirm-btn")!;
-    const memoryButton = document.createElement("button");
-    memoryButton.className = "confirm-btn memory-download-btn";
-    memoryButton.textContent = "Download in memory (up to 256 MiB)";
-    if ("showSaveFilePicker" in window) {
-      downloadButton.textContent = "Choose file and save to disk";
-      downloadButton.insertAdjacentElement("afterend", memoryButton);
-    } else {
-      downloadButton.textContent = memoryButton.textContent;
-    }
+    const canStreamToDisk = "showSaveFilePicker" in window;
+    downloadButton.textContent = canStreamToDisk
+      ? "Choose file and save to disk"
+      : "Download in browser (up to 256 MiB)";
     await new Promise<void>((resolve, reject) => {
-      const choose = async (memory: boolean) => {
+      const choose = async () => {
         if (downloadButton.disabled) return;
         downloadButton.disabled = true;
-        memoryButton.disabled = true;
         try {
-          if (!memory && "showSaveFilePicker" in window) {
+          if (canStreamToDisk) {
             saveHandle = await (window as any).showSaveFilePicker({ suggestedName: fileInfo?.name || "received-file" });
           } else if (fileInfo && fileInfo.size > 256 * 1024 * 1024) {
             throw new Error("File exceeds the 256 MiB memory limit; choose disk streaming or use the CLI");
@@ -733,10 +727,8 @@ async function initReceive(): Promise<void> {
           resolve();
         } catch (err) { reject(err); }
       };
-      downloadButton.addEventListener("click", () => { void choose(false); }, { once: true });
-      memoryButton.addEventListener("click", () => { void choose(true); }, { once: true });
+      downloadButton.addEventListener("click", () => { void choose(); }, { once: true });
     });
-    memoryButton.remove();
     hide(confirmContainer);
     show(stepsContainer);
     sigClient = await SignalClient.connect(getWsUrl());

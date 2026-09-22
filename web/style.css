@@ -519,7 +519,7 @@ h1 {
   border-radius: var(--radius);
   padding: 0.7rem 2rem;
   font-size: 0.95rem;
-  font-weight: 600;
+  font-weight: 400;
   cursor: pointer;
   transition: background 0.2s;
 }
