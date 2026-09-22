@@ -4,6 +4,13 @@ All notable changes to SP2P are documented here.
 
 This project uses [Semantic Versioning](https://semver.org/). During early development (0.x), minor versions may contain breaking changes.
 
+## Unreleased
+
+### Fixed
+
+- Keep browser-to-browser receive progress responsive on slow transfers.
+- Show one capability-appropriate browser receive action, restore its normal font weight, and timestamp browser diagnostic logs.
+
 ## [0.5.0] - 2026-09-21
 
 ### Upgrade notes

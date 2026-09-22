@@ -4,5 +4,6 @@
 // Always logs to console — only visible when DevTools is open.
 
 export function log(msg: string, ...args: unknown[]): void {
-  console.log(`[sp2p] ${msg}`, ...args);
+  const timestamp = new Date().toISOString();
+  console.log(`[sp2p] ${timestamp} ${msg}`, ...args);
 }

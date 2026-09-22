@@ -28,6 +28,9 @@ export const CANCEL_USER_ABORT = 0x01;
 export const CANCEL_ERROR = 0x02;
 
 export const MAX_CHUNK_SIZE = 256 * 1024;
+// Smaller browser-originated chunks keep receive progress responsive on slow
+// links while the protocol limit remains compatible with existing peers.
+export const SEND_CHUNK_SIZE = 64 * 1024;
 export const MAX_FRAME_SIZE = 512 * 1024; // Must match Go's MaxFrameSize
 // In-memory receive limit for browsers without File System Access API.
 const MAX_RECEIVE_SIZE = 256 * 1024 * 1024; // explicit, bounded memory fallback
@@ -39,6 +42,17 @@ const MAX_QUEUE_FRAMES = 256;
 // Used only when the browser does not expose RTCSctpTransport.maxMessageSize.
 // This conservative value is supported by all WebRTC DataChannel implementations.
 const FALLBACK_MAX_DATA_CHANNEL_MESSAGE_SIZE = 16 * 1024;
+const RECEIVE_RENDER_INTERVAL_MS = 50;
+
+function nowMs(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
+}
+
+function yieldToBrowser(): Promise<void> {
+  // A new task gives the browser an opportunity to paint without depending on
+  // requestAnimationFrame, which may pause in a background tab.
+  return new Promise((resolve) => { setTimeout(resolve, 0); });
+}
 
 export interface Metadata {
   name: string;
@@ -523,7 +537,7 @@ export async function sendFile(
   let chunkCount = 0;
 
   while (offset < file.size) {
-    const end = Math.min(offset + MAX_CHUNK_SIZE, file.size);
+    const end = Math.min(offset + SEND_CHUNK_SIZE, file.size);
     const blob = file.slice(offset, end);
     const buffer = await blob.arrayBuffer();
     const chunk = new Uint8Array(buffer);
@@ -583,7 +597,7 @@ export async function sendFiles(
   let bytesSent = 0;
   let chunkCount = 0;
 
-  // Re-chunk the tar stream into MAX_CHUNK_SIZE pieces for the wire.
+  // Re-chunk the tar stream into responsive browser send chunks.
   let pending = new Uint8Array(0);
 
   for await (const { chunk } of stream()) {
@@ -594,9 +608,9 @@ export async function sendFiles(
     pending = combined;
 
     // Flush full chunks.
-    while (pending.length >= MAX_CHUNK_SIZE) {
-      const slice = pending.slice(0, MAX_CHUNK_SIZE);
-      pending = pending.slice(MAX_CHUNK_SIZE);
+    while (pending.length >= SEND_CHUNK_SIZE) {
+      const slice = pending.slice(0, SEND_CHUNK_SIZE);
+      pending = pending.slice(SEND_CHUNK_SIZE);
       await transport.sendData(slice);
       hasher.update(slice);
       bytesSent += slice.length;
@@ -681,6 +695,7 @@ export async function receiveFile(
   const hasher = new SHA256();
   let totalBytes = 0;
   let chunkCount = 0;
+  let lastRenderYield = nowMs();
 
   while (true) {
     const frame = await transport.readFrame();
@@ -702,6 +717,10 @@ export async function receiveFile(
       chunkCount++;
       await transport.consumeData();
       onProgress?.(totalBytes);
+      if (nowMs() - lastRenderYield >= RECEIVE_RENDER_INTERVAL_MS) {
+        await yieldToBrowser();
+        lastRenderYield = nowMs();
+      }
     } else if (frame.msgType === MSG_DONE) {
       const done: Done = JSON.parse(new TextDecoder().decode(frame.data));
       if (enforceDeclaredSize && totalBytes !== meta.size) throw new Error("Transfer does not match declared size");

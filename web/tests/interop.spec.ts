@@ -13,9 +13,7 @@ async function extractCodeFromShareUrl(page: { locator: (selector: string) => an
 }
 
 async function maybeConfirmBrowserDownload(page: { locator: (selector: string) => any }): Promise<void> {
-  // Explicitly choose the bounded memory path; native file dialogs are covered
-  // separately with an injected File System Access writer.
-  const confirmButton = page.locator(".memory-download-btn, .confirm-btn").last();
+  const confirmButton = page.locator(".confirm-btn");
   try {
     await confirmButton.click({ timeout: 5_000 });
   } catch {
@@ -32,6 +30,7 @@ test("browser sender → browser receiver transfers a file", async ({
   const senderPage = await senderContext.newPage();
   const receiverContext = await browser.newContext();
   const receiverPage = await receiverContext.newPage();
+  await receiverPage.addInitScript(() => { delete (window as any).showSaveFilePicker; });
 
   try {
     // Exercise a full protocol chunk, which may exceed the DataChannel's
@@ -128,6 +127,7 @@ test("CLI sender → browser receiver transfers a file", async ({
   try {
     // Browser receiver: navigate to receive page with the code.
     // Set up download listener before navigating.
+    await page.addInitScript(() => { delete (window as any).showSaveFilePicker; });
     const downloadPromise = page.waitForEvent("download", { timeout: 30_000 });
     await page.goto(`/r#${code}`);
     await maybeConfirmBrowserDownload(page);
@@ -160,8 +160,8 @@ test("browser sender → CLI receiver transfers a file", async ({
   wsUrl,
 }) => {
   const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-cli-"));
-  // A 256 KiB payload becomes larger once SP2P encrypts and frames it.
-  // This verifies that the CLI accepts a complete protocol wire frame.
+  // This spans multiple responsive browser send chunks and verifies that the
+  // CLI accepts the complete encrypted transfer.
   const fileContent = Buffer.alloc(256 * 1024, "B");
 
   // Browser sender: open send page and select file.
