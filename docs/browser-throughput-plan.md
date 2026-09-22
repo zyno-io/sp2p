@@ -4,9 +4,10 @@ Baseline: `d303e1a947ca8ef6bb000dfe8660e7a05c7738cd`, the previous v0.5.0. Compa
 
 The receive-window re-release was completed at `1e36613`. The subsequent
 sender-at-join UI fix, aggregate socket-discard diagnostics, and authenticated
-parallel WebRTC extension are unreleased follow-up work. See the
+parallel WebRTC extension complete the follow-up implementation. See the
 [parallel protocol](parallel-webrtc.md) and [WAN results](browser-wan-benchmark.md);
-no experimental transport setting is deployed.
+48 hash-verified 500 MB acceptance transfers cover both directions and increased
+RTT. Experimental fixed queue/message-size tuning is not enabled.
 
 ## Findings
 
@@ -42,7 +43,7 @@ The subsequent [500 MB WAN investigation](browser-wan-benchmark.md) isolates
 Chrome UDP socket pressure and transport recovery on an operator-provided Ubuntu
 host and a local Mac. These are not the exact Miami–LA endpoints.
 
-## Release procedure
+## Completed receive-window release procedure
 
 - [x] Include changes in the v0.5.0 changelog.
 - [x] Generate curated release notes from the changelog instead of GitHub author/contributor announcements.

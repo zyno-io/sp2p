@@ -13,11 +13,13 @@ bottlenecks on these endpoints. The fixed small-message/queue experiments did
 not demonstrate improvement in both directions and are not enabled.
 
 The follow-up implements authenticated parallel WebRTC in both the browser and
-CLI, with compatible fallback and aggregate flow-control/memory bounds. It is
-unreleased. Three-repeat real 500 MB SP2P tests have browser/browser medians of
+CLI, with compatible fallback and aggregate flow-control/memory bounds.
+Three-repeat real 500 MB SP2P tests have browser/browser medians of
 8.24 MB/s local→Ubuntu and 8.99 MB/s Ubuntu→local, compared with released-browser
-medians of 4.72 and 1.84 MB/s. Browser→CLI and CLI→browser also improve. The
-controlled-RTT validation is tracked below.
+medians of 4.72 and 1.84 MB/s. Browser→CLI and CLI→browser also improve. All 48
+acceptance transfers completed with verified output: four directions, two
+variants, three repeats, and both natural and artificially increased RTT.
+Every case improved median throughput without a repeatable fast-case regression.
 These measurements are not a universal speed promise.
 
 ## Setup
@@ -210,7 +212,7 @@ All parallel runs used unmodified Chromium, real SP2P encryption, and
 persisted-output SHA-256 verification. No socket shim or raw-byte shortcut was
 used. The final natural-WAN round used `main-WWE34XGV.js` (SHA-256
 `3c15f2789362165408f12aae56e94300217bdaf013a24538c0e70bcdf2b2f414`).
-The final controlled round uses `main-4WLHNADX.js` (SHA-256
+The final controlled round used `main-4WLHNADX.js` (SHA-256
 `06df38d40f42e7761171accd5f7b9da18bbc969e8f2eaed22ddbd314f6537026`);
 the intervening production change sanitizes malformed setup-JSON errors.
 The earliest runs preceded cleanup/encoded-frame-bound refinements. None of
@@ -242,18 +244,43 @@ transfers.
 Each remote browser container is limited to two CPUs and 3 GiB memory, with
 1 GiB shared memory. Container resource samples include native browser buffers,
 filesystem cache, and the independent whole-file verification probe; they are
-not measurements of the application receive-queue budget alone. Temporary
+not measurements of the application receive-queue budget alone. Maximum observed
+memory was 616.4 MiB in the natural-WAN container and 1,551.4 MiB in the final
+controlled fixture. Approximately 20-second sampling can miss resource peaks;
+sampled CPU usage reached roughly the two-core allocation. Temporary
 Docker port mappings, namespaces, and browser processes are removed after testing.
 
-The controlled repeat matrix is still running. Its first pass completed and
-verified all eight 500 MB transfers; these are single-run results, not medians:
+The controlled matrix also completed three verified transfers per case. All
+rates below are decimal MB/s. Median sampled RTTs under load ranged from
+100–180 ms; the 70 ms ingress delay is not a fixed end-to-end RTT.
 
-| Local / Ubuntu direction | Single connection, MB/s | Parallel, MB/s |
-| --- | ---: | ---: |
-| Browser → browser | 2.83 | 5.49 |
-| Browser ← browser | 0.95 | 8.17 |
-| Browser → CLI | 9.08 | 14.27 |
-| Browser ← CLI | 0.78 | 9.63 |
+| Local / Ubuntu direction | Single median | Parallel median | Single runs | Parallel runs |
+| --- | ---: | ---: | --- | --- |
+| Browser → browser | 2.48 | 5.49 | 2.83, 2.48, 1.36 | 5.49, 5.49, 6.17 |
+| Browser ← browser | 0.77 | 8.18 | 0.95, 0.77, 0.72 | 8.17, 8.18, 8.20 |
+| Browser → CLI | 9.08 | 14.27 | 9.08, 12.49, 6.25 | 14.27, 16.65, 14.27 |
+| Browser ← CLI | 0.92 | 9.63 | 0.78, 0.92, 15.60 | 9.63, 8.80, 15.86 |
+
+The fast final CLI→browser control is retained: it used one connection, direct
+server-reflexive candidates, and measured RTT of 112–115 ms with the shaper
+active. Parallel reached 15.86 MB/s in that round versus the control's 15.60.
+This variation is another reason not to promise a particular speed or speedup.
+
+For delivery responsiveness, a near-stall is consecutive roughly five-second
+sample intervals averaging less than 256 KiB/s, after the first 1 MiB and before
+the final completion tail. It does not mean literally zero bytes arrived.
+Controlled browser→browser controls had near-stalls lasting 25.2 and 136.3 s;
+one reverse control had 20.2 s. A natural-WAN forward control also had 10.1 s.
+No parallel run in either matrix met this sampled near-stall definition. This
+cannot exclude shorter stalls. Maximum sampled browser timer lag in the
+controlled parallel runs was 27.5 ms.
+
+During the 136.3-second near-stall, the sender reported 6,159 packets / 7,450,922
+bytes discarded on send while the ingress shaper reported zero drops. Both
+pages' sampled timer lag remained below 6 ms at that observation; the sender
+had approximately 4 MB queued natively and the receiver's application queue was
+empty. Those measurements distinguish stalled transport delivery/recovery from
+a frozen page or a receiver blocked on application processing.
 
 Acceptance checklist:
 
@@ -278,7 +305,7 @@ Acceptance checklist:
    numbers, excess buffering, slow lanes, setup timeout, cancellation, disk
    failure, and completion acknowledgement loss. Verify old/new browser and CLI
    combinations before enabling the extension by default.
-- [ ] Repeat hash-verified 500 MB transfers at least three times per direction and
+- [x] Repeat hash-verified 500 MB transfers at least three times per direction and
    peer combination, sequentially, with unmodified browsers. Measure median
    throughput, delivery-stall duration, main-thread responsiveness, and resource
    use at natural and controlled RTT. Require improvement in the slow cases
@@ -325,6 +352,9 @@ compressed CLI sending, slow sinks, disk errors, lost FinAck, malformed setup,
 setup deadlines, and cleanup when native DataChannel construction fails.
 A final 30-test Node-side run also verifies that malformed setup-JSON errors
 do not echo private negotiation contents; TypeScript and the rebuilt bundle pass.
+The final implementation also passes all GitHub CI checks. Its browser job
+reports 142 passed and nine skipped (optional benchmark and local-fixture cases);
+the separate protocol-compatibility job passes as well.
 
 The pinned v0.4.0 source fixture matches all 140 tracked blobs at `7a616cd`;
 the original v0.5.0 fixture is pinned to `d303e1a`. Forced four-lane CLI/CLI and
