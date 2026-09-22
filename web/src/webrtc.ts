@@ -91,11 +91,36 @@ export function establishWebRTC(
 
     let settled = false;
     let timer: ReturnType<typeof setTimeout>;
+    let finishGathering: (() => void) | undefined;
+
+    function stage(detail: string) {
+      if (settled) return;
+      log(`WebRTC: ${detail}`);
+      onStatus?.("WebRTC", "trying", detail);
+    }
+
+    function waitForGathering(): Promise<void> {
+      if (pc.iceGatheringState === "complete") return Promise.resolve();
+      stage("Gathering network addresses (ICE)");
+      return new Promise(resolve => {
+        const finish = () => {
+          clearTimeout(gatherTimer);
+          pc.removeEventListener("icegatheringstatechange", changed);
+          finishGathering = undefined;
+          resolve();
+        };
+        const changed = () => { if (pc.iceGatheringState === "complete") finish(); };
+        const gatherTimer = setTimeout(finish, 3000);
+        finishGathering = finish;
+        pc.addEventListener("icegatheringstatechange", changed);
+      });
+    }
 
     function cleanup() {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      finishGathering?.();
       for (const t of handlerTypes) {
         sigClient.off(t);
       }
@@ -124,12 +149,22 @@ export function establishWebRTC(
 
     pc.onconnectionstatechange = () => {
       log(`WebRTC: connection state → ${pc.connectionState}`);
+      if (pc.connectionState === "failed") rejectClean(new Error("WebRTC connection failed"));
+    };
+    pc.oniceconnectionstatechange = () => {
+      log(`WebRTC: ICE connection state → ${pc.iceConnectionState}`);
+      if (pc.iceConnectionState === "checking") stage("Checking network paths (ICE)");
+      if (pc.iceConnectionState === "connected" || pc.iceConnectionState === "completed") {
+        stage("Network path found; securing connection and opening data channel");
+      }
+      if (pc.iceConnectionState === "failed") rejectClean(new Error("WebRTC network path checks failed"));
     };
 
     // Send ICE candidates.
     pc.onicecandidate = (event) => {
       if (event.candidate) {
-        log(`WebRTC: local ICE candidate: ${event.candidate.type || "unknown"} ${event.candidate.address || ""}`);
+        if (settled) return;
+        log(`WebRTC: local ICE candidate type: ${event.candidate.type || "unknown"}`);
         sigClient.send("candidate", {
           candidate: event.candidate.candidate,
           sdpMid: event.candidate.sdpMid,
@@ -141,7 +176,7 @@ export function establishWebRTC(
     // Handle incoming ICE candidates.
     sigClient.on("candidate", (env) => {
       const c = env.payload;
-      log(`WebRTC: received remote ICE candidate: ${c.candidate}`);
+      log("WebRTC: received remote ICE candidate");
       pc.addIceCandidate(
         new RTCIceCandidate({
           candidate: c.candidate,
@@ -152,6 +187,7 @@ export function establishWebRTC(
     });
 
     if (isSender) {
+      stage("Creating connection offer");
       // Sender creates data channel and offer.
       const dc = pc.createDataChannel(DATA_CHANNEL_LABEL, {
         ordered: true,
@@ -167,22 +203,10 @@ export function establishWebRTC(
 
       pc.createOffer()
         .then((offer) => pc.setLocalDescription(offer))
+        .then(() => waitForGathering())
         .then(() => {
-          // Wait for ICE gathering to complete for a complete SDP.
-          return new Promise<void>((res) => {
-            if (pc.iceGatheringState === "complete") {
-              res();
-            } else {
-              pc.onicegatheringstatechange = () => {
-                if (pc.iceGatheringState === "complete") res();
-              };
-              // Timeout after 3s and send what we have.
-              setTimeout(res, 3000);
-            }
-          });
-        })
-        .then(() => {
-          log("WebRTC: sending SDP offer:\n" + pc.localDescription!.sdp);
+          if (settled) return;
+          stage("Waiting for receiver's answer");
           sigClient.send("offer", {
             sdp: pc.localDescription!.sdp,
             type: pc.localDescription!.type,
@@ -192,7 +216,7 @@ export function establishWebRTC(
 
       // Wait for answer.
       sigClient.on("answer", (env) => {
-        log("WebRTC: received SDP answer:\n" + env.payload.sdp);
+        stage("Applying receiver's answer");
         pc.setRemoteDescription(
           new RTCSessionDescription({
             sdp: env.payload.sdp,
@@ -201,6 +225,7 @@ export function establishWebRTC(
         ).catch(rejectClean);
       });
     } else {
+      stage("Waiting for sender's offer");
       // Receiver waits for data channel.
       pc.ondatachannel = (event) => {
         const dc = event.channel;
@@ -215,7 +240,7 @@ export function establishWebRTC(
 
       // Wait for offer.
       sigClient.on("offer", async (env) => {
-        log("WebRTC: received SDP offer:\n" + env.payload.sdp);
+        stage("Applying sender's offer");
         try {
           await pc.setRemoteDescription(
             new RTCSessionDescription({
@@ -223,22 +248,13 @@ export function establishWebRTC(
               type: env.payload.type,
             })
           );
+          if (settled) return;
+          stage("Creating connection answer");
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-
-          // Wait for ICE gathering.
-          await new Promise<void>((res) => {
-            if (pc.iceGatheringState === "complete") {
-              res();
-            } else {
-              pc.onicegatheringstatechange = () => {
-                if (pc.iceGatheringState === "complete") res();
-              };
-              setTimeout(res, 3000);
-            }
-          });
-
-          log("WebRTC: sending SDP answer:\n" + pc.localDescription!.sdp);
+          await waitForGathering();
+          if (settled) return;
+          stage("Checking network paths (ICE)");
           sigClient.send("answer", {
             sdp: pc.localDescription!.sdp,
             type: pc.localDescription!.type,

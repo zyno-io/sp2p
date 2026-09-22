@@ -559,17 +559,13 @@ On a LAN, TCP almost always wins instantly, so the preference window never trigg
 
 #### Why TCP is Preferred
 
-WebRTC data channels use SCTP (Stream Control Transmission Protocol) tunneled over DTLS/UDP. While SCTP is reliable and works well for signaling and small messages, the implementation in [pion/webrtc](https://github.com/pion/webrtc) has throughput limitations that become significant for bulk transfers:
+WebRTC data channels carry SCTP over DTLS/UDP. Browser-to-browser transfers use the browsers' WebRTC implementations; transfers involving a CLI use [Pion](https://github.com/pion/webrtc) on the CLI side. Throughput depends on the selected direct or TURN path, latency, loss, implementation, application flow control, and output speed. There is no universal WebRTC speed cap.
 
-- **200ms delayed SACK timer**: acknowledgements are held for 200ms regardless of RTT, throttling congestion window growth
-- **TCP Reno congestion control**: the congestion window halves on any packet loss and grows linearly (1 MSS per RTT), recovering slowly
-- **Small initial congestion window**: starts at ~5 KB and grows conservatively
+Direct TCP uses the OS networking stack, and SP2P can use parallel TCP connections for large CLI-to-CLI transfers. Browsers cannot use SP2P's direct TCP transport. For a fair comparison, force `-transport webrtc` on the CLI and use the same payload and compression settings.
 
-In practice, these factors cap WebRTC throughput at roughly **3–15 MB/s** depending on network conditions. A 70ms RTT link (US coast-to-coast, say) typically sees ~3–5 MB/s.
+Updated browser senders use 64 KiB chunks and offer a 4 MiB receive window to updated peers. Existing v3 receivers retain their 16-frame limit, giving those browser sends a 1 MiB window; v2 compatibility remains automatic. An authenticated receiver grant is required before the sender expands its window. The metadata offer, grant encoding, and bounds are described in [receive-window negotiation](docs/receive-window.md).
 
-Direct TCP uses the OS kernel's TCP stack, which implements modern congestion control (cubic, BBR) with optimized buffer management. The same link easily achieves **50–100+ MB/s**, an order of magnitude faster.
-
-For a 1 GB file at 5 MB/s (WebRTC) vs 50 MB/s (TCP): **3 minutes vs 20 seconds**.
+Browser console logs sample the selected direct/relay path, available RTT, queued bytes, and cumulative time spent waiting for credits, draining the DataChannel, encrypting/decrypting, reading, hashing, and writing. These counters help distinguish a network bottleneck from local processing. Missing browser statistics are reported as unavailable; timings include asynchronous scheduling and are not independent CPU utilization measurements.
 
 ### Transfer Protocol
 

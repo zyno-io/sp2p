@@ -2,6 +2,7 @@ import { spawn } from "child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { createHash } from "node:crypto";
 import { test, expect } from "./fixtures";
 
 async function extractCodeFromShareUrl(page: { locator: (selector: string) => any }): Promise<string> {
@@ -30,6 +31,13 @@ test("browser sender → browser receiver transfers a file", async ({
   const senderPage = await senderContext.newPage();
   const receiverContext = await browser.newContext();
   const receiverPage = await receiverContext.newPage();
+  if (process.env.SP2P_TEST_WEBRTC_DEBUG === "1") {
+    for (const [role, page] of [["sender", senderPage], ["receiver", receiverPage]] as const) {
+      page.on("console", message => {
+        if (message.text().includes("WebRTC:")) console.log(`${role}: ${message.text()}`);
+      });
+    }
+  }
   await receiverPage.addInitScript(() => { delete (window as any).showSaveFilePicker; });
 
   try {
@@ -80,6 +88,61 @@ test("browser sender → browser receiver transfers a file", async ({
 });
 
 // ── CLI → Browser ───────────────────────────────────────────────────────────
+
+test("active browser transfer removes commands and reports sending and connection stages", async ({ browser }) => {
+  const sender = await browser.newPage();
+  const receiver = await browser.newPage();
+  const stages: string[] = [];
+  sender.on("console", message => { if (message.text().includes("WebRTC:")) stages.push(message.text()); });
+  await receiver.addInitScript(() => {
+    const chunks: Uint8Array[] = [];
+    (window as any).showSaveFilePicker = async () => ({
+      createWritable: async () => ({
+        write: async (chunk: Uint8Array) => {
+          if (!chunks.length) await new Promise<void>(resolve => { (window as any).__releaseSink = resolve; });
+          chunks.push(chunk.slice());
+        },
+        close: async () => {
+          const blob = new Blob(chunks);
+          const bytes = await blob.arrayBuffer();
+          const hash = await crypto.subtle.digest("SHA-256", bytes);
+          (window as any).__receivedHash = Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, "0")).join("");
+        },
+        abort: async () => {},
+      }),
+    });
+    (window as any).__p2pStages = [];
+    new MutationObserver(() => {
+      const text = document.querySelector(".step-p2p")?.textContent;
+      if (text) (window as any).__p2pStages.push(text);
+    }).observe(document, { subtree: true, childList: true, characterData: true });
+  });
+  try {
+    const content = Buffer.alloc(6 * 1024 * 1024, "W");
+    await sender.goto("/");
+    await sender.locator(".file-input").setInputFiles({ name: "window.bin", mimeType: "application/octet-stream", buffer: content });
+    const code = await extractCodeFromShareUrl(sender);
+    await receiver.goto(`/r#${code}`);
+    await receiver.locator(".confirm-btn").click();
+    await receiver.waitForFunction(() => typeof (window as any).__releaseSink === "function");
+    await expect(sender.locator(".status-text")).toHaveText("Sending file...");
+    await expect(sender.locator(".share-display")).toHaveCount(0);
+    await expect(receiver.locator(".confirm-transfer, .confirm-cli, .confirm-curl, .confirm-wget, .confirm-powershell")).toHaveCount(0);
+    const observed: string[] = await receiver.evaluate(() => (window as any).__p2pStages);
+    expect(observed.some(stage => stage.includes("Establishing P2P connection —"))).toBe(true);
+    expect(stages.some(stage => stage.includes("Waiting for receiver's answer"))).toBe(true);
+    // Let the receiver continue while the sender's page has focus.
+    await sender.bringToFront();
+    await receiver.evaluate(() => (window as any).__releaseSink());
+    await expect(receiver.locator(".complete")).toBeVisible();
+    await expect(sender.locator(".complete")).toBeVisible();
+    const hash = await receiver.evaluate(() => (window as any).__receivedHash);
+    expect(hash).toBe(createHash("sha256").update(content).digest("hex"));
+  } finally {
+    await sender.close();
+    await receiver.close();
+  }
+});
 
 test("CLI sender → browser receiver transfers a file", async ({
   page,

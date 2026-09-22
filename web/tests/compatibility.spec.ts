@@ -7,8 +7,7 @@ import { basename, join } from "node:path";
 import type { Page } from "@playwright/test";
 import { test, expect } from "./fixtures";
 
-async function serveLegacyBrowser(page: Page): Promise<void> {
-  const dir = process.env.SP2P_TEST_LEGACY_WEB_DIR!;
+async function serveLegacyBrowser(page: Page, dir: string): Promise<void> {
   // Intercepted HTML has no network address-space provenance in Chromium.
   // Allow this isolated test context to reach its real loopback signaling server.
   await page.context().grantPermissions(["local-network-access"]);
@@ -28,17 +27,20 @@ async function serveLegacyBrowser(page: Page): Promise<void> {
   });
 }
 
-for (const [oldCLI,oldBrowser] of [[false,false],[true,false],[false,true]]) {
-  test.describe(oldBrowser ? "cached 0.4.0 browser compatibility" : oldCLI ? "0.4.0 CLI compatibility" : "automatic v3 negotiation", () => {
-    test.skip(oldCLI && !process.env.SP2P_TEST_LEGACY_BINARY, "Set SP2P_TEST_LEGACY_BINARY to an unmodified v0.4.0 CLI");
-    test.skip(oldBrowser && !process.env.SP2P_TEST_LEGACY_WEB_DIR, "Set SP2P_TEST_LEGACY_WEB_DIR to web/dist built from v0.4.0");
+for (const [oldCLI,oldBrowser,oldProtocol] of [[false,false,3],[true,false,2],[false,true,2],[true,false,3],[false,true,3]] as const) {
+  const oldBinary = oldProtocol === 3 ? process.env.SP2P_TEST_V3_BINARY : process.env.SP2P_TEST_LEGACY_BINARY;
+  const oldWeb = oldProtocol === 3 ? process.env.SP2P_TEST_V3_WEB_DIR : process.env.SP2P_TEST_LEGACY_WEB_DIR;
+  const version = oldProtocol === 3 ? "original 0.5.0" : "0.4.0";
+  test.describe(oldBrowser ? `cached ${version} browser compatibility` : oldCLI ? `${version} CLI compatibility` : "automatic v3 negotiation", () => {
+    test.skip(oldCLI && !oldBinary, `Configure an unmodified ${version} CLI fixture`);
+    test.skip(oldBrowser && !oldWeb, `Configure an unmodified ${version} web fixture`);
 
-    const protocol = oldCLI || oldBrowser ? 2 : 3;
+    const protocol = oldCLI || oldBrowser ? oldProtocol : 3;
 
     test("browser sends automatically beyond a v3 credit window", async ({page,cliBin,wsUrl}) => {
       const dest = mkdtempSync(join(tmpdir(),"sp2p-legacy-browser-"));
       const content = Buffer.alloc(5*1024*1024,65);
-      if (oldBrowser) await serveLegacyBrowser(page);
+      if (oldBrowser) await serveLegacyBrowser(page, oldWeb!);
       await page.goto("/?protocol=2"); // URL parameters cannot force a downgrade.
       if (!oldBrowser) {
         await expect(page.locator(".legacy-protocol")).toHaveCount(0);
@@ -53,7 +55,7 @@ for (const [oldCLI,oldBrowser] of [[false,false],[true,false],[false,true]]) {
       const code = new URL(share!).hash.slice(1);
       const args = ["receive","-format","json","-server",wsUrl,"-output",dest];
       args.push(code);
-      const cli = spawn(oldCLI ? process.env.SP2P_TEST_LEGACY_BINARY! : cliBin,args);
+      const cli = spawn(oldCLI ? oldBinary! : cliBin,args);
       let output = "";
       cli.stdout.on("data",chunk=>{output += chunk;});
       cli.stderr.on("data",chunk=>{output += chunk;});
@@ -78,7 +80,7 @@ for (const [oldCLI,oldBrowser] of [[false,false],[true,false],[false,true]]) {
       writeFileSync(src,content);
       const args = ["send","-format","json","-server",wsUrl,"-compress","3"];
       args.push(src);
-      const cli = spawn(oldCLI ? process.env.SP2P_TEST_LEGACY_BINARY! : cliBin,args);
+      const cli = spawn(oldCLI ? oldBinary! : cliBin,args);
       let output = "", pending = "";
       const codeReady = new Promise<string>((resolve,reject)=>{
         cli.once("error",reject);
@@ -99,7 +101,7 @@ for (const [oldCLI,oldBrowser] of [[false,false],[true,false],[false,true]]) {
       try {
         const code = await codeReady;
         await page.addInitScript(() => { delete (window as any).showSaveFilePicker; });
-        if (oldBrowser) await serveLegacyBrowser(page);
+        if (oldBrowser) await serveLegacyBrowser(page, oldWeb!);
         await page.goto(`/r#${code}`);
         if (!oldBrowser) {
           await expect(page.locator(".legacy-protocol")).toHaveCount(0);

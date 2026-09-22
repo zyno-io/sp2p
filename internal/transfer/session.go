@@ -19,6 +19,16 @@ const MsgCredit byte = 0x0c
 // It is a protocol-v3 constant shared with the browser, not a tunable queue size.
 const CreditWindow uint64 = 16
 
+// Profile 1 keeps cumulative frame credits while bounding unconsumed plaintext
+// to 64 * 64 KiB = 4 MiB. Only uncompressed senders that explicitly offer it
+// receive the new encrypted control; existing v3 peers retain their limits.
+const (
+	MsgReceiveWindow       byte   = 0x0d
+	ReceiveWindowVersion   uint32 = 1
+	ReceiveWindowChunks    uint64 = 64
+	ReceiveWindowChunkSize        = 64 * 1024
+)
+
 const CompletionAckTimeout = 5 * time.Second
 
 const defaultNetworkWriteTimeout = 2 * time.Minute
@@ -45,12 +55,16 @@ type Session struct {
 	writeTimeout                       atomic.Int64
 	closeOnce                          sync.Once
 	sender                             bool
+	receiveWindow                      uint64
+	receiveChunkLimit                  int
+	metadataReceived                   bool
 }
 
 func NewSession(ctx context.Context, frw FrameReadWriter, closer io.Closer, sender bool) *Session {
 	ctx, cancel := context.WithCancelCause(ctx)
 	s := &Session{ctx: ctx, cancel: cancel, frw: frw, closer: closer, sender: sender,
-		creditChanged: make(chan struct{}, 1), frames: make(chan sessionFrame, 32)}
+		creditChanged: make(chan struct{}, 1), frames: make(chan sessionFrame, ReceiveWindowChunks+16),
+		receiveWindow: CreditWindow, receiveChunkLimit: MaxFrameSize}
 	if !sender {
 		if p, ok := frw.(interface{ ExpectMetadata() }); ok {
 			p.ExpectMetadata()
@@ -225,7 +239,7 @@ func (s *Session) readLoop() {
 			}
 		case MsgData:
 			s.mu.Lock()
-			valid := !s.sender && len(data) > 0 && len(data) <= MaxFrameSize && s.received-s.consumed < CreditWindow
+			valid := !s.sender && len(data) > 0 && len(data) <= s.receiveChunkLimit && s.received-s.consumed < s.receiveWindow
 			if valid {
 				s.received++
 			}
@@ -242,7 +256,29 @@ func (s *Session) readLoop() {
 				s.fail(fmt.Errorf("peer error: %s", peerError.Message))
 			}
 			return
-		case MsgMetadata, MsgDone, MsgComplete, MsgFinAck:
+		case MsgMetadata:
+			if s.metadataReceived || s.sender {
+				s.fail(fmt.Errorf("unexpected transfer metadata"))
+				return
+			}
+			s.metadataReceived = true
+			var meta Metadata
+			if err := json.Unmarshal(data, &meta); err != nil {
+				s.fail(fmt.Errorf("invalid metadata: %w", err))
+				return
+			}
+			if meta.ReceiveWindow == ReceiveWindowVersion && meta.Compression == "" {
+				s.receiveWindow = ReceiveWindowChunks
+				s.receiveChunkLimit = ReceiveWindowChunkSize
+				var grant [12]byte
+				binary.BigEndian.PutUint32(grant[0:4], ReceiveWindowVersion)
+				binary.BigEndian.PutUint32(grant[4:8], uint32(ReceiveWindowChunks))
+				binary.BigEndian.PutUint32(grant[8:12], ReceiveWindowChunkSize)
+				if err := s.WriteFrame(MsgReceiveWindow, grant[:]); err != nil {
+					return
+				}
+			}
+		case MsgDone, MsgComplete, MsgFinAck:
 		case MsgCancel:
 			s.fail(fmt.Errorf("peer cancelled transfer"))
 			return

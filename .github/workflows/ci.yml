@@ -115,6 +115,12 @@ jobs:
           ref: 7a616cd5ac1b51f7ad8d1b1de85a91780fff1ccb
           path: .compat-v0.4.0
           persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Existing v3 peers must keep working when v0.5.0 is re-released.
+          ref: d303e1a947ca8ef6bb000dfe8660e7a05c7738cd
+          path: .compat-v0.5.0
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -128,6 +134,12 @@ jobs:
           npm --prefix web run build
           go build -o bin/sp2p ./cmd/sp2p
           go build -o bin/sp2p-server ./cmd/sp2p-server
+      - name: Build unmodified v3 fixtures
+        working-directory: .compat-v0.5.0
+        run: |
+          npm --prefix web ci --ignore-scripts
+          npm --prefix web run build
+          go build -o bin/sp2p ./cmd/sp2p
       - run: npm --prefix web ci
       - run: npm --prefix web run build
       - name: Check CLI and server version matrix
@@ -141,6 +153,8 @@ jobs:
         env:
           SP2P_TEST_LEGACY_BINARY: ${{ github.workspace }}/.compat-v0.4.0/bin/sp2p
           SP2P_TEST_LEGACY_WEB_DIR: ${{ github.workspace }}/.compat-v0.4.0/web/dist
+          SP2P_TEST_V3_BINARY: ${{ github.workspace }}/.compat-v0.5.0/bin/sp2p
+          SP2P_TEST_V3_WEB_DIR: ${{ github.workspace }}/.compat-v0.5.0/web/dist
 
   build:
     if: github.event_name == 'push'
