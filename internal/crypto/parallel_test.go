@@ -110,10 +110,13 @@ func TestWebRTCLaneKeys(t *testing.T) {
 			t.Fatalf("%s differs from browser vector", label)
 		}
 	}
-	for _, id := range []int{0, 4, -1} {
+	for _, id := range []int{0, 8, -1} {
 		if _, err := DeriveWebRTCLaneKeys(confirm, nonce, id); err == nil {
 			t.Fatalf("accepted lane %d", id)
 		}
+	}
+	if _, err := DeriveWebRTCLaneKeys(confirm, nonce, 7); err != nil {
+		t.Fatalf("rejected lane 7: %v", err)
 	}
 	if _, err := DeriveWebRTCLaneKeys(confirm[:31], nonce, 1); err == nil {
 		t.Fatal("accepted short key")

@@ -23,7 +23,7 @@ type Config struct {
 	AllowRelay      bool   `yaml:"allow-relay"`
 	Output          string `yaml:"output"`
 	Verbose         bool   `yaml:"verbose"`
-	Parallel        *int   `yaml:"parallel"` // connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)
+	Parallel        *int   `yaml:"parallel"` // connections: 0=auto, 1=single, 2-6=request count (WebRTC auto uses up to 8)
 	MaxReceiveBytes uint64 `yaml:"max-receive-bytes"`
 	MaxExtractBytes uint64 `yaml:"max-extract-bytes"`
 }

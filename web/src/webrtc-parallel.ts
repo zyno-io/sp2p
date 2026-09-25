@@ -2,20 +2,53 @@
 
 import { base64ToBytes, bytesToBase64, deriveWebRTCLaneKeys, EncryptedChannel, type DerivedKeys } from "./crypto";
 import { confirmDataChannel } from "./handshake";
-import { EncryptedFrameIO, FrameBudget, ParallelFrameIO, type FrameIO } from "./frame-io";
+import { EncryptedFrameIO, FrameBudget, ParallelFrameIO, PARALLEL_MAX_LANES, type FrameIO } from "./frame-io";
 import { log } from "./log";
+import { addBufferHint } from "./webrtc";
 
 const CONTROL = 0x0e;
 export const PARALLEL_MIN_BYTES = 64 * 1024 * 1024;
+export { PARALLEL_MAX_LANES };
+
+// The largest lane count already-released peers understand in the plain
+// hello.count field. A sender wanting more lanes caps count at this value
+// and carries the real request in max instead, so old receivers — which
+// ignore unknown JSON fields — still see a valid count <= 4.
+const PARALLEL_LEGACY_MAX_LANES = 4;
 
 interface Setup {
   step: string;
   version?: number;
   count?: number;
+  max?: number;
   nonce?: string;
   id?: number;
   sdp?: string;
   mask?: number;
+}
+
+// Splits a desired lane count into the hello step/max fields. Requests at or
+// below the legacy limit are sent exactly as before, with max omitted;
+// larger requests keep count at the legacy cap and carry the real request in
+// max, so old receivers still see a plain, understood count.
+function helloCountAndMax(count: number): { count: number; max?: number } {
+  if (count > PARALLEL_LEGACY_MAX_LANES) return { count: PARALLEL_LEGACY_MAX_LANES, max: count };
+  return { count };
+}
+
+// Validates an incoming hello and returns the lane count actually being
+// requested. The existing 1..4 count bounds and nonce length always apply;
+// an optional max of 5..PARALLEL_MAX_LANES is only valid alongside the
+// legacy cap count, and then replaces it as the request.
+function resolveHelloRequest(hello: Setup): number {
+  if (hello.version !== 1 || !Number.isInteger(hello.count) || hello.count! < 1 || hello.count! > PARALLEL_LEGACY_MAX_LANES || typeof hello.nonce !== "string") {
+    throw new Error("Invalid WebRTC parallel offer");
+  }
+  if (!hello.max) return hello.count!;
+  if (!Number.isInteger(hello.max) || hello.max < PARALLEL_LEGACY_MAX_LANES + 1 || hello.max > PARALLEL_MAX_LANES || hello.count !== PARALLEL_LEGACY_MAX_LANES) {
+    throw new Error("Invalid WebRTC parallel offer");
+  }
+  return hello.max;
 }
 
 class Lane {
@@ -58,7 +91,7 @@ class Lane {
       if (this.pc.connectionState === "failed" || this.pc.connectionState === "closed") this.close();
     };
     try {
-      if (sender) attach(this.pc.createDataChannel("sp2p", { ordered: true }));
+      if (sender) { attach(this.pc.createDataChannel("sp2p", { ordered: true })); addBufferHint(this.pc); }
       else this.pc.ondatachannel = event => attach(event.channel);
     } catch (error) {
       // Construction can fail after the peer connection has allocated native
@@ -122,7 +155,7 @@ export async function negotiateParallelWebRTC(
   keys: DerivedKeys, senderPub: Uint8Array, receiverPub: Uint8Array,
   sender: boolean, count: number, onStage: (stage: string) => void = () => {},
 ): Promise<FrameIO> {
-  if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("Invalid WebRTC lane count");
+  if (!Number.isInteger(count) || count < 1 || count > PARALLEL_MAX_LANES) throw new Error("Invalid WebRTC lane count");
   const budget = new FrameBudget();
   const primary = new EncryptedFrameIO(dc, enc, budget, pc, initial);
   primary.highWater = 8 * 1024 * 1024;
@@ -158,16 +191,16 @@ export async function negotiateParallelWebRTC(
     let nonce: Uint8Array;
     if (sender) {
       nonce = crypto.getRandomValues(new Uint8Array(32));
-      await write({ step: "hello", version: 1, count, nonce: bytesToBase64(nonce) });
+      await write({ step: "hello", version: 1, ...helloCountAndMax(count), nonce: bytesToBase64(nonce) });
       const accepted = await read("accept");
       if (!Number.isInteger(accepted.count) || accepted.count! < 1 || accepted.count! > count) throw new Error("Invalid WebRTC accepted count");
       count = accepted.count!;
     } else {
       const hello = await read("hello");
-      if (hello.version !== 1 || !Number.isInteger(hello.count) || hello.count! < 1 || hello.count! > 4 || typeof hello.nonce !== "string") throw new Error("Invalid WebRTC parallel offer");
-      nonce = base64ToBytes(hello.nonce);
+      const requested = resolveHelloRequest(hello);
+      nonce = base64ToBytes(hello.nonce!);
       if (nonce.length !== 32) throw new Error("Invalid WebRTC setup nonce");
-      count = Math.min(count, hello.count!);
+      count = Math.min(count, requested);
       await write({ step: "accept", count });
     }
     if (expired) throw new Error("Parallel WebRTC setup timed out");

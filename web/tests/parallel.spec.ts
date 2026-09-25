@@ -5,7 +5,7 @@ import { EncryptedChannel, deriveWebRTCLaneKeys } from "../src/crypto";
 import { EncryptedFrameIO, FrameBudget, ParallelFrameIO } from "../src/frame-io";
 import { DataChannelTransport, receiveFile, sendFile } from "../src/transfer";
 import { createHash } from "node:crypto";
-import { negotiateParallelWebRTC } from "../src/webrtc-parallel";
+import { negotiateParallelWebRTC, PARALLEL_MAX_LANES } from "../src/webrtc-parallel";
 import type { DerivedKeys } from "../src/crypto";
 
 class Channel extends EventTarget {
@@ -172,13 +172,18 @@ for (const hello of [
   { step: "hello", version: 1, count: 5, nonce: "AA==" },
   { step: "hello", version: 1, count: 1.5, nonce: "AA==" },
   { step: "hello", version: 1, count: 4, nonce: "AA==" },
+  // max must be 5..PARALLEL_MAX_LANES, and only alongside the legacy cap count.
+  // These use a valid 32-byte nonce so only max can cause the rejection.
+  { step: "hello", version: 1, count: 4, max: PARALLEL_MAX_LANES + 1, nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" },
+  { step: "hello", version: 1, count: 4, max: 4, nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" },
+  { step: "hello", version: 1, count: 3, max: PARALLEL_MAX_LANES, nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" },
 ]) {
   test(`encrypted WebRTC setup rejects malformed offer ${JSON.stringify(hello)}`, async () => {
     const p = await setup(1);
     const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);
     const pc = { close() {} } as RTCPeerConnection;
     const result = negotiateParallelWebRTC(p.inbound[0] as unknown as RTCDataChannel, pc, new EncryptedChannel(key, key), [], {} as DerivedKeys, new Uint8Array(32), new Uint8Array(32), false, 4);
-    const rejected = expect(result).rejects.toThrow();
+    const rejected = "max" in hello ? expect(result).rejects.toThrow("Invalid WebRTC parallel offer") : expect(result).rejects.toThrow();
     await p.send[0].writeFrame(0x0e, json(hello));
     await rejected;
     expect(p.inbound[0].readyState).toBe("closed");
@@ -217,6 +222,84 @@ test("one-lane encrypted negotiation preserves primary nonce counters", async ()
     const heartbeat = await p.send[0].readFrame();
     expect(heartbeat.msgType).toBe(8); heartbeat.release?.();
   } finally { receiver.close(); for (const lane of [...p.send, ...p.receive]) lane.close(); }
+});
+
+test("legacy sender's plain hello (no max) negotiates its requested count with a new receiver", async () => {
+  const p = await setup(1);
+  const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);
+  const read = async () => { const frame = await p.send[0].readFrame(); frame.release?.(); return JSON.parse(new TextDecoder().decode(frame.data)); };
+  // The receiver's own limit is the new PARALLEL_MAX_LANES; a legacy sender's
+  // plain count: 4 (no max) must still land on 4, not be raised to 8.
+  const result = negotiateParallelWebRTC(p.inbound[0] as unknown as RTCDataChannel,
+    { close() {}, getConfiguration: () => ({}) } as RTCPeerConnection, new EncryptedChannel(key, key), [],
+    { confirm: new Uint8Array(32) } as DerivedKeys, new Uint8Array(32), new Uint8Array(32), false, PARALLEL_MAX_LANES);
+  try {
+    await p.send[0].writeFrame(0x0e, json({ step: "hello", version: 1, count: 4, nonce: Buffer.alloc(32).toString("base64") }));
+    const accept = await read();
+    expect(accept).toEqual({ step: "accept", count: 4 });
+    // The real call is the receiver (sender: false): it reads offer and
+    // writes answer, so the fake peer — playing the sender — does the reverse.
+    for (let id = 1; id < 4; id++) await p.send[0].writeFrame(0x0e, json({ step: "offer", id, sdp: "" }));
+    for (let id = 1; id < 4; id++) { const answer = await read(); expect(answer).toEqual({ step: "answer", id, sdp: "" }); }
+    // The sender writes ready and commit first; the receiver replies to each.
+    await p.send[0].writeFrame(0x0e, json({ step: "ready", mask: 0 }));
+    const ready = await read(); expect(ready.mask).toBe(0);
+    await p.send[0].writeFrame(0x0e, json({ step: "commit", mask: 0 }));
+    const committed = await read(); expect(committed.mask).toBe(0);
+    const primary = await result;
+    expect(primary.diagnostics().connections).toBe(1);
+    primary.close();
+  } finally { for (const lane of [...p.send, ...p.receive]) lane.close(); }
+});
+
+test("new sender's 8-lane hello caps count at 4 and carries max, matching a legacy receiver's plain accept", async () => {
+  const p = await setup(1);
+  const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);
+  const read = async () => { const frame = await p.receive[0].readFrame(); frame.release?.(); return JSON.parse(new TextDecoder().decode(frame.data)); };
+  const result = negotiateParallelWebRTC(p.outbound[0] as unknown as RTCDataChannel,
+    { close() {}, getConfiguration: () => ({}) } as RTCPeerConnection, new EncryptedChannel(key, key), [],
+    { confirm: new Uint8Array(32) } as DerivedKeys, new Uint8Array(32), new Uint8Array(32), true, PARALLEL_MAX_LANES);
+  try {
+    const hello = await read();
+    expect(hello).toMatchObject({ step: "hello", version: 1, count: 4, max: PARALLEL_MAX_LANES });
+    // A legacy receiver's JSON type has no max field, so it only ever sees
+    // hello.count and grants at most its own legacy limit.
+    await p.receive[0].writeFrame(0x0e, json({ step: "accept", count: 4 }));
+    for (let id = 1; id < 4; id++) { const offer = await read(); expect(offer).toEqual({ step: "offer", id, sdp: "" }); }
+    for (let id = 1; id < 4; id++) await p.receive[0].writeFrame(0x0e, json({ step: "answer", id, sdp: "" }));
+    const ready = await read(); expect(ready.mask).toBe(0);
+    await p.receive[0].writeFrame(0x0e, json({ step: "ready", mask: 0 }));
+    const commit = await read(); expect(commit.mask).toBe(0);
+    await p.receive[0].writeFrame(0x0e, json({ step: "committed", mask: 0 }));
+    const primary = await result;
+    expect(primary.diagnostics().connections).toBe(1);
+    primary.close();
+  } finally { for (const lane of [...p.send, ...p.receive]) lane.close(); }
+});
+
+test("new↔new negotiation runs a full 8-lane hello/max cycle and falls back to the primary without native WebRTC", async () => {
+  const p = await setup(1);
+  const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);
+  const keys = { confirm: new Uint8Array(32) } as DerivedKeys;
+  const senderPub = new Uint8Array(32), receiverPub = new Uint8Array(32);
+  const pc = () => ({ close() {}, getConfiguration: () => ({}) }) as RTCPeerConnection;
+  const senderStages: string[] = [], receiverStages: string[] = [];
+  const sending = negotiateParallelWebRTC(p.outbound[0] as unknown as RTCDataChannel, pc(), new EncryptedChannel(key, key), [],
+    keys, senderPub, receiverPub, true, PARALLEL_MAX_LANES, stage => senderStages.push(stage));
+  const receiving = negotiateParallelWebRTC(p.inbound[0] as unknown as RTCDataChannel, pc(), new EncryptedChannel(key, key), [],
+    keys, senderPub, receiverPub, false, PARALLEL_MAX_LANES, stage => receiverStages.push(stage));
+  const [sender, receiver] = await Promise.all([sending, receiving]);
+  try {
+    // Without a native RTCPeerConnection every extra lane fails to construct,
+    // so both sides settle back on their own primary connection — proving the
+    // full hello(count=4,max=8)/accept(8)/offer.../ready/commit cycle for ids
+    // 1..7 completes cleanly end to end.
+    expect(sender.diagnostics().connections).toBe(1);
+    expect(receiver.diagnostics().connections).toBe(1);
+    const gathering = `Gathering addresses for ${PARALLEL_MAX_LANES} independent WebRTC connections`;
+    expect(senderStages).toContain(gathering);
+    expect(receiverStages).toContain(gathering);
+  } finally { sender.close(); receiver.close(); }
 });
 
 for (const attack of ["primary-bit", "outside-mask", "fractional-mask", "overflow-mask", "commit", "early-data"] as const) {

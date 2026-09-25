@@ -7,6 +7,10 @@ const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_FRAMES = 256;
 const DATA = 0x02, DONE = 0x04, ERROR = 0x06, CANCEL = 0x09, METADATA = 0x01;
 
+// Defined here (not in webrtc-parallel.ts, which imports this module) to
+// avoid a circular import. Re-exported from webrtc-parallel.ts for callers.
+export const PARALLEL_MAX_LANES = 8;
+
 export interface IOFrame {
   msgType: number;
   data: Uint8Array;
@@ -206,7 +210,7 @@ export class ParallelFrameIO implements FrameIO {
   private reading = false;
 
   constructor(readonly lanes: EncryptedFrameIO[], sender: boolean) {
-    if (lanes.length < 2 || lanes.length > 4) throw new Error("Invalid parallel lane count");
+    if (lanes.length < 2 || lanes.length > PARALLEL_MAX_LANES) throw new Error("Invalid parallel lane count");
     this.expectMetadata = !sender;
     for (let i = 0; i < lanes.length; i++) void this.readLane(i);
   }

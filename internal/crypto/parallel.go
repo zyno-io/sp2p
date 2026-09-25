@@ -17,7 +17,7 @@ import (
 // keys to this one negotiation; indices are the original lane IDs, not the
 // positions of surviving lanes after partial setup.
 func DeriveWebRTCLaneKeys(confirm, setupNonce []byte, index int) (*DerivedKeys, error) {
-	if len(confirm) != 32 || len(setupNonce) != 32 || index < 1 || index > 3 {
+	if len(confirm) != 32 || len(setupNonce) != 32 || index < 1 || index > 7 {
 		return nil, fmt.Errorf("invalid WebRTC lane key parameters")
 	}
 	derive := func(label string) ([]byte, error) {

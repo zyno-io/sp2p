@@ -5,6 +5,20 @@
 import { log } from "./log";
 import { SignalClient } from "./signal";
 
+// An inactive video transceiver sends and receives no media, but Chrome then
+// requests 1 MiB receive / 256 KiB send UDP socket buffers for the bundled
+// transport instead of 64 KiB. DataChannel-only connections otherwise drop
+// bursts at the receiver's socket, which SCTP recovers from slowly at high RTT.
+// max-bundle keeps a relay retry to one TURN allocation. Firefox is excluded:
+// it holds extra allocations for the second section, and its max-bundle offers
+// mark data bundle-only, which older pion peers cannot answer.
+const BUFFER_HINT = typeof navigator === "undefined" || !/\bFirefox\//.test(navigator.userAgent);
+
+export function addBufferHint(pc: RTCPeerConnection): void {
+  if (!BUFFER_HINT) return;
+  try { pc.addTransceiver("video", { direction: "inactive" }); } catch { /* optional */ }
+}
+
 const DEFAULT_STUN_SERVERS = [
   "stun:stun.l.google.com:19302",
   "stun:stun1.l.google.com:19302",
@@ -87,6 +101,7 @@ export function establishWebRTC(
     log(`WebRTC: creating peer connection with ${rtcIceServers.length} ICE servers (isSender=${isSender})`);
     const pc = new RTCPeerConnection({
       iceServers: rtcIceServers,
+      ...(BUFFER_HINT ? { bundlePolicy: "max-bundle" as const } : {}),
     });
 
     let settled = false;
@@ -193,6 +208,7 @@ export function establishWebRTC(
         ordered: true,
       });
       dc.binaryType = "arraybuffer";
+      addBufferHint(pc);
 
       dc.onopen = () => {
         log("WebRTC: data channel open");

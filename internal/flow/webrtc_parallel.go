@@ -16,7 +16,14 @@ import (
 )
 
 const webRTCParallelMessage byte = 0x0e
-const webRTCParallelLimit = 4
+const webRTCParallelLimit = 8
+
+// webRTCParallelLegacyLimit is the largest lane count already-released peers
+// understand in the plain hello.count field. A sender wanting more lanes
+// caps count at this value and carries the real request in Max instead, so
+// old receivers — which ignore unknown JSON fields — still see a valid
+// count <= 4 and negotiate normally.
+const webRTCParallelLegacyLimit = 4
 
 // This control is read only during explicitly opted-in, authenticated v3
 // setup, before Session takes ownership of reads and receiver credits. SDP is
@@ -25,10 +32,14 @@ type webRTCParallelControl struct {
 	Step    string `json:"step"`
 	Version int    `json:"version,omitempty"`
 	Count   int    `json:"count,omitempty"`
-	Nonce   []byte `json:"nonce,omitempty"`
-	ID      int    `json:"id,omitempty"`
-	SDP     string `json:"sdp,omitempty"`
-	Mask    uint32 `json:"mask,omitempty"`
+	// Max carries a request above webRTCParallelLegacyLimit. It is only ever
+	// sent alongside Count == webRTCParallelLegacyLimit, and only on hello.
+	// Old receivers ignore this unknown field and accept the plain count.
+	Max   int    `json:"max,omitempty"`
+	Nonce []byte `json:"nonce,omitempty"`
+	ID    int    `json:"id,omitempty"`
+	SDP   string `json:"sdp,omitempty"`
+	Mask  uint32 `json:"mask,omitempty"`
 }
 
 func parseWebRTCParallelControl(kind byte, data []byte, step string) (webRTCParallelControl, error) {
@@ -40,6 +51,51 @@ func parseWebRTCParallelControl(kind byte, data []byte, step string) (webRTCPara
 		return value, fmt.Errorf("invalid WebRTC setup step")
 	}
 	return value, nil
+}
+
+// helloCountAndMax splits a desired lane count into the hello.count and
+// hello.max fields. Requests at or below the legacy limit are sent exactly
+// as before, with Max omitted; larger requests keep count at the legacy cap
+// and carry the real request in Max, so old receivers — which ignore
+// unknown fields — still see a plain, understood count.
+func helloCountAndMax(count int) (helloCount, helloMax int) {
+	if count > webRTCParallelLegacyLimit {
+		return webRTCParallelLegacyLimit, count
+	}
+	return count, 0
+}
+
+// webRTCParallelHello builds the sender's hello for a desired lane count.
+func webRTCParallelHello(count int, nonce []byte) webRTCParallelControl {
+	helloCount, helloMax := helloCountAndMax(count)
+	return webRTCParallelControl{Step: "hello", Version: 1, Count: helloCount, Max: helloMax, Nonce: nonce}
+}
+
+// acceptWebRTCParallelHello validates a hello and returns the lane count a
+// receiver with the given limit accepts.
+func acceptWebRTCParallelHello(hello webRTCParallelControl, limit int) (int, error) {
+	requested, err := resolveHelloRequest(hello)
+	if err != nil {
+		return 0, err
+	}
+	return min(limit, requested), nil
+}
+
+// resolveHelloRequest validates an incoming hello and returns the lane count
+// actually being requested. The existing 1..4 count bounds and nonce length
+// always apply; an optional Max of 5..8 is only valid alongside the legacy
+// cap count and then replaces it as the request.
+func resolveHelloRequest(hello webRTCParallelControl) (int, error) {
+	if hello.Version != 1 || hello.Count < 1 || hello.Count > webRTCParallelLegacyLimit || len(hello.Nonce) != 32 {
+		return 0, fmt.Errorf("invalid WebRTC parallel offer")
+	}
+	if hello.Max == 0 {
+		return hello.Count, nil
+	}
+	if hello.Max < webRTCParallelLegacyLimit+1 || hello.Max > webRTCParallelLimit || hello.Count != webRTCParallelLegacyLimit {
+		return 0, fmt.Errorf("invalid WebRTC parallel offer")
+	}
+	return hello.Max, nil
 }
 
 func negotiateWebRTC(ctx context.Context, primary *conn.WebRTCConn, encrypted *crypto.EncryptedStream,
@@ -81,7 +137,7 @@ func negotiateWebRTC(ctx context.Context, primary *conn.WebRTCConn, encrypted *c
 		if _, err = rand.Read(nonce); err != nil {
 			return nil, err
 		}
-		if err = write(webRTCParallelControl{Step: "hello", Version: 1, Count: count, Nonce: nonce}); err != nil {
+		if err = write(webRTCParallelHello(count, nonce)); err != nil {
 			return nil, err
 		}
 		accepted, e := read("accept")
@@ -97,10 +153,10 @@ func negotiateWebRTC(ctx context.Context, primary *conn.WebRTCConn, encrypted *c
 		if e != nil {
 			return nil, e
 		}
-		if hello.Version != 1 || hello.Count < 1 || hello.Count > webRTCParallelLimit || len(hello.Nonce) != 32 {
-			return nil, fmt.Errorf("invalid WebRTC parallel offer")
+		count, e = acceptWebRTCParallelHello(hello, count)
+		if e != nil {
+			return nil, e
 		}
-		count = min(count, hello.Count)
 		nonce = hello.Nonce
 		if err = write(webRTCParallelControl{Step: "accept", Count: count}); err != nil {
 			return nil, err

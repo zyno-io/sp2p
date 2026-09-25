@@ -167,7 +167,7 @@ tar czf - src/ | sp2p send -name src.tar.gz -
 | `-compress` | `3` | zstd compression level (0=disabled, 1-9) |
 | `-allow-relay` | `false` | Allow TURN relay without prompting (see [TURN Relay](#turn-relay)) |
 | `-transport` | `auto` | Transport mode: `auto`, `tcp`, or `webrtc` |
-| `-parallel` | `0` | Parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC maximum 4) |
+| `-parallel` | `0` | Parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC auto uses up to 8) |
 | `-v` | `false` | Verbose diagnostic output |
 | `-format` | `human` | Output format: `human` or JSON Lines (`json`) |
 | `-event-output` | `stdout` | JSON event stream: `stdout` or `stderr` |
@@ -197,7 +197,7 @@ sp2p receive -format json -event-output stderr -stdout abc123-xYz456 > received.
 | `-max-extract-bytes` | `0` | Expanded archive byte limit; 0 means 1 TiB |
 | `-allow-relay` | `false` | Allow TURN relay without prompting (see [TURN Relay](#turn-relay)) |
 | `-transport` | `auto` | Transport mode: `auto`, `tcp`, or `webrtc` |
-| `-parallel` | `0` | Parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC maximum 4) |
+| `-parallel` | `0` | Parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC auto uses up to 8) |
 | `-v` | `false` | Verbose diagnostic output |
 | `-format` | `human` | Output format: `human` or JSON Lines (`json`) |
 | `-event-output` | `stdout` | JSON event stream: `stdout` or `stderr` |
@@ -360,7 +360,7 @@ allow-relay: false
 # Transport mode (auto, tcp, webrtc)
 transport: auto
 
-# Parallel connections (0=auto, 1=single, 2-6=request; WebRTC max 4)
+# Parallel connections (0=auto, 1=single, 2-6=request; WebRTC auto uses up to 8)
 parallel: 0
 
 # Default output directory for received files
@@ -563,7 +563,7 @@ WebRTC data channels carry SCTP over DTLS/UDP. Browser-to-browser transfers use 
 
 Direct TCP uses the OS networking stack, and SP2P can use parallel TCP connections for large CLI-to-CLI transfers. Browsers cannot use SP2P's direct TCP transport. For a fair comparison, force `-transport webrtc` on the CLI and use the same payload and compression settings.
 
-Updated peers also negotiate up to four independently authenticated WebRTC connections for files of at least 64 MiB. This applies to browser/browser and browser/CLI transfers, not just CLI/CLI. Data is scheduled across available connections with one aggregate receive window; old peers and unavailable extra connections retain a single connection. CLI `-parallel 1` disables this extension. See [parallel WebRTC negotiation](docs/parallel-webrtc.md) for the wire protocol and bounds, and the [WAN investigation](docs/browser-wan-benchmark.md) for measured results and limitations.
+Updated peers also negotiate up to eight independently authenticated WebRTC connections for files of at least 64 MiB. Peers that only know the earlier four-lane limit still interoperate: the extra request rides in an additional field that older peers ignore, capping the negotiated count at four in that case. This applies to browser/browser and browser/CLI transfers, not just CLI/CLI. Data is scheduled across available connections with one aggregate receive window; old peers and unavailable extra connections retain a single connection. CLI `-parallel 1` disables this extension. See [parallel WebRTC negotiation](docs/parallel-webrtc.md) for the wire protocol and bounds, and the [WAN investigation](docs/browser-wan-benchmark.md) for measured results and limitations.
 
 Updated browser senders use 64 KiB chunks and offer a 4 MiB receive window to updated peers. Existing v3 receivers retain their 16-frame limit, giving those browser sends a 1 MiB window; v2 compatibility remains automatic. An authenticated receiver grant is required before the sender expands its window. The metadata offer, grant encoding, and bounds are described in [receive-window negotiation](docs/receive-window.md).
 

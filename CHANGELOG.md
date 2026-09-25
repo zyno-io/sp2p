@@ -6,6 +6,21 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-25
+
+### Upgrade notes
+
+- No configuration changes are required. Updated peers negotiate up to eight WebRTC connections; peers still on 0.5.0 keep four, in either direction. Browser↔browser transfers benefit as soon as the site is updated. Released receivers also get the socket-buffer improvement when the sender is updated.
+
+### Performance
+
+- Offers from Chromium- and WebKit-based browsers now include a video section that never carries media. Chrome then uses 1 MiB receive / 256 KiB send UDP socket buffers instead of 64 KiB, which avoids receiver burst drops and slow SCTP recovery at high RTT. The CLI adds the same section when it sends to a browser. Firefox senders and CLI↔CLI transfers are unchanged. With 150 ms of added delay, measured browser↔browser whole-file rates rose from about 4–5.5 MB/s to 8–10 MB/s, or 11–12 MB/s with more CPU on the remote browser. See [the high-RTT investigation](https://github.com/zyno-io/sp2p/blob/v0.6.0/docs/browser-high-rtt.md).
+- Negotiate up to eight authenticated WebRTC connections, up from four, for large browser and CLI transfers. The encrypted setup `hello` carries the larger request in an optional `max` field that older peers ignore. See [parallel WebRTC negotiation](https://github.com/zyno-io/sp2p/blob/v0.6.0/docs/parallel-webrtc.md).
+
+### Added
+
+- WAN test tooling: an experiment bundle builder, a numeric JSONL summarizer, per-connection native statistics, and the option to substitute the bundle on only the sender or receiver for mixed-version runs.
+
 ## [0.5.0] - 2026-09-21
 
 ### Upgrade notes
