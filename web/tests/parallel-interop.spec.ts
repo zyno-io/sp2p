@@ -114,8 +114,8 @@ function watchCLI(child: ChildProcess) {
   return { code, exited, counts };
 }
 
-for (const blockedExtras of [0, 1, 3]) {
-  test(`browser parallel WebRTC verifies ${4 - blockedExtras} agreed lanes`, async ({ browser, baseURL }) => {
+for (const blockedExtras of [0, 1, 3, 7]) {
+  test(`browser parallel WebRTC verifies ${8 - blockedExtras} agreed lanes`, async ({ browser, baseURL }) => {
     const sender = await browser.newPage({ baseURL }), receiver = await browser.newPage({ baseURL });
     const senderCounts = observeConnections(sender), receiverCounts = observeConnections(receiver);
     await receiveToDisk(receiver);
@@ -136,7 +136,7 @@ for (const blockedExtras of [0, 1, 3]) {
       await receiver.locator(".confirm-btn").click();
       await expect(sender.locator(".complete")).toBeVisible({ timeout: 60000 });
       await expect(receiver.locator(".complete")).toBeVisible({ timeout: 60000 });
-      expect(senderCounts).toEqual([4 - blockedExtras]);
+      expect(senderCounts).toEqual([8 - blockedExtras]);
       expect(receiverCounts).toEqual(senderCounts);
       await verifyDisk(receiver);
     } finally { await sender.close(); await receiver.close(); }
@@ -153,7 +153,7 @@ test("browser parallel WebRTC sender interoperates with CLI receiver", async ({ 
     await expect(page.locator(".complete")).toBeVisible({ timeout: 60000 });
     const status = await cli.exited;
     expect(status).toBe(0);
-    expect(counts).toEqual([4]); expect(cli.counts).toEqual([4]);
+    expect(counts).toEqual([8]); expect(cli.counts).toEqual([8]);
     const received = readFileSync(join(dest, "parallel.bin"));
     expect(createHash("sha256").update(received).digest("hex")).toBe(expectedHash);
   } finally { child.kill(); }
@@ -174,7 +174,7 @@ for (const compression of [0, 3]) {
       await expect(page.locator(".complete")).toBeVisible({ timeout: 60000 });
       const status = await cli.exited;
       expect(status).toBe(0);
-      expect(counts).toEqual([4]); expect(cli.counts).toEqual([4]);
+      expect(counts).toEqual([8]); expect(cli.counts).toEqual([8]);
       await verifyDisk(page);
     } finally { child.kill(); }
   });

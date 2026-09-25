@@ -29,7 +29,7 @@ type ReceiveConfig struct {
 	RelayOK         bool      // Allow TURN relay without prompting
 	ClientVersion   string    // Client version for update check
 	Transport       string    // conn.TransportAuto, conn.TransportTCP, or conn.TransportWebRTC
-	Parallel        int       // connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)
+	Parallel        int       // connections: 0=auto, 1=single, 2-6=request count (WebRTC auto uses up to 8)
 	MaxReceiveBytes uint64    // zero = 1 TiB
 	MaxExtractBytes uint64    // zero = 1 TiB
 }

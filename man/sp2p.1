@@ -141,10 +141,11 @@ Default:
 .TP
 .BI \-parallel " count"
 Parallel connections: 0 for automatic, 1 for a single connection, or 2\(en6
-to request a count. WebRTC uses at most four independent authenticated
+to request a count. WebRTC uses at most eight independent authenticated
 connections when both peers support them; automatic mode enables them for
-files of at least 64 MiB. Older peers retain a single WebRTC connection.
-Default: 0.
+files of at least 64 MiB. Peers limited to the earlier four-lane cap still
+interoperate, capped at four; peers without parallel WebRTC support retain a
+single connection. Default: 0.
 .TP
 .B \-v
 Verbose diagnostic output.
@@ -211,10 +212,11 @@ Default:
 .TP
 .BI \-parallel " count"
 Parallel connections: 0 for automatic, 1 for a single connection, or 2\(en6
-to request a count. WebRTC uses at most four independent authenticated
+to request a count. WebRTC uses at most eight independent authenticated
 connections when both peers support them; automatic mode enables them for
-files of at least 64 MiB. Older peers retain a single WebRTC connection.
-Default: 0.
+files of at least 64 MiB. Peers limited to the earlier four-lane cap still
+interoperate, capped at four; peers without parallel WebRTC support retain a
+single connection. Default: 0.
 .TP
 .B \-v
 Verbose diagnostic output.
@@ -680,7 +682,7 @@ allow-relay: false
 # Transport mode (auto, tcp, webrtc)
 transport: auto
 
-# Parallel connections (0=auto, 1=single, 2-6=request; WebRTC max 4)
+# Parallel connections (0=auto, 1=single, 2-6=request; WebRTC auto uses up to 8)
 parallel: 0
 
 # Default output directory for received files

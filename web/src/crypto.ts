@@ -22,7 +22,7 @@ export interface DerivedKeys {
 // binds both peers and the session; the fresh encrypted setup nonce and lane
 // index keep additional connections independent from one another and TCP.
 export async function deriveWebRTCLaneKeys(confirm: Uint8Array, setupNonce: Uint8Array, index: number): Promise<DerivedKeys> {
-  if (confirm.length !== 32 || setupNonce.length !== 32 || !Number.isInteger(index) || index < 1 || index > 3) throw new Error("Invalid WebRTC lane key parameters");
+  if (confirm.length !== 32 || setupNonce.length !== 32 || !Number.isInteger(index) || index < 1 || index > 7) throw new Error("Invalid WebRTC lane key parameters");
   const source = await crypto.subtle.importKey("raw", bufferSource(confirm), "HKDF", false, ["deriveBits"]);
   const derive = async (label: string) => {
     const info = new TextEncoder().encode(`sp2p/v3/webrtc/lane/${index}/${label}`);

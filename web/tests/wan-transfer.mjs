@@ -20,7 +20,7 @@ const timeout = Number(process.env.SP2P_WAN_TIMEOUT_MS || 1_800_000);
 const cap = Number(process.env.SP2P_WAN_MESSAGE_CAP || 0);
 const variant = process.env.SP2P_WAN_VARIANT || "released";
 const expectedLanes = Number(process.env.SP2P_WAN_EXPECT_LANES || 0);
-if (!Number.isInteger(expectedLanes) || expectedLanes < 0 || expectedLanes > 4) throw new Error("Invalid expected lane count");
+if (!Number.isInteger(expectedLanes) || expectedLanes < 0 || expectedLanes > 8) throw new Error("Invalid expected lane count");
 if (!/^[a-zA-Z0-9_-]+$/.test(variant)) throw new Error("Use a simple variant name");
 if (!Number.isSafeInteger(size) || size <= 0 || size > 1_000_000_000) throw new Error("Use a file size between 1 byte and 1 GB");
 if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("Invalid observation timeout");
@@ -65,6 +65,7 @@ const remote = await chromium.connectOverCDP(process.env.REMOTE_CDP).catch(async
   throw error;
 });
 const reverse = process.env.SP2P_WAN_REVERSE === "1";
+if (process.env.SP2P_WAN_ASSETS_ROLE && !["sender", "receiver"].includes(process.env.SP2P_WAN_ASSETS_ROLE)) throw new Error("SP2P_WAN_ASSETS_ROLE must be sender or receiver");
 const senderContext = await (reverse ? remote : local).newContext();
 const receiverContext = await (reverse ? local : remote).newContext();
 const sender = await senderContext.newPage();
@@ -78,7 +79,7 @@ try {
   for (const page of [sender, receiver]) {
     page.on("dialog", dialog => { void dialog.dismiss(); }); // No implicit relay consent.
     await page.addInitScript(({ cap }) => {
-      const probe = window.__wan = { pcs: [], dcs: [], diagnostics: null, authenticatedLanes: 1, longTasks: 0, maxLongTaskMs: 0, maxTimerLagMs: 0, maxPaintGapMs: 0, receivedWireBytes: 0, sentWireBytes: 0, sentMessages: 0, maxMessageBytes: 0 };
+      const probe = window.__wan = { pcs: [], dcs: [], channelPeers: new Map(), diagnostics: null, authenticatedLanes: 1, longTasks: 0, maxLongTaskMs: 0, maxTimerLagMs: 0, maxPaintGapMs: 0, receivedWireBytes: 0, sentWireBytes: 0, sentMessages: 0, maxMessageBytes: 0 };
       const originalLog = console.log;
       console.log = (...args) => {
         if (typeof args[0] === "string" && args[0].includes("transfer diagnostics")) probe.diagnostics = args[1];
@@ -97,8 +98,9 @@ try {
           for (const task of list.getEntries()) { probe.longTasks++; probe.maxLongTaskMs = Math.max(probe.maxLongTaskMs, task.duration); }
         }).observe({ type: "longtask", buffered: true });
       }
-      const observeChannel = dc => {
+      const observeChannel = (dc, pc) => {
         probe.dcs.push(dc);
+        probe.channelPeers.set(dc, pc);
         dc.addEventListener("message", event => { probe.receivedWireBytes += event.data.byteLength; });
         const send = dc.send.bind(dc);
         dc.send = data => {
@@ -115,12 +117,14 @@ try {
       window.RTCPeerConnection = class extends NativePeer {
         constructor(...args) {
           super(...args); probe.pcs.push(this);
-          this.addEventListener("datachannel", event => observeChannel(event.channel));
+          this.addEventListener("datachannel", event => observeChannel(event.channel, this));
         }
-        createDataChannel(...args) { const dc = super.createDataChannel(...args); observeChannel(dc); return dc; }
+        createDataChannel(...args) { const dc = super.createDataChannel(...args); observeChannel(dc, this); return dc; }
       };
     }, { cap });
-    if (process.env.SP2P_WAN_ASSETS) {
+    // Optional mixed-version checks keep the deployed bundle on the other page.
+    const assetRole = process.env.SP2P_WAN_ASSETS_ROLE;
+    if (process.env.SP2P_WAN_ASSETS && (!assetRole || (assetRole === "sender") === (page === sender))) {
       const assets = process.env.SP2P_WAN_ASSETS;
       const names = await readdir(assets);
       const bundles = names.filter(name => /^main-.*\.js$/.test(name));
@@ -140,7 +144,7 @@ try {
       return file;
     };
   });
-  await emit({ event: "start", variant, size, cap, reverse, socketBufferControl: !!process.env.SP2P_WAN_SOCKET_SHIM, localBrowser: local.version(), remoteBrowser: remote.version(), output: "OPFS disk" });
+  await emit({ event: "start", variant, size, cap, reverse, socketBufferControl: !!process.env.SP2P_WAN_SOCKET_SHIM, assetRole: process.env.SP2P_WAN_ASSETS_ROLE || "both", localBrowser: local.version(), remoteBrowser: remote.version(), output: "OPFS disk" });
   await sender.goto("https://sp2p.io/");
   if (reverse) {
     const cdp = await senderContext.newCDPSession(sender);
@@ -162,9 +166,11 @@ try {
   const sample = page => page.evaluate(async () => {
     const p = window.__wan;
     const completion = document.querySelector(".complete");
-    const result = { visibility: document.visibilityState, diagnostics: p.diagnostics, authenticatedLanes: p.authenticatedLanes, sentWireBytes: p.sentWireBytes, receivedWireBytes: p.receivedWireBytes, sentMessages: p.sentMessages, maxMessageBytes: p.maxMessageBytes, maxTimerLagMs: p.maxTimerLagMs, maxPaintGapMs: p.maxPaintGapMs, longTasks: p.longTasks, maxLongTaskMs: p.maxLongTaskMs, status: document.querySelector(".status-text")?.textContent, progress: document.querySelector(".progress-info")?.textContent, p2p: document.querySelector(".step-p2p")?.textContent, complete: !!completion && !completion.classList.contains("hidden"), error: !!document.querySelector(".error-message"), bufferedAmount: p.dcs.reduce((sum, dc) => sum + dc.bufferedAmount, 0), network: [] };
+    const result = { visibility: document.visibilityState, diagnostics: p.diagnostics, authenticatedLanes: p.authenticatedLanes, sentWireBytes: p.sentWireBytes, receivedWireBytes: p.receivedWireBytes, sentMessages: p.sentMessages, maxMessageBytes: p.maxMessageBytes, maxTimerLagMs: p.maxTimerLagMs, maxPaintGapMs: p.maxPaintGapMs, longTasks: p.longTasks, maxLongTaskMs: p.maxLongTaskMs, status: document.querySelector(".status-text")?.textContent, progress: document.querySelector(".progress-info")?.textContent, p2p: document.querySelector(".step-p2p")?.textContent, complete: !!completion && !completion.classList.contains("hidden"), error: !!document.querySelector(".error-message"), errorText: document.querySelector(".error-message")?.textContent?.slice(0, 200), bufferedAmount: p.dcs.reduce((sum, dc) => sum + dc.bufferedAmount, 0), network: [] };
     result.ice = [];
+    result.lanes = [];
     for (const pc of p.pcs.filter(pc => pc.connectionState !== "closed")) {
+      const lane = p.pcs.indexOf(pc);
       const report = await pc.getStats().catch(() => null);
       if (!report) continue; // Completion can close a connection during sampling.
       const summary = { state: pc.iceConnectionState, local: {}, remote: {}, pairs: {} };
@@ -174,10 +180,11 @@ try {
         if (group && typeof category === "string") group[category] = (group[category] || 0) + 1;
         if ((stat.type === "candidate-pair" && stat.nominated) || stat.type === "data-channel" || stat.type === "sctp-transport") {
           // Numeric statistics only: no addresses, SDP, keys, or identifiers.
-          result.network.push(Object.fromEntries(Object.entries(stat).filter(([key, value]) => key === "type" || typeof value === "number")));
+          result.network.push({ lane, ...Object.fromEntries(Object.entries(stat).filter(([key, value]) => key === "type" || typeof value === "number")) });
         }
       });
       result.ice.push(summary); // States/type counts only, never addresses or IDs.
+      result.lanes.push({ lane, bufferedBytes: p.dcs.filter(dc => p.channelPeers.get(dc) === pc).reduce((sum, dc) => sum + dc.bufferedAmount, 0) });
     }
     return result;
   });

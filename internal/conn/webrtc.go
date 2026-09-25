@@ -71,6 +71,37 @@ type WebRTCConn struct {
 	deadlineMu    sync.Mutex
 	deadlineTimer *time.Timer
 	bufferLimit   atomic.Uint64
+	// browserPeer selects the VP8-only API for extra lanes (see newOfferAPI).
+	browserPeer bool
+}
+
+// newWebRTCAPI returns the API for a connection. With a browser peer it
+// registers only VP8, so our offers can carry a video section (see
+// addBufferHint) and our answers to a browser's video section stay small
+// within the 12 KiB lane SDP limit.
+func newWebRTCAPI(se webrtc.SettingEngine, browserPeer bool) (*webrtc.API, error) {
+	if !browserPeer {
+		return webrtc.NewAPI(webrtc.WithSettingEngine(se)), nil
+	}
+	me := &webrtc.MediaEngine{}
+	if err := me.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
+		PayloadType:        96,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, fmt.Errorf("registering buffer hint codec: %w", err)
+	}
+	return webrtc.NewAPI(webrtc.WithSettingEngine(se), webrtc.WithMediaEngine(me)), nil
+}
+
+// addBufferHint adds a video section that never carries media. Chrome then
+// uses 1 MiB receive / 256 KiB send UDP socket buffers for the bundled
+// transport instead of 64 KiB, avoiding burst drops at a browser receiver.
+// Pion only supports track-less transceivers as recvonly; a browser without
+// a track answers inactive.
+func addBufferHint(pc *webrtc.PeerConnection) error {
+	_, err := pc.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly})
+	return err
 }
 
 // EstablishWebRTC creates a WebRTC connection using the signaling client.
@@ -107,7 +138,12 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 	if cfg.PeerClientType != "browser" {
 		se.EnableSCTPZeroChecksum(true)
 	}
-	api := webrtc.NewAPI(webrtc.WithSettingEngine(se))
+	browserPeer := cfg.PeerClientType == "browser"
+	api, err := newWebRTCAPI(se, browserPeer)
+	if err != nil {
+		reportFailed(cfg.OnStatus, "WebRTC", err)
+		return nil, err
+	}
 
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: iceServers,
@@ -122,6 +158,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 		readBuf:       make(chan []byte, 256),
 		closed:        make(chan struct{}),
 		receiveBudget: &webRTCReceiveBudget{},
+		browserPeer:   browserPeer,
 	}
 	conn.flowCond = sync.NewCond(&conn.flowMu)
 
@@ -167,6 +204,13 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 		}
 		conn.setDataChannel(dc)
 		setupDataChannel(dc, conn, dcReady, &dcOnce)
+		if browserPeer {
+			if err := addBufferHint(pc); err != nil {
+				pc.Close()
+				reportFailed(cfg.OnStatus, "WebRTC", err)
+				return nil, fmt.Errorf("adding buffer hint: %w", err)
+			}
+		}
 
 		offer, err := pc.CreateOffer(nil)
 		if err != nil {

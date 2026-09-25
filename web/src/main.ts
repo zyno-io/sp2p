@@ -7,7 +7,7 @@ import { SignalClient, PROTOCOL_VERSION, Envelope } from "./signal";
 import { establishWebRTC, ICEServerConfig, splitIceServers } from "./webrtc";
 import { monitorTransfer } from "./diagnostics";
 import { confirmDataChannel } from "./handshake";
-import { negotiateParallelWebRTC, PARALLEL_MIN_BYTES } from "./webrtc-parallel";
+import { negotiateParallelWebRTC, PARALLEL_MAX_LANES, PARALLEL_MIN_BYTES } from "./webrtc-parallel";
 import {
   generateKeyPair,
   exportTransferPublicKey,
@@ -522,7 +522,7 @@ async function initSend(): Promise<void> {
       );
       const frameIO = protocol === 3 && cryptoMsg.payload.parallelWebRTC === true
         ? await negotiateParallelWebRTC(dc, pc, enc, extraBuffered, keys, myPub, peerPub, true,
-          transferSize >= PARALLEL_MIN_BYTES ? 4 : 1,
+          transferSize >= PARALLEL_MIN_BYTES ? PARALLEL_MAX_LANES : 1,
           detail => { $(".step-p2p").textContent = `Establishing P2P connection — ${detail}`; })
         : undefined;
       const transport = new DataChannelTransport(
@@ -826,7 +826,7 @@ async function initReceive(): Promise<void> {
       keys.senderToReceiver
     );
     const frameIO = protocol === 3 && cryptoMsg.payload.parallelWebRTC === true
-      ? await negotiateParallelWebRTC(dc, pc, enc, extraBuffered, keys, peerPub, myPub, false, 4,
+      ? await negotiateParallelWebRTC(dc, pc, enc, extraBuffered, keys, peerPub, myPub, false, PARALLEL_MAX_LANES,
         detail => { $(".step-p2p").textContent = `Establishing P2P connection — ${detail}`; })
       : undefined;
     const transport = new DataChannelTransport(

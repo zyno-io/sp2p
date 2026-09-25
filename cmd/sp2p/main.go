@@ -147,7 +147,7 @@ func runSend(ctx context.Context, cfg config.Config, serverURL, baseURL string) 
 	if cfg.Parallel != nil {
 		parallelDefault = *cfg.Parallel
 	}
-	parallel := fs.Int("parallel", parallelDefault, "parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)")
+	parallel := fs.Int("parallel", parallelDefault, "parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC auto uses up to 8)")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
 	format := fs.String("format", "human", "output format: human or json")
@@ -246,7 +246,7 @@ func runReceive(ctx context.Context, cfg config.Config, serverURL string) error 
 	if cfg.Parallel != nil {
 		parallelDefault = *cfg.Parallel
 	}
-	parallel := fs.Int("parallel", parallelDefault, "parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC max 4)")
+	parallel := fs.Int("parallel", parallelDefault, "parallel connections: 0=auto, 1=single, 2-6=request count (WebRTC auto uses up to 8)")
 	allowRelay := fs.Bool("allow-relay", cfg.AllowRelay, "allow TURN relay without prompting")
 	verbose := fs.Bool("v", cfg.Verbose, "verbose diagnostic output")
 	format := fs.String("format", "human", "output format: human or json")
