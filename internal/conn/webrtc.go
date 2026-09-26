@@ -104,6 +104,31 @@ func addBufferHint(pc *webrtc.PeerConnection) error {
 	return err
 }
 
+// newOfferPeerConnection creates a peer connection with the API selected by
+// browserPeer (see newWebRTCAPI) and, when this side will be the one
+// proposing SDP to a browser peer, adds the buffer hint before any offer is
+// created. isSender selects the offerer: the primary connection's sender
+// offers, and so does a WebRTCLane's sender (see NewLane) — an answerer never
+// offers, so it never needs the hint. Centralizing this here keeps
+// EstablishWebRTC and NewLane from duplicating the same conditional.
+func newOfferPeerConnection(se webrtc.SettingEngine, config webrtc.Configuration, browserPeer, isSender bool) (*webrtc.PeerConnection, error) {
+	api, err := newWebRTCAPI(se, browserPeer)
+	if err != nil {
+		return nil, err
+	}
+	pc, err := api.NewPeerConnection(config)
+	if err != nil {
+		return nil, fmt.Errorf("creating peer connection: %w", err)
+	}
+	if browserPeer && isSender {
+		if err := addBufferHint(pc); err != nil {
+			pc.Close()
+			return nil, fmt.Errorf("adding buffer hint: %w", err)
+		}
+	}
+	return pc, nil
+}
+
 // EstablishWebRTC creates a WebRTC connection using the signaling client.
 // It handles SDP offer/answer exchange and ICE candidate gathering.
 func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCConfig) (*WebRTCConn, error) {
@@ -139,18 +164,10 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 		se.EnableSCTPZeroChecksum(true)
 	}
 	browserPeer := cfg.PeerClientType == "browser"
-	api, err := newWebRTCAPI(se, browserPeer)
+	pc, err := newOfferPeerConnection(se, webrtc.Configuration{ICEServers: iceServers}, browserPeer, cfg.IsSender)
 	if err != nil {
 		reportFailed(cfg.OnStatus, "WebRTC", err)
 		return nil, err
-	}
-
-	pc, err := api.NewPeerConnection(webrtc.Configuration{
-		ICEServers: iceServers,
-	})
-	if err != nil {
-		reportFailed(cfg.OnStatus, "WebRTC", err)
-		return nil, fmt.Errorf("creating peer connection: %w", err)
 	}
 
 	conn := &WebRTCConn{
@@ -204,13 +221,6 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 		}
 		conn.setDataChannel(dc)
 		setupDataChannel(dc, conn, dcReady, &dcOnce)
-		if browserPeer {
-			if err := addBufferHint(pc); err != nil {
-				pc.Close()
-				reportFailed(cfg.OnStatus, "WebRTC", err)
-				return nil, fmt.Errorf("adding buffer hint: %w", err)
-			}
-		}
 
 		offer, err := pc.CreateOffer(nil)
 		if err != nil {

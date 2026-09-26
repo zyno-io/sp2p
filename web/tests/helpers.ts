@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: MIT
+
+// Shared Playwright test helpers used by more than one spec file: an
+// isolated-signaling-server fixture, a throwaway-directory allocator, a CLI
+// JSON event watcher, a WebRTC lane count observer, an OPFS-backed save-file
+// sink, and a share-code chooser.
+
+import { spawn } from "node:child_process";
+import { writeFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ChildProcess } from "node:child_process";
+import type { Page } from "@playwright/test";
+import { test as base, expect } from "./fixtures";
+
+// ── Isolated signaling server ────────────────────────────────────────────────
+
+// Large-transfer and parallel-lane tests get their own real signaling server
+// instead of the shared one from global-setup. Do not weaken production rate
+// limits or make the full suite depend on a minute of elapsed time in
+// unrelated tests.
+export const isolatedServerTest = base.extend<{}, { isolatedServer: string }>({
+  isolatedServer: [async ({}, use) => {
+    const state = JSON.parse(readFileSync(join(__dirname, "../.pw-state.json"), "utf8"));
+    const listener = net.createServer();
+    await new Promise<void>(resolve => listener.listen(0, "127.0.0.1", resolve));
+    const port = (listener.address() as net.AddressInfo).port;
+    await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
+    const url = `http://127.0.0.1:${port}`;
+    const server = spawn(join(state.tmpDir, "sp2p-server"), ["-addr", `127.0.0.1:${port}`, "-base-url", url], { stdio: "ignore" });
+    const exited = new Promise<void>(resolve => { server.once("exit", () => resolve()); server.once("error", () => resolve()); });
+    try {
+      await expect.poll(async () => {
+        const response = await fetch(`${url}/health`).catch(() => null);
+        return response?.ok;
+      }, { timeout: 10000 }).toBe(true);
+      await use(url);
+    } finally { server.kill(); await exited; }
+  }, { scope: "worker" }],
+  baseURL: async ({ isolatedServer }, use) => { await use(isolatedServer); },
+  wsUrl: async ({ isolatedServer }, use) => { await use(isolatedServer.replace("http:", "ws:") + "/ws"); },
+});
+
+// ── Temporary directories ───────────────────────────────────────────────────
+
+const temporaryDirectories: string[] = [];
+
+export function temporaryDirectory(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temporaryDirectories.push(dir);
+  return dir;
+}
+
+// Call from a test.afterEach to remove every directory allocated so far.
+export function cleanupTemporaryDirectories(): void {
+  for (const dir of temporaryDirectories.splice(0)) rmSync(dir, { recursive: true, force: true });
+}
+
+// ── CLI JSON event watcher ──────────────────────────────────────────────────
+
+export interface CLIWatch {
+  code: Promise<string>;
+  exited: Promise<number | null>;
+  counts: number[];
+}
+
+// Watches a CLI child process's JSON stdout for its session code and any
+// parallel_streams events (the lane count it negotiated).
+export function watchCLI(child: ChildProcess): CLIWatch {
+  let pending = "";
+  const counts: number[] = [];
+  let resolveCode!: (code: string) => void;
+  let rejectCode!: (error: Error) => void;
+  const code = new Promise<string>((resolve, reject) => { resolveCode = resolve; rejectCode = reject; });
+  void code.catch(() => {});
+  child.stdout?.on("data", bytes => {
+    pending += bytes.toString();
+    for (;;) {
+      const end = pending.indexOf("\n");
+      if (end < 0) break;
+      const line = pending.slice(0, end); pending = pending.slice(end + 1);
+      const event = JSON.parse(line);
+      if (event.event === "session") resolveCode(event.code);
+      if (event.event === "parallel_streams") counts.push(event.parallel_streams);
+    }
+  });
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.once("error", error => { reject(error); rejectCode(error); });
+    child.once("exit", status => { resolve(status); rejectCode(new Error("CLI exited before session creation")); });
+  });
+  return { code, exited, counts };
+}
+
+// ── Lane observer ────────────────────────────────────────────────────────────
+
+// Observes the browser console for the "authenticated WebRTC connections: N"
+// log line webrtc-parallel.ts prints once setup finishes, returning the
+// running list of counts seen (normally just one entry).
+export function observeConnections(page: Page): number[] {
+  const counts: number[] = [];
+  page.on("console", message => {
+    const match = /authenticated WebRTC connections: (\d+)/.exec(message.text());
+    if (match) counts.push(Number(match[1]));
+  });
+  return counts;
+}
+
+// ── OPFS sink ────────────────────────────────────────────────────────────────
+
+// Redirects the page's save-file picker to an Origin Private File System
+// handle instead of a native save dialog, so a browser receiver's output can
+// be read back and verified without a download prompt.
+export async function receiveToDisk(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    (window as any).showSaveFilePicker = async () => {
+      const root = await navigator.storage.getDirectory();
+      const file = await root.getFileHandle("test-output", { create: true });
+      (window as any).__testOutput = file;
+      return file;
+    };
+  });
+}
+
+export async function verifyDisk(page: Page, expectedSize: number, expectedHash: string): Promise<void> {
+  const received = await page.evaluate(async () => {
+    const file = await (window as any).__testOutput.getFile();
+    const bytes = await file.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return { size: file.size, hash: Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("") };
+  });
+  expect(received).toEqual({ size: expectedSize, hash: expectedHash });
+}
+
+// ── Share code / confirmation ────────────────────────────────────────────────
+
+// Selects a file on the sender page and returns the transfer code from its
+// share URL.
+export async function chooseFile(page: Page, data: Buffer, filename: string): Promise<string> {
+  const path = join(temporaryDirectory("sp2p-webrtc-test-"), filename);
+  writeFileSync(path, data);
+  await page.goto("/");
+  await page.locator(".file-input").setInputFiles(path);
+  await expect(page.locator(".share-url")).toBeVisible();
+  const url = await page.locator(".share-url").textContent();
+  return new URL(url!).hash.slice(1);
+}
+
+// Clicks the receiver's confirmation button if one is shown; some flows skip
+// it when file info isn't available yet.
+export async function maybeConfirmBrowserDownload(page: Page): Promise<void> {
+  try {
+    await page.locator(".confirm-btn").click({ timeout: 5_000 });
+  } catch {
+    // Some flows may not show the confirmation card if file-info is unavailable.
+  }
+}

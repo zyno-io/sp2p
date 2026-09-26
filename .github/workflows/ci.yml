@@ -114,7 +114,7 @@ jobs:
 
   protocol-compatibility:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -128,6 +128,19 @@ jobs:
           # Existing v3 peers must keep working when v0.5.0 is re-released.
           ref: d303e1a947ca8ef6bb000dfe8660e7a05c7738cd
           path: .compat-v0.5.0
+          persist-credentials: false
+      - name: Resolve previous release
+        id: previous
+        # git ls-remote queries origin directly, so this needs no extra tag
+        # fetch even with the primary checkout's default shallow history.
+        run: bash scripts/ci/previous-release.sh >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The release immediately before this one — resolved above so this
+          # fixture automatically advances at every release instead of being
+          # re-pinned by hand like the two fixtures above.
+          ref: ${{ steps.previous.outputs.sha }}
+          path: .compat-prev
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -148,13 +161,31 @@ jobs:
           npm --prefix web ci --ignore-scripts
           npm --prefix web run build
           go build -o bin/sp2p ./cmd/sp2p
+      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        id: previous-cache
+        with:
+          path: |
+            .compat-prev/bin
+            .compat-prev/web/dist
+          key: compat-${{ steps.previous.outputs.sha }}-${{ runner.os }}-v1
+      - name: Build previous-release fixture
+        if: steps.previous-cache.outputs.cache-hit != 'true'
+        working-directory: .compat-prev
+        run: |
+          npm --prefix web ci --ignore-scripts
+          npm --prefix web run build
+          go build -ldflags "-X main.version=${{ steps.previous.outputs.version }}" -o bin/sp2p ./cmd/sp2p
+          go build -ldflags "-X main.version=${{ steps.previous.outputs.version }}" -o bin/sp2p-server ./cmd/sp2p-server
       - run: npm --prefix web ci
       - run: npm --prefix web run build
       - name: Check CLI and server version matrix
-        run: go test ./internal -run '^TestE2E_ProtocolCompatibility$' -count=1 -timeout=12m
+        run: go test ./internal -run '^TestE2E_ProtocolCompatibility$' -count=1 -timeout=15m
         env:
           SP2P_TEST_LEGACY_BINARY: ${{ github.workspace }}/.compat-v0.4.0/bin/sp2p
           SP2P_TEST_LEGACY_SERVER_BINARY: ${{ github.workspace }}/.compat-v0.4.0/bin/sp2p-server
+          SP2P_TEST_PREVIOUS_BINARY: ${{ github.workspace }}/.compat-prev/bin/sp2p
+          SP2P_TEST_PREVIOUS_SERVER_BINARY: ${{ github.workspace }}/.compat-prev/bin/sp2p-server
+          SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
       - run: cd web && npx playwright install --with-deps chromium
       - name: Check browser and CLI cross-release transfers
         run: cd web && npx playwright test tests/compatibility.spec.ts

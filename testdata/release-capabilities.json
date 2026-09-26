@@ -1,0 +1,5 @@
+{
+  "0.4.0": { "protocol": 2, "webrtcLanes": 1 },
+  "0.5.0": { "protocol": 3, "webrtcLanes": 4 },
+  "0.6.0": { "protocol": 3, "webrtcLanes": 8 }
+}
