@@ -32,29 +32,51 @@ function waitForPort(port: number, timeout = 10_000): Promise<void> {
 export default async function globalSetup() {
   const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-"));
 
-  // Build the web UI.
-  console.log("Building web assets...");
-  execSync("npm run build", { cwd: join(ROOT, "web"), stdio: "pipe" });
+  // The netem suite runs inside a network namespace with no route to the
+  // internet (see docs/testing.md), so its CI job pre-builds everything
+  // outside the namespace and points these at the prebuilt outputs instead
+  // of letting global-setup rebuild (which could otherwise reach for npm/go
+  // module resolution over the network). Unset for every other spec/project,
+  // which keeps building fresh like before.
+  const skipWebBuild = process.env.SP2P_PW_SKIP_WEB_BUILD === "1";
+  const prebuiltCLI = process.env.SP2P_PW_CLI_BIN;
+  const prebuiltServer = process.env.SP2P_PW_SERVER_BIN;
 
-  // Build the crypto test bundle for vector tests.
-  console.log("Building crypto test bundle...");
-  execSync(
-    "npx esbuild src/crypto-test-entry.ts --bundle --outfile=dist/crypto-test.js --target=es2020",
-    { cwd: join(ROOT, "web"), stdio: "pipe" }
-  );
+  if (skipWebBuild) {
+    console.log("Skipping web build (SP2P_PW_SKIP_WEB_BUILD=1; using prebuilt web/dist)...");
+  } else {
+    // Build the web UI.
+    console.log("Building web assets...");
+    execSync("npm run build", { cwd: join(ROOT, "web"), stdio: "pipe" });
 
-  // Build binaries.
-  console.log("Building Go binaries...");
-  const serverBin = join(tmpDir, "sp2p-server");
-  const cliBin = join(tmpDir, "sp2p");
-  execSync(`go build -o ${serverBin} ./cmd/sp2p-server`, {
-    cwd: ROOT,
-    stdio: "pipe",
-  });
-  execSync(`go build -o ${cliBin} ./cmd/sp2p`, {
-    cwd: ROOT,
-    stdio: "pipe",
-  });
+    // Build the crypto test bundle for vector tests.
+    console.log("Building crypto test bundle...");
+    execSync(
+      "npx esbuild src/crypto-test-entry.ts --bundle --outfile=dist/crypto-test.js --target=es2020",
+      { cwd: join(ROOT, "web"), stdio: "pipe" }
+    );
+  }
+
+  // Build (or reuse prebuilt) binaries.
+  let serverBin: string;
+  let cliBin: string;
+  if (prebuiltCLI && prebuiltServer) {
+    cliBin = prebuiltCLI;
+    serverBin = prebuiltServer;
+    console.log(`Using prebuilt Go binaries: ${cliBin}, ${serverBin}`);
+  } else {
+    console.log("Building Go binaries...");
+    serverBin = join(tmpDir, "sp2p-server");
+    cliBin = join(tmpDir, "sp2p");
+    execSync(`go build -o ${serverBin} ./cmd/sp2p-server`, {
+      cwd: ROOT,
+      stdio: "pipe",
+    });
+    execSync(`go build -o ${cliBin} ./cmd/sp2p`, {
+      cwd: ROOT,
+      stdio: "pipe",
+    });
+  }
 
   // Start the signaling server.
   console.log(`Starting server on :${PORT}...`);

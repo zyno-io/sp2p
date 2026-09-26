@@ -5,13 +5,13 @@
 // JSON event watcher, a WebRTC lane count observer, an OPFS-backed save-file
 // sink, and a share-code chooser.
 
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
-import type { Page } from "@playwright/test";
+import type { Browser, Page } from "@playwright/test";
 import { test as base, expect } from "./fixtures";
 
 // ── Isolated signaling server ────────────────────────────────────────────────
@@ -63,13 +63,20 @@ export interface CLIWatch {
   code: Promise<string>;
   exited: Promise<number | null>;
   counts: number[];
+  // Connection methods ("webrtc" | "tcp", from machineConnectionMethod in
+  // internal/cli/machine.go) seen on "connection" events with state
+  // "connected" — lets a test that runs in transport "auto" record which
+  // one the CLI actually picked instead of assuming it.
+  transports: string[];
 }
 
-// Watches a CLI child process's JSON stdout for its session code and any
-// parallel_streams events (the lane count it negotiated).
+// Watches a CLI child process's JSON stdout for its session code, any
+// parallel_streams events (the lane count it negotiated), and the connection
+// method(s) it reports as connected.
 export function watchCLI(child: ChildProcess): CLIWatch {
   let pending = "";
   const counts: number[] = [];
+  const transports: string[] = [];
   let resolveCode!: (code: string) => void;
   let rejectCode!: (error: Error) => void;
   const code = new Promise<string>((resolve, reject) => { resolveCode = resolve; rejectCode = reject; });
@@ -83,13 +90,16 @@ export function watchCLI(child: ChildProcess): CLIWatch {
       const event = JSON.parse(line);
       if (event.event === "session") resolveCode(event.code);
       if (event.event === "parallel_streams") counts.push(event.parallel_streams);
+      if (event.event === "connection" && event.connection?.state === "connected") {
+        transports.push(event.connection.method);
+      }
     }
   });
   const exited = new Promise<number | null>((resolve, reject) => {
     child.once("error", error => { reject(error); rejectCode(error); });
     child.once("exit", status => { resolve(status); rejectCode(new Error("CLI exited before session creation")); });
   });
-  return { code, exited, counts };
+  return { code, exited, counts, transports };
 }
 
 // ── Lane observer ────────────────────────────────────────────────────────────
@@ -154,4 +164,69 @@ export async function maybeConfirmBrowserDownload(page: Page): Promise<void> {
   } catch {
     // Some flows may not show the confirmation card if file-info is unavailable.
   }
+}
+
+// ── UDP socket inspection (netem suite only, Linux) ─────────────────────────
+
+export interface UdpSocketInfo {
+  pid: number;
+  rb: number; // requested/allocated receive buffer size, in bytes
+  drops: number; // sk_drops for this socket, if the kernel/iproute2 report it
+}
+
+// Playwright's Browser has no process()/pid in the public API (that only
+// exists on BrowserServer/ElectronApplication) — SystemInfo.getProcessInfo
+// is a Chrome-only CDP method that instead directly lists every process
+// (browser, renderer, GPU, utility, ...) belonging to a launched Chromium,
+// which is what a page's WebRTC UDP socket is actually owned by.
+export async function browserProcessPids(browser: Browser): Promise<Set<number>> {
+  const session = await browser.newBrowserCDPSession();
+  try {
+    const { processInfo } = await session.send("SystemInfo.getProcessInfo");
+    return new Set(processInfo.map(p => p.id));
+  } finally {
+    await session.detach();
+  }
+}
+
+// Parses the parenthesized "skmem:(r0,rb131072,...)" group from one `ss -m`
+// record into {field: value}. Never reads the address/port columns.
+function parseSkmem(record: string): Record<string, number> {
+  const match = /skmem:\(([^)]*)\)/.exec(record);
+  if (!match) return {};
+  const out: Record<string, number> = {};
+  for (const field of match[1].split(",")) {
+    const parsed = /^([a-z]+)(\d+)$/.exec(field.trim());
+    if (parsed) out[parsed[1]] = Number(parsed[2]);
+  }
+  return out;
+}
+
+// Returns the UDP sockets owned by any pid in `pids` (see
+// browserProcessPids), by running `ss -uanmp` (must run inside the netns —
+// this is only ever called from the spec process itself, which does). Only
+// numeric socket-memory fields and pids are read; no addresses or ports are
+// captured.
+export function udpSockets(pids: ReadonlySet<number>): UdpSocketInfo[] {
+  const raw = execSync("ss -H -uanmp", { encoding: "utf8" });
+  // ss wraps long lines with leading whitespace on a continuation line
+  // (the skmem group in particular); rejoin those into one logical record.
+  const records: string[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    if (/^\S/.test(line)) records.push(line);
+    else if (records.length) records[records.length - 1] += " " + line.trim();
+  }
+
+  const sockets: UdpSocketInfo[] = [];
+  for (const record of records) {
+    const pidMatch = /pid=(\d+)/.exec(record);
+    if (!pidMatch) continue;
+    const pid = Number(pidMatch[1]);
+    if (!pids.has(pid)) continue;
+    const skmem = parseSkmem(record);
+    if (skmem.rb === undefined) continue;
+    sockets.push({ pid, rb: skmem.rb, drops: skmem.d ?? 0 });
+  }
+  return sockets;
 }
