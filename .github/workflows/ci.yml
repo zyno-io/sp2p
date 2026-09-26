@@ -195,6 +195,78 @@ jobs:
           SP2P_TEST_V3_BINARY: ${{ github.workspace }}/.compat-v0.5.0/bin/sp2p
           SP2P_TEST_V3_WEB_DIR: ${{ github.workspace }}/.compat-v0.5.0/web/dist
 
+  # Shadow period: intentionally not in build.needs and not a required check
+  # yet. See docs/testing.md for the design and how to read its results.
+  netem:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci
+      - run: make build-web
+      - name: Build CLI and server binaries
+        run: |
+          go build -o bin/sp2p ./cmd/sp2p
+          go build -o bin/sp2p-server ./cmd/sp2p-server
+      # Everything above needs the network; nothing below should — the
+      # netem suite runs inside a namespace with no route to the internet.
+      - run: cd web && npx playwright install --with-deps chromium
+      - name: Load the netem qdisc kernel module
+        run: |
+          sudo modprobe sch_netem || {
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe sch_netem
+          }
+      - name: Ensure ethtool is available
+        run: command -v ethtool || (sudo apt-get update && sudo apt-get install -y ethtool)
+      - name: Widen host UDP socket buffer ceilings (for Chrome's 1 MiB buffer hint)
+        run: sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
+      - name: Create the sp2p network namespace
+        run: sudo scripts/ci/netns.sh up
+      - name: Apply netem shaping (wan150)
+        run: sudo scripts/ci/netem.sh apply wan150
+      - name: Preflight — hard-fail unless the shaped RTT is 140-200ms
+        run: sudo scripts/ci/netem.sh verify
+      - name: Run the netem suite inside the namespace
+        run: |
+          cd web
+          "$GITHUB_WORKSPACE/scripts/ci/netns.sh" exec -- npx playwright test --project=netem
+        env:
+          SP2P_NETEM_PROFILE: wan150
+          SP2P_PW_SKIP_WEB_BUILD: "1"
+          SP2P_PW_CLI_BIN: ${{ github.workspace }}/bin/sp2p
+          SP2P_PW_SERVER_BIN: ${{ github.workspace }}/bin/sp2p-server
+      - name: netem qdisc stats (post-run, for the job log)
+        if: always()
+        run: sudo scripts/ci/netem.sh stats || true
+      - name: Performance summary
+        if: always()
+        run: node web/tests/perf-summary.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: netem-perf
+          path: test-results/perf/**
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: netem-playwright-report
+          path: web/test-results/**
+          if-no-files-found: ignore
+      - name: Tear down the network namespace
+        if: always()
+        run: sudo scripts/ci/netns.sh down
+
   build:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
