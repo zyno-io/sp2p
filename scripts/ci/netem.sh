@@ -68,14 +68,16 @@ cmd_apply() {
 
   # Signaling bypass: TCP traffic on the fixed test-server port skips netem
   # entirely (band 1:1 has no child qdisc, i.e. plain pfifo), in both
-  # directions and both address families.
+  # directions and both address families. Each `prio` level is tied to one
+  # protocol, so IPv4 and IPv6 need distinct priorities (mixing them under
+  # the same priority is a kernel-rejected "protocol mismatch").
   in_ns tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 u32 \
     match ip protocol 6 0xff match ip sport "$SIGNAL_PORT" 0xffff flowid 1:1
   in_ns tc filter add dev "$IFACE" parent 1:0 protocol ip prio 1 u32 \
     match ip protocol 6 0xff match ip dport "$SIGNAL_PORT" 0xffff flowid 1:1
-  in_ns tc filter add dev "$IFACE" parent 1:0 protocol ipv6 prio 1 u32 \
+  in_ns tc filter add dev "$IFACE" parent 1:0 protocol ipv6 prio 2 u32 \
     match ip6 protocol 6 0xff match ip6 sport "$SIGNAL_PORT" 0xffff flowid 1:1
-  in_ns tc filter add dev "$IFACE" parent 1:0 protocol ipv6 prio 1 u32 \
+  in_ns tc filter add dev "$IFACE" parent 1:0 protocol ipv6 prio 2 u32 \
     match ip6 protocol 6 0xff match ip6 dport "$SIGNAL_PORT" 0xffff flowid 1:1
 
   echo "netem.sh: profile '$profile' applied to $NETNS/$IFACE ($args); signaling port $SIGNAL_PORT bypassed"

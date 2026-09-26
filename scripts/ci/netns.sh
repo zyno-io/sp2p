@@ -36,9 +36,15 @@ require_root() {
   fi
 }
 
+netns_exists() {
+  # `ip netns list` output varies by iproute2 version (plain name, or
+  # "name (id: N)") — only ever match the first field.
+  ip netns list | awk '{print $1}' | grep -qx "$NETNS"
+}
+
 cmd_up() {
   require_root up
-  if ip netns list | grep -qx "$NETNS"; then
+  if netns_exists; then
     echo "netns.sh: namespace '$NETNS' already exists — run 'netns.sh down' first" >&2
     exit 1
   fi
@@ -64,7 +70,7 @@ cmd_up() {
 
 cmd_down() {
   require_root down
-  if ! ip netns list | grep -qx "$NETNS"; then
+  if ! netns_exists; then
     echo "netns.sh: namespace '$NETNS' does not exist, nothing to do"
     return 0
   fi
