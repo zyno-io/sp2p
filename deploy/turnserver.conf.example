@@ -10,7 +10,10 @@ listening-port=3478
 tls-listening-port=5349
 min-port=49152
 max-port=49279
-user-quota=8
+# A relayed 8-lane parallel WebRTC session needs ~16 TURN allocations: up to
+# one per lane per peer, both peers sharing the one session username issued
+# by the signaling server. 32 leaves headroom above that.
+user-quota=32
 total-quota=128
 # Bytes/sec per allocation and globally; inputs and outputs are counted separately.
 max-bps=5242880

@@ -33,6 +33,10 @@ make dev     # Run the server locally on :8080
 - Unit tests live alongside the code they test (`_test.go`).
 - E2E tests are in `internal/e2e_test.go`.
 - Web tests use Playwright (`web/tests/`).
+- See [docs/testing.md](docs/testing.md) for the full layer breakdown,
+  protocol-compatibility fixtures (including automatic previous-release
+  resolution), and the release checklist note for
+  `testdata/release-capabilities.json`.
 
 ## Security
 

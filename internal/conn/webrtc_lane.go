@@ -27,11 +27,7 @@ func (primary *WebRTCConn) NewLane(sender bool) (*WebRTCLane, error) {
 	se := webrtc.SettingEngine{}
 	se.SetSCTPMaxMessageSize(sctpMaxMsgSize)
 	se.SetSCTPMaxReceiveBufferSize(2 * 1024 * 1024)
-	api, err := newWebRTCAPI(se, primary.browserPeer)
-	if err != nil {
-		return nil, err
-	}
-	pc, err := api.NewPeerConnection(primary.pc.GetConfiguration())
+	pc, err := newOfferPeerConnection(se, primary.pc.GetConfiguration(), primary.browserPeer, sender)
 	if err != nil {
 		return nil, fmt.Errorf("creating WebRTC lane: %w", err)
 	}
@@ -49,12 +45,6 @@ func (primary *WebRTCConn) NewLane(sender bool) (*WebRTCLane, error) {
 		if err != nil {
 			pc.Close()
 			return nil, err
-		}
-		if primary.browserPeer {
-			if err := addBufferHint(pc); err != nil {
-				pc.Close()
-				return nil, fmt.Errorf("adding lane buffer hint: %w", err)
-			}
 		}
 		c.setDataChannel(dc)
 		setupDataChannel(dc, c, lane.ready, &once)

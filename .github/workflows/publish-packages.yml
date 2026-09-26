@@ -53,6 +53,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 env:
   REPO: zyno-io/sp2p
 
@@ -70,6 +74,13 @@ jobs:
         run: |
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "::error::Release tag must match ^v\\d+\\.\\d+\\.\\d+$ (got '$TAG')"
+            exit 1
+          fi
+          # The "release" environment only allows deployments from v* tags, so a
+          # run dispatched from a branch (e.g. main) fails every job instantly
+          # after burning through approvals. Fail fast with an actionable message.
+          if [[ "$GITHUB_REF" != "refs/tags/$TAG" ]]; then
+            echo "::error::Run this workflow from the release tag: Actions → Publish Packages → Use workflow from → Tags → $TAG (the release environment only allows v* tags)"
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -91,8 +102,31 @@ jobs:
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
           gh release download "$TAG" -R "$REPO" -p checksums.txt
-          sha() { grep "$1" checksums.txt | awk '{print $1}'; }
+          # Require exactly one checksums.txt line for the asset and a well-formed
+          # sha256, so a missing/renamed asset fails loudly instead of publishing
+          # an empty or malformed checksum.
+          sha() {
+            local want="$1" line count value
+            # release.yml writes "<sha>  ./<file>"; accept "./" or binary-mode "*" prefixes.
+            line=$(awk -v want="$want" '{ f = $2; sub(/^\*?\.\//, "", f); sub(/^\*/, "", f) } f == want' checksums.txt)
+            count=$(printf '%s\n' "$line" | grep -c '^.' || true)
+            if [ "$count" -ne 1 ]; then
+              echo "::error::checksums.txt has $count line(s) for $want (expected exactly 1)" >&2
+              exit 1
+            fi
+            value=$(printf '%s' "$line" | awk '{print $1}')
+            if [[ ! "$value" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::invalid sha256 for $want: '$value'" >&2
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
 
+          # Resolve checksums outside the heredoc so a failure stops the job.
+          SHA_DARWIN_ARM64="$(sha sp2p_darwin_arm64.tar.gz)"
+          SHA_DARWIN_AMD64="$(sha sp2p_darwin_amd64.tar.gz)"
+          SHA_LINUX_ARM64="$(sha sp2p_linux_arm64.tar.gz)"
+          SHA_LINUX_AMD64="$(sha sp2p_linux_amd64.tar.gz)"
           cat > sp2p.rb <<FORMULA
           class Sp2p < Formula
             desc "Secure peer-to-peer file transfer"
@@ -103,22 +137,22 @@ jobs:
             on_macos do
               on_arm do
                 url "${BASE}/sp2p_darwin_arm64.tar.gz"
-                sha256 "$(sha sp2p_darwin_arm64.tar.gz)"
+                sha256 "${SHA_DARWIN_ARM64}"
               end
               on_intel do
                 url "${BASE}/sp2p_darwin_amd64.tar.gz"
-                sha256 "$(sha sp2p_darwin_amd64.tar.gz)"
+                sha256 "${SHA_DARWIN_AMD64}"
               end
             end
 
             on_linux do
               on_arm do
                 url "${BASE}/sp2p_linux_arm64.tar.gz"
-                sha256 "$(sha sp2p_linux_arm64.tar.gz)"
+                sha256 "${SHA_LINUX_ARM64}"
               end
               on_intel do
                 url "${BASE}/sp2p_linux_amd64.tar.gz"
-                sha256 "$(sha sp2p_linux_amd64.tar.gz)"
+                sha256 "${SHA_LINUX_AMD64}"
               end
             end
 
@@ -159,7 +193,25 @@ jobs:
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
           gh release download "$TAG" -R "$REPO" -p checksums.txt
-          sha() { grep "$1" checksums.txt | awk '{print $1}'; }
+          # Require exactly one checksums.txt line for the asset and a well-formed
+          # sha256, so a missing/renamed asset fails loudly instead of publishing
+          # an empty or malformed checksum.
+          sha() {
+            local want="$1" line count value
+            # release.yml writes "<sha>  ./<file>"; accept "./" or binary-mode "*" prefixes.
+            line=$(awk -v want="$want" '{ f = $2; sub(/^\*?\.\//, "", f); sub(/^\*/, "", f) } f == want' checksums.txt)
+            count=$(printf '%s\n' "$line" | grep -c '^.' || true)
+            if [ "$count" -ne 1 ]; then
+              echo "::error::checksums.txt has $count line(s) for $want (expected exactly 1)" >&2
+              exit 1
+            fi
+            value=$(printf '%s' "$line" | awk '{print $1}')
+            if [[ ! "$value" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::invalid sha256 for $want: '$value'" >&2
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
 
           SHA_AMD64="$(sha sp2p_windows_amd64.zip)"
           SHA_ARM64="$(sha sp2p_windows_arm64.zip)"
@@ -215,7 +267,7 @@ jobs:
     container: archlinux:base
     steps:
       - name: Install dependencies
-        run: pacman -Sy --noconfirm git openssh github-cli
+        run: pacman -Syu --noconfirm --needed git openssh github-cli
 
       - name: Publish to AUR
         env:
@@ -227,7 +279,25 @@ jobs:
           BASE="https://github.com/${REPO}/releases/download/${TAG}"
 
           gh release download "$TAG" -R "$REPO" -p checksums.txt
-          sha() { grep "$1" checksums.txt | awk '{print $1}'; }
+          # Require exactly one checksums.txt line for the asset and a well-formed
+          # sha256, so a missing/renamed asset fails loudly instead of publishing
+          # an empty or malformed checksum.
+          sha() {
+            local want="$1" line count value
+            # release.yml writes "<sha>  ./<file>"; accept "./" or binary-mode "*" prefixes.
+            line=$(awk -v want="$want" '{ f = $2; sub(/^\*?\.\//, "", f); sub(/^\*/, "", f) } f == want' checksums.txt)
+            count=$(printf '%s\n' "$line" | grep -c '^.' || true)
+            if [ "$count" -ne 1 ]; then
+              echo "::error::checksums.txt has $count line(s) for $want (expected exactly 1)" >&2
+              exit 1
+            fi
+            value=$(printf '%s' "$line" | awk '{print $1}')
+            if [[ ! "$value" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::invalid sha256 for $want: '$value'" >&2
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
 
           SHA_AMD64="$(sha sp2p_linux_amd64.tar.gz)"
           SHA_ARM64="$(sha sp2p_linux_arm64.tar.gz)"
@@ -376,8 +446,12 @@ jobs:
           GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
           VERSION: ${{ needs.validate-release.outputs.version }}
         run: |
-          PR_URL=$(gh api 'repos/microsoft/winget-pkgs/pulls?state=open&per_page=100' --jq \
-            '.[] | select(.head.repo.full_name == "zyno-io/winget-pkgs") | select(.head.ref | startswith("zyno-io.sp2p-" + env.VERSION + "-")) | .html_url' | head -n 1)
+          # komac (via winget-releaser) titles its PR "New version: zyno-io.sp2p
+          # version $VERSION" regardless of which fork it opens from. Listing
+          # only the first 100 open PRs missed submissions further back in the
+          # queue; search matches on the exact quoted title instead.
+          PR_URL=$(gh search prs --repo microsoft/winget-pkgs --state open --match title \
+            "\"zyno-io.sp2p version ${VERSION}\"" --json url --jq '.[0].url // empty')
           if [ -n "$PR_URL" ]; then
             echo "WinGet submission already exists: $PR_URL"
             echo "exists=true" >> "$GITHUB_OUTPUT"
