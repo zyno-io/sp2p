@@ -306,10 +306,10 @@ jobs:
         run: sudo scripts/ci/relay-firewall.sh apply
       - name: Preflight — hard-fail unless the relay-only firewall is in place
         run: sudo scripts/ci/relay-firewall.sh verify
-      - name: Run the relay suite (PR subset) inside the namespace
+      - name: THROWAWAY -- repeat-12 validation of 2b4dffc (cli-cli leak-window fix)
         run: |
           cd web
-          "$GITHUB_WORKSPACE/scripts/ci/netns.sh" exec -- npx playwright test --project=relay --grep @pr
+          "$GITHUB_WORKSPACE/scripts/ci/netns.sh" exec -- npx playwright test --project=relay --grep "cli to cli" --repeat-each=12
         env:
           SP2P_PW_SKIP_WEB_BUILD: "1"
           SP2P_PW_CLI_BIN: ${{ github.workspace }}/bin/sp2p
@@ -320,7 +320,7 @@ jobs:
         run: sudo scripts/ci/relay-firewall.sh stats || true
       - name: Relay summary (fails on missing pairings)
         if: always()
-        run: node web/tests/relay-summary.mjs --gate --expect pr
+        run: node web/tests/relay-summary.mjs --expect pr
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
