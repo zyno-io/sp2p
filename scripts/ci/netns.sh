@@ -59,6 +59,10 @@ cmd_up() {
   ip netns exec "$NETNS" sysctl -qw "net.ipv6.conf.${DUMMY}.disable_ipv6=1"
   ip netns exec "$NETNS" ip addr add "$DUMMY_CIDR" dev "$DUMMY"
   ip netns exec "$NETNS" ip link set "$DUMMY" up
+  # Chromium only gathers host candidates on interfaces it considers routable,
+  # and never on loopback. A default route via dummy0 makes 10.99.0.1 usable;
+  # traffic between local addresses still crosses the shaped lo.
+  ip netns exec "$NETNS" ip route add default dev "$DUMMY"
 
   # netem on lo distorts loss/delay if segments above 64 KB get offloaded
   # past the qdisc; keep lo at a normal MTU with GSO/TSO/GRO disabled.
