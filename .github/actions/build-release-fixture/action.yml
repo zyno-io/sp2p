@@ -1,0 +1,58 @@
+name: Build release fixture
+description: >
+  Checks out an immutable commit SHA (never a moving tag), builds the web
+  assets, CLI, and signaling server as a compatibility-test fixture, and
+  caches the result by SHA and version. The calling job must already have Go
+  and Node.js toolchains on PATH (actions/setup-go, actions/setup-node)
+  before using this action.
+
+inputs:
+  sha:
+    description: Commit SHA to build. Never pass a moving tag ref here.
+    required: true
+  version:
+    description: Version string embedded via -ldflags "-X main.version=...".
+    required: true
+  path:
+    description: Directory to check the fixture out into, relative to the workspace.
+    required: true
+
+outputs:
+  cli-bin:
+    description: Path to the built sp2p CLI binary.
+    value: ${{ inputs.path }}/bin/sp2p
+  server-bin:
+    description: Path to the built sp2p-server binary.
+    value: ${{ inputs.path }}/bin/sp2p-server
+  web-dir:
+    description: Path to the built web/dist directory.
+    value: ${{ inputs.path }}/web/dist
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        ref: ${{ inputs.sha }}
+        path: ${{ inputs.path }}
+        persist-credentials: false
+    - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      id: cache
+      with:
+        path: |
+          ${{ inputs.path }}/bin
+          ${{ inputs.path }}/web/dist
+        # Include version, not just sha: the version string is baked into
+        # the binaries via -ldflags, and a commit can end up tagged with more
+        # than one version (e.g. a no-op re-release), so sha alone isn't a
+        # safe cache key.
+        key: compat-${{ inputs.sha }}-${{ inputs.version }}-${{ runner.os }}-v1
+    - name: Build web, CLI, and server
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: ${{ inputs.path }}
+      run: |
+        npm --prefix web ci --ignore-scripts
+        npm --prefix web run build
+        go build -ldflags "-X main.version=${{ inputs.version }}" -o bin/sp2p ./cmd/sp2p
+        go build -ldflags "-X main.version=${{ inputs.version }}" -o bin/sp2p-server ./cmd/sp2p-server

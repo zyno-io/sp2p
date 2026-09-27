@@ -120,12 +120,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Immutable v0.4.0 source; never execute a moving release download.
+          # Policy: a release tag must never move once pushed. If one ever
+          # has to (as v0.5.0 did below), pin its pre-move SHA here instead
+          # of the tag — see the "Pinned fixtures" policy in docs/testing.md.
           ref: 7a616cd5ac1b51f7ad8d1b1de85a91780fff1ccb
           path: .compat-v0.4.0
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Existing v3 peers must keep working when v0.5.0 is re-released.
+          # This is v0.5.0's pre-move SHA (the tag itself was later moved to
+          # a newer commit) — see the pinned-fixtures policy above.
           ref: d303e1a947ca8ef6bb000dfe8660e7a05c7738cd
           path: .compat-v0.5.0
           persist-credentials: false
@@ -134,14 +139,6 @@ jobs:
         # git ls-remote queries origin directly, so this needs no extra tag
         # fetch even with the primary checkout's default shallow history.
         run: bash scripts/ci/previous-release.sh >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The release immediately before this one — resolved above so this
-          # fixture automatically advances at every release instead of being
-          # re-pinned by hand like the two fixtures above.
-          ref: ${{ steps.previous.outputs.sha }}
-          path: .compat-prev
-          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -161,21 +158,12 @@ jobs:
           npm --prefix web ci --ignore-scripts
           npm --prefix web run build
           go build -o bin/sp2p ./cmd/sp2p
-      - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
-        id: previous-cache
+      - name: Build previous-release fixture (.compat-prev)
+        uses: ./.github/actions/build-release-fixture
         with:
-          path: |
-            .compat-prev/bin
-            .compat-prev/web/dist
-          key: compat-${{ steps.previous.outputs.sha }}-${{ runner.os }}-v1
-      - name: Build previous-release fixture
-        if: steps.previous-cache.outputs.cache-hit != 'true'
-        working-directory: .compat-prev
-        run: |
-          npm --prefix web ci --ignore-scripts
-          npm --prefix web run build
-          go build -ldflags "-X main.version=${{ steps.previous.outputs.version }}" -o bin/sp2p ./cmd/sp2p
-          go build -ldflags "-X main.version=${{ steps.previous.outputs.version }}" -o bin/sp2p-server ./cmd/sp2p-server
+          sha: ${{ steps.previous.outputs.sha }}
+          version: ${{ steps.previous.outputs.version }}
+          path: .compat-prev
       - run: npm --prefix web ci
       - run: npm --prefix web run build
       - name: Check CLI and server version matrix
@@ -188,12 +176,15 @@ jobs:
           SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
       - run: cd web && npx playwright install --with-deps chromium
       - name: Check browser and CLI cross-release transfers
-        run: cd web && npx playwright test tests/compatibility.spec.ts
+        run: cd web && npx playwright test tests/compatibility.spec.ts --reporter=list
         env:
           SP2P_TEST_LEGACY_BINARY: ${{ github.workspace }}/.compat-v0.4.0/bin/sp2p
           SP2P_TEST_LEGACY_WEB_DIR: ${{ github.workspace }}/.compat-v0.4.0/web/dist
           SP2P_TEST_V3_BINARY: ${{ github.workspace }}/.compat-v0.5.0/bin/sp2p
           SP2P_TEST_V3_WEB_DIR: ${{ github.workspace }}/.compat-v0.5.0/web/dist
+          SP2P_TEST_PREVIOUS_BINARY: ${{ github.workspace }}/.compat-prev/bin/sp2p
+          SP2P_TEST_PREVIOUS_WEB_DIR: ${{ github.workspace }}/.compat-prev/web/dist
+          SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
 
   # Shadow period: intentionally not in build.needs and not a required check
   # yet. See docs/testing.md for the design and how to read its results.
