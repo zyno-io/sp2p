@@ -1035,29 +1035,45 @@ the underlying race isn't specific to the larger `relay-full` job).
   `-allocation-lifetime` flag (harmless, unused by default, and now known
   to need real per-engine verification before ever being turned on for
   this suite) but `relay.spec.ts` no longer passes it.
-- **CLI↔CLI: one allocation intermittently missed the 10s leak window —
-  a real CLI bug, now fixed (`internal/conn/webrtc.go`, commit
-  `2b4dffc`).** `pollSessionRelease` found `live: 1` (not 0) after the
-  full 10s poll on some `relay-full` runs. This was not a test-detection
-  timing margin: a Go receiver's session-watcher goroutine and its own
-  deferred cleanup both call `WebRTCConn.Close` on the same connection
-  (`internal/transfer/receiver.go`'s cancel-watcher path and
+- **CLI↔CLI: one allocation intermittently misses the 10s leak window —
+  a real CLI bug, partially fixed (`internal/conn/webrtc.go`, commit
+  `2b4dffc`), not yet fully closed.** `pollSessionRelease` found `live: 1`
+  (not 0) after the full 10s poll on some `relay-full` runs. This is not a
+  test-detection timing margin: a Go receiver's session-watcher goroutine
+  and its own deferred cleanup both call `WebRTCConn.Close` on the same
+  connection (`internal/transfer/receiver.go`'s cancel-watcher path and
   `Session.closeTransport`), and pion's `PeerConnection.Close` returns
   `nil` immediately to a second, concurrent caller while the first is
   still mid-close (`peerconnection.go`) — including its TURN
-  `Refresh(lifetime=0)` deallocation, sent fire-and-forget. So the second
+  `Refresh(lifetime=0)` deallocation, sent fire-and-forget. So a second
   caller's `Close()` could return, and the CLI process could exit, before
   that deallocation was actually sent, leaving the allocation held on the
   server for its full default lifetime (10 minutes) instead of being
   released at transfer end. `WebRTCConn.Close` now runs the underlying
-  `pc.Close()` exactly once, behind a `sync.Once`, so every caller —
-  including whichever one the CLI's own shutdown path waits on — blocks
-  until that single close, and its deallocation, has actually happened.
-  Validated on real CI with the fix isolated: repeating just the
-  `cli to cli` relay test many times over via a throwaway commit, all
-  releasing within the 10s window (reverted immediately after; the full,
-  unscoped `relay` job was green again afterward). See the PR for the
-  exact run links.
+  `pc.Close()` exactly once, behind a `sync.Once`, so a second *concurrent*
+  caller of the same connection's `Close()` blocks until that one real
+  close, and its deallocation, has happened.
+  **Validated on real CI with the fix isolated, and it measurably helps
+  but does not eliminate the race:** repeating just the `cli to cli` relay
+  test 12 times via a throwaway commit landed 10/12 (up from an estimated
+  ~3/10 baseline before the fix), with both remaining failures showing the
+  identical `live: 1` / `pionLiveDelta: 1` shape (reverted immediately
+  after; the full, unscoped `relay` job was green on the next normal run).
+  Reading `internal/transfer/session.go:77`
+  (`go func() { <-ctx.Done(); s.closeTransport() }()`) suggests a
+  plausible, not yet empirically confirmed, residual cause: this watcher
+  goroutine's own call to `closeTransport()` is itself never awaited by
+  anything, so `Session.closeOnce` (which predates this fix and has the
+  same "second caller blocks" property as the new `pcCloseOnce`) only
+  helps if some *other* caller also invokes `closeTransport()` and is
+  itself awaited by the main flow — if this watcher goroutine's invocation
+  is the only one that ever actually runs, nothing in the CLI's shutdown
+  path blocks on it regardless of how well-serialized the close itself is.
+  This has not been confirmed with the 5-tuple/process instrumentation
+  that would pin down which specific connection (primary or one of the 8
+  parallel lanes, sender or receiver side) is the one left live — that
+  instrumentation, and a second round of validation once a fix lands, is
+  the concrete next step, not done in this PR.
 
 ### Known gaps
 
