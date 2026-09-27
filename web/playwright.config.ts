@@ -8,7 +8,7 @@ export default defineConfig({
   retries: 0,
   workers: 1, // serial — share a single server process
   use: {
-    baseURL: "http://localhost:18090",
+    baseURL: "http://127.0.0.1:18090",
     headless: true,
   },
   projects: [
@@ -19,7 +19,33 @@ export default defineConfig({
       // it out of the default project's enumeration too — it needs the
       // "netem" project below (full-Chromium channel, mDNS flag, longer
       // timeout) to run for real, inside the CI netem job's namespace.
-      testIgnore: /netem\.spec\.ts/,
+      // engine-matrix.spec.ts likewise has its own "engines" project below
+      // (it launches every engine itself via the `playwright` fixture, so it
+      // does not belong to any single-browserName project's enumeration).
+      testIgnore: [/netem\.spec\.ts/, /engine-matrix\.spec\.ts/],
+    },
+    // Firefox and WebKit only run the browser-facing interop specs that
+    // generalize across engines — not Node-only specs (parallel.spec.ts,
+    // crypto-vectors.spec.ts, etc.) that never touch a `browser`/`page`
+    // fixture, and not env-gated/Chromium-specific suites (netem, compat).
+    // See docs/testing.md's "Engines" section for per-engine skips and why.
+    {
+      name: "firefox",
+      use: { browserName: "firefox" },
+      testMatch: [/interop\.spec\.ts/, /parallel-interop\.spec\.ts/, /webrtc-policy\.spec\.ts/],
+    },
+    {
+      name: "webkit",
+      use: { browserName: "webkit" },
+      testMatch: [/interop\.spec\.ts/, /parallel-interop\.spec\.ts/, /webrtc-policy\.spec\.ts/],
+    },
+    // engine-matrix.spec.ts's tests never request the `browser`/`page`
+    // fixtures — every engine involved is launched explicitly through the
+    // `playwright` fixture — so this project's own browserName is unused;
+    // it exists only to scope the project's test enumeration.
+    {
+      name: "engines",
+      testMatch: /engine-matrix\.spec\.ts/,
     },
     {
       name: "netem",

@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MIT
 
+// Uses the OPFS-free hashingPicker sink (not receiveToDisk) so this spec's
+// browser-receiver tests run for real on every engine: a spike found
+// Playwright's bundled WebKit's OPFS createWritable() unreliable (see
+// docs/testing.md's Engines section).
+
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -7,8 +12,8 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Page } from "@playwright/test";
 import { expect } from "./fixtures";
 import {
-  chooseFile, cleanupTemporaryDirectories, isolatedServerTest as test,
-  observeConnections, receiveToDisk, temporaryDirectory, verifyDisk, watchCLI,
+  chooseFile, cleanupTemporaryDirectories, hashingPicker, isolatedServerTest as test,
+  observeConnections, temporaryDirectory, verifyHashingSink, watchCLI,
 } from "./helpers";
 
 test.setTimeout(90000);
@@ -22,15 +27,15 @@ function choose(page: Page): Promise<string> {
   return chooseFile(page, contents, "parallel.bin");
 }
 
-function verifyDiskContents(page: Page): Promise<void> {
-  return verifyDisk(page, contents.length, expectedHash);
+function verifyReceived(page: Page): Promise<void> {
+  return verifyHashingSink(page, contents.length, expectedHash);
 }
 
 for (const blockedExtras of [0, 1, 3, 7]) {
   test(`browser parallel WebRTC verifies ${8 - blockedExtras} agreed lanes`, async ({ browser, baseURL }) => {
     const sender = await browser.newPage({ baseURL }), receiver = await browser.newPage({ baseURL });
     const senderCounts = observeConnections(sender), receiverCounts = observeConnections(receiver);
-    await receiveToDisk(receiver);
+    await hashingPicker(receiver);
     if (blockedExtras) await sender.addInitScript(blockedExtras => {
       const Native = RTCPeerConnection;
       let count = 0;
@@ -45,12 +50,13 @@ for (const blockedExtras of [0, 1, 3, 7]) {
     try {
       const code = await choose(sender);
       await receiver.goto(`/r#${code}`);
+      await receiver.addScriptTag({ url: "/crypto-test.js" });
       await receiver.locator(".confirm-btn").click();
       await expect(sender.locator(".complete")).toBeVisible({ timeout: 60000 });
       await expect(receiver.locator(".complete")).toBeVisible({ timeout: 60000 });
       expect(senderCounts).toEqual([8 - blockedExtras]);
       expect(receiverCounts).toEqual(senderCounts);
-      await verifyDiskContents(receiver);
+      await verifyReceived(receiver);
     } finally { await sender.close(); await receiver.close(); }
   });
 }
@@ -76,18 +82,19 @@ for (const compression of [0, 3]) {
     const src = join(temporaryDirectory("sp2p-parallel-send-"), "parallel.bin");
     writeFileSync(src, contents);
     const counts = observeConnections(page);
-    await receiveToDisk(page);
+    await hashingPicker(page);
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-compress", String(compression), src]);
     const cli = watchCLI(child);
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);
+      await page.addScriptTag({ url: "/crypto-test.js" });
       await page.locator(".confirm-btn").click();
       await expect(page.locator(".complete")).toBeVisible({ timeout: 60000 });
       const status = await cli.exited;
       expect(status).toBe(0);
       expect(counts).toEqual([8]); expect(cli.counts).toEqual([8]);
-      await verifyDiskContents(page);
+      await verifyReceived(page);
     } finally { child.kill(); }
   });
 }

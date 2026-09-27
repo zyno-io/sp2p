@@ -3,7 +3,8 @@
 // Shared Playwright test helpers used by more than one spec file: an
 // isolated-signaling-server fixture, a throwaway-directory allocator, a CLI
 // JSON event watcher, a WebRTC lane count observer, an OPFS-backed save-file
-// sink, and a share-code chooser.
+// sink, an OPFS-free incremental-hashing save-file sink (for cross-engine
+// use), and a share-code chooser.
 
 import { execSync, spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -139,6 +140,54 @@ export async function verifyDisk(page: Page, expectedSize: number, expectedHash:
     const digest = await crypto.subtle.digest("SHA-256", bytes);
     return { size: file.size, hash: Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("") };
   });
+  expect(received).toEqual({ size: expectedSize, hash: expectedHash });
+}
+
+// ── Hashing sink (OPFS-free; works on every engine) ─────────────────────────
+
+// Redirects the page's save-file picker to a fake handle whose "writable"
+// streams every chunk into the incremental SHA-256 from web/src/sha256.ts
+// (exposed as window.__cryptoTest.SHA256 by the crypto-test bundle — see
+// global-setup.ts) instead of buffering the file or depending on OPFS.
+// receiveToDisk (above) is real OPFS and a spike found WebKit's bundled-with-
+// Playwright createWritable() unreliable (see docs/testing.md's Engines
+// section); this sink has no OPFS dependency at all, so it works identically
+// on Chromium, Firefox, and WebKit.
+//
+// Callers must load the crypto-test bundle on the page — after navigating,
+// before the confirm click that triggers showSaveFilePicker() — with:
+//   await page.addScriptTag({ url: "/crypto-test.js" });
+// (see crypto-vectors.spec.ts for the same pattern). The fake only reads
+// window.__cryptoTest.SHA256 lazily inside createWritable(), so this can
+// happen any time before the first write, not necessarily before goto.
+export async function hashingPicker(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    (window as any).showSaveFilePicker = async () => ({
+      createWritable: async () => {
+        const SHA256 = (window as any).__cryptoTest.SHA256;
+        const hasher = new SHA256();
+        let size = 0;
+        return {
+          write: async (chunk: Uint8Array) => {
+            hasher.update(chunk);
+            size += chunk.byteLength ?? (chunk as any).length ?? 0;
+          },
+          close: async () => {
+            const digest: Uint8Array = hasher.digest();
+            (window as any).__hashingSink = {
+              size,
+              hash: Array.from(digest, (b: number) => b.toString(16).padStart(2, "0")).join(""),
+            };
+          },
+          abort: async () => { /* nothing buffered to discard */ },
+        };
+      },
+    });
+  });
+}
+
+export async function verifyHashingSink(page: Page, expectedSize: number, expectedHash: string): Promise<void> {
+  const received = await page.evaluate(() => (window as any).__hashingSink);
   expect(received).toEqual({ size: expectedSize, hash: expectedHash });
 }
 
