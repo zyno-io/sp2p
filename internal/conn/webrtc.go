@@ -120,13 +120,12 @@ func newOfferPeerConnection(se webrtc.SettingEngine, config webrtc.Configuration
 	if err != nil {
 		return nil, fmt.Errorf("creating peer connection: %w", err)
 	}
-	// MUTATION (b): temporary, for netem CI validation — see task instructions
-	// if browserPeer && isSender {
-	// 	if err := addBufferHint(pc); err != nil {
-	// 		pc.Close()
-	// 		return nil, fmt.Errorf("adding buffer hint: %w", err)
-	// 	}
-	// }
+	if browserPeer && isSender {
+		if err := addBufferHint(pc); err != nil {
+			pc.Close()
+			return nil, fmt.Errorf("adding buffer hint: %w", err)
+		}
+	}
 	return pc, nil
 }
 
