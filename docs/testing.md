@@ -325,14 +325,20 @@ accurate, but:
   match a GitHub-hosted `ubuntu-latest` runner (2 vCPU, ~8&nbsp;GiB — via
   Colima). The same isolated-server/CLI/Firefox code paths, run identically,
   simply did not stall locally, on either OS.
-- Running the *same* CLI→Firefox-receiver test many times back-to-back on
-  real CI (`gh run rerun --job`) reproduced it again on one further attempt
-  out of several, i.e., it is real but intermittent (rough order of
-  magnitude: roughly 1 in 4-5 real-CI attempts, from a small sample) —
-  consistent with something specific to real, multi-tenant cloud runner
-  infrastructure (CPU steal time, network-namespace/virtualized-NIC
-  behavior, IPv6 STUN-path quirks) that a resource-matched local VM does not
-  reproduce, rather than a deterministic code defect.
+- Running the *same* `firefox` project many times back-to-back on real CI
+  (`gh run rerun --job`, plus further pushes) reproduced it on several
+  further attempts — every one with the identical signature: the CLI
+  sender's event log goes straight from `connection {method: webrtc, state:
+  trying}` to `error {message: "Receiver disconnected"}` 15 seconds later,
+  with *nothing* logged in between, while the receiver's console sits at
+  `WebRTC: Waiting for sender's offer` for that same window. It is real,
+  reproduces with a highly consistent signature every time it does, and
+  is intermittent in *whether* it happens on a given run, not in *what*
+  happens when it does — consistent with something specific to real,
+  multi-tenant cloud runner infrastructure (CPU steal time,
+  network-namespace/virtualized-NIC behavior, IPv6 STUN-path quirks) that a
+  resource-matched local VM does not reproduce, rather than a deterministic
+  code defect.
 - The identical test run 10 times back-to-back against **Chromium** in the
   same Docker container came back 10/10 clean, and the pre-existing,
   Chromium-only `browser-interop` CI job has run this same
