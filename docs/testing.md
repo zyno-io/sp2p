@@ -804,6 +804,27 @@ managed to connect. This is the same mechanism that already handles an
 ordinary lane connectivity failure; quota-induced ICE failure on some lanes
 is indistinguishable from that to the protocol.
 
+**Confirmed on real CI:** at quota 8, this degrades all the way to
+`lanes == 1` (the primary only), not a partial count like 6 or 7 — and the
+mechanism is fully explained by the negotiation's own strict ordering, not
+a bug. The *sender* builds and gathers **all** of its own extra lanes
+(consuming its share of the quota) before sending any offer at all
+(`Promise.all(gathering)` before the write loop); the *receiver* only
+starts allocating its own matching lane once it has read that lane's offer
+— strictly after the sender. With a quota of 8 shared across the whole
+session and 2 already spent on both primaries, only 6 slots remain for up
+to 14 possible extra-lane allocation attempts (7 sender + 7 receiver) — and
+because the sender always goes first, it can (and on this run, did) consume
+every remaining slot for its own lanes before the receiver gets a chance to
+allocate any of its own. Since a genuine relay↔relay pair needs a working
+relay candidate on **both** sides of the same lane id (see the firewall fix
+above), zero of the receiver's extra lanes ever get a matching partner, and
+negotiation converges on the primary alone. This is why the assertion above
+is deliberately structural (`1 <= count < 8`) rather than a specific
+midpoint number: the real outcome is a hard floor, not a graceful linear
+taper, given this specific (single sender, strictly-ordered) negotiation
+order.
+
 ### Consent controls
 
 The relay path requires explicit user consent on both peers independently:
@@ -898,6 +919,72 @@ same idea for the TURN test binary — set it to reuse a prebuilt binary
 instead of letting the suite's worker fixture `go build` a fresh one (which
 would otherwise need network access for module resolution, unavailable
 inside the namespace).
+
+### Known rough edges
+
+First real `relay-full` dispatch on this branch
+([36351500512](https://github.com/zyno-io/sp2p/actions/runs/36351500512)):
+9/12 passed, including the two most novel cases (the abandon-setup leak
+check — `created == 9`, exactly the derived count — and the quota case —
+structurally passed, `lanes == 1`; see below). Three failures, all
+nightly-only (not in `ci.yml`'s `@pr` subset, which was and remains green):
+
+- **CLI↔CLI: one allocation missed the 10s leak window once.**
+  `pollSessionRelease` found `live: 1` (not 0) after the full 10s poll,
+  for the `cli to cli` pairing specifically. The same test passed cleanly
+  (`releaseMs: 1`) in the very first, separate `@pr` run on this branch —
+  so this is intermittent, not a hard failure every time. The likely
+  mechanism: `internal/conn/webrtc.go` closes a Go WebRTC connection via
+  `go conn.Close()` (a goroutine, not awaited), and a short-lived CLI
+  process that exits immediately after printing its `result` event isn't
+  guaranteed to still be alive when that goroutine gets around to sending
+  the TURN `Refresh(lifetime=0)` deallocation — a real race between
+  process exit and an unawaited background goroutine, not a logic bug in
+  this test suite. **Deliberately not "fixed" by widening the 10s leak
+  window** (the task's own bar) or by shortening `testturnd`'s
+  `-allocation-lifetime` (added as a flag but not wired into this suite):
+  a short server-side allocation lifetime only helps if the TURN client's
+  own refresh timing scales down with whatever lifetime the server
+  grants, which isn't verified here, and getting that wrong would risk
+  truncating a legitimately slow, still-active transfer instead of only
+  catching truly abandoned allocations — a worse failure mode than the
+  narrow, already-rare miss this would fix. Needs either confirmation
+  that this reproduces reliably (in which case the CLI's own shutdown
+  path should wait for `Close()`'s cleanup before exiting) or more runs
+  showing it stays this rare.
+- **"Both browsers decline consent" stalled once, for an unclear
+  reason.** The sender's buffered console log stopped right after the
+  session `Welcome` (`TURN available: true`); the receiver's stopped
+  right after parsing the transfer code from the URL — neither side's log
+  shows a subsequent WebRTC attempt, confirm dialog, or error at all
+  before the test's 60s assertion timeout. The receiver's `.confirm-btn`
+  click itself did not hang (the failure surfaced at the later
+  `.error-message` assertion, not at the click), so the receiver did
+  reach a clickable confirm button; the recorded dialogs/console
+  afterward show nothing further captured. Not reproduced in the same
+  run's other 11 tests, and not yet reproduced a second time — not
+  root-caused. This is this suite's only test that navigates a receiver
+  page without calling `installReceiverSink`, which is a plausible but
+  unconfirmed lead (should not matter, since no download-path code should
+  run before a decline, but noted for a future investigator).
+- **The CLI-denial race (fixed):** `"CLI receiver denies, browser sender
+  declines"` failed with `cli.results[0].error` = `{code:
+  "operation_failed", message: "Peer denied relay connection"}` instead
+  of the hardcoded `{code: "relay_denied", message: CLI_DENIED}`. This
+  one *is* root-caused and is a genuine, unavoidable race, not a bug:
+  this CLI's own `answerRelayPrompt("deny")` (written to a file the CLI
+  polls every 100ms) and the browser sender's independent decline (which
+  notifies the peer immediately, without waiting to learn the peer's own
+  answer — see the asymmetric-consent-messaging note above) can arrive in
+  either order. `internal/cli/machine.go`'s `finish()` reports
+  `relay_denied` only if `promptRelay`'s own file-read set
+  `r.relayResponse` first; if the peer's `relay-denied` signal is
+  observed first instead (`internal/flow/helpers.go`'s `<-deniedCh`
+  case), the error is `operation_failed` / `"Peer denied relay
+  connection"` instead. Both are a correct "consent was denied, nothing
+  relayed" outcome. The test now asserts that shared shape (outcome,
+  exit code, zero allocations, one of the two known error shapes) instead
+  of one hardcoded race winner.
 
 ### Known gaps
 

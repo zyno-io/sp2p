@@ -51,6 +51,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	statsPath := fs.String("stats", "", "path to atomically-written stats.json (required)")
 	logLevel := fs.String("log-level", "disabled", "pion/turn log level: disabled|error|warn|info|debug|trace (never this package's own accounting; debug/trace log full TURN usernames -- i.e. sp2p session IDs -- local debugging only, never CI)")
 	exitWithParent := fs.Bool("exit-with-parent", false, "exit cleanly once the parent process changes (orphan protection)")
+	allocationLifetime := fs.Duration("allocation-lifetime", 0, "override pion's default allocation lifetime (10m). A short value (e.g. 20s) bounds how long an abandoned allocation can stay live if a client's own deallocation (TURN Refresh(0)) never reaches the server -- e.g. a short-lived CLI process that exits before an async connection-close goroutine sends it -- giving a test a real, bounded backstop instead of only relying on every client path completing a graceful handshake. 0 keeps pion's default")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -90,15 +91,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	}
 
 	srv, err := testturn.New(testturn.Config{
-		ListenAddr: *listenAddr,
-		RelayIP:    relayIP,
-		MinPort:    uint16(*minPort),
-		MaxPort:    uint16(*maxPort),
-		Realm:      *realm,
-		Secret:     *secret,
-		UserQuota:  *userQuota,
-		StatsPath:  *statsPath,
-		LogLevel:   level,
+		ListenAddr:         *listenAddr,
+		RelayIP:            relayIP,
+		MinPort:            uint16(*minPort),
+		MaxPort:            uint16(*maxPort),
+		Realm:              *realm,
+		Secret:             *secret,
+		UserQuota:          *userQuota,
+		StatsPath:          *statsPath,
+		LogLevel:           level,
+		AllocationLifetime: *allocationLifetime,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "testturnd: %v\n", err)

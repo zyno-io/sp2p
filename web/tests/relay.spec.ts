@@ -893,9 +893,27 @@ test.describe("relay: consent", () => {
       const cli = watchCLI(child);
       trackCLIForDiagnostics(cli, "consent-cli-deny-receiver");
 
+      // Confirmed on real CI (internal/cli/machine.go's finish()): this
+      // CLI's own answerRelayPrompt("deny") and the browser sender's
+      // independent decline (which notifies the peer as soon as it
+      // happens, without waiting to learn the peer's own answer first --
+      // see the DECLINED-vs-"Receiver denied" asymmetric-messaging note in
+      // the main describe block above) are a genuine, unavoidable race.
+      // Either this CLI's own answered "deny" resolves first (code
+      // "relay_denied", CLI_DENIED -- what an interactive user would see),
+      // or the peer's decline is observed first via signaling (code
+      // "operation_failed", "Peer denied relay connection", from
+      // internal/flow/helpers.go's <-deniedCh case). Both are a correct
+      // "consent was denied, nothing relayed" outcome; assert the shared
+      // shape rather than hardcoding one specific race winner.
       await answerRelayPrompt(cli, "deny");
       expect(await cli.exited).toBe(1);
-      expect(cli.results[0]).toEqual({ outcome: "failed", error: { code: "relay_denied", message: CLI_DENIED } });
+      const cliResult = cli.results[0];
+      expect(cliResult?.outcome).toBe("failed");
+      expect([
+        { code: "relay_denied", message: CLI_DENIED },
+        { code: "operation_failed", message: "Peer denied relay connection" },
+      ]).toContainEqual(cliResult?.error);
 
       await expect(senderPage.locator(".error-message")).toBeVisible({ timeout: 60_000 });
       expect(await senderPage.locator(".error-message").textContent()).toBe(DECLINED);
