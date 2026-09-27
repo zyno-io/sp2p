@@ -6,6 +6,21 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-27
+
+### Fixed
+
+- Browser receivers no longer intermittently fail to connect to a CLI sender. If the CLI's WebRTC offer arrived before the browser had finished deriving session keys, the browser dropped it, and both sides failed after 15 seconds with "Could not establish P2P connection". This was more likely on slower machines and in Firefox and Safari. Early negotiation messages are now held until the browser is ready.
+
+### Changed
+
+- The example coturn configuration raises `user-quota` from 8 to 32, because a relayed 8-connection transfer needs about 16 allocations.
+- Package publishing must be run from the release tag, and it validates each asset's checksum before publishing.
+
+### Added
+
+- CI now tests every browser/CLI pairing against the previous release, runs transfers over a simulated 150 ms network with loss, and covers Firefox and WebKit. See [testing](https://github.com/zyno-io/sp2p/blob/v0.6.1/docs/testing.md).
+
 ## [0.6.0] - 2026-09-25
 
 ### Upgrade notes
