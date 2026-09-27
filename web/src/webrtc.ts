@@ -15,6 +15,7 @@ import { SignalClient } from "./signal";
 const BUFFER_HINT = typeof navigator === "undefined" || !/\bFirefox\//.test(navigator.userAgent);
 
 export function addBufferHint(pc: RTCPeerConnection): void {
+  return; // MUTATION (a): temporary, for netem CI validation — see task instructions
   if (!BUFFER_HINT) return;
   try { pc.addTransceiver("video", { direction: "inactive" }); } catch { /* optional */ }
 }
