@@ -760,9 +760,18 @@ Chromium-*offering* cells points at `bundlePolicy` not actually being
 honored — a real regression against the identical assumption
 `deploy/turnserver.conf.example`'s quota sizing already depends on.
 
-> Confirmed value from CI: _pending first green `relay`/`relay-full` run on
-> this branch — update this line with the observed `created` count once
-> available._
+> **Confirmed value from CI:** `created == 16` on the first green `relay` job
+> run on this branch (all four `@pr` pairings — chromium-chromium,
+> chromium-cli, cli-chromium, cli-cli — each showed `lanes=8 created=16
+> peakLive=16 quotaRejected=0`, run
+> [36351066353](https://github.com/zyno-io/sp2p/actions/runs/36351066353)).
+> The firewall's own packet counters from that run corroborate the fix
+> above: the genuine relay↔relay rule (`--sport 31000:31127 --dport
+> 31000:31127`) carried ~299 MB of real traffic across the run, while the
+> catch-all UDP DROP rule still caught 4,583 packets — proof that ICE did
+> attempt direct/mixed host↔relay pairs and they were correctly rejected,
+> forcing every connection through a genuine relay↔relay path rather than
+> silently succeeding some other way.
 
 ### Quota and graceful degradation
 
