@@ -32,6 +32,12 @@
   `netem` job) inside a real, shaped Linux network namespace instead of an
   opt-in harness against a real remote host. See
   [Realistic-WAN (netem) suite](#realistic-wan-netem-suite) below.
+- **TURN relay (relay-only) suite** — `web/tests/relay.spec.ts`, run in CI
+  (the `relay`/`relay-full` jobs) inside the same kind of Linux network
+  namespace as the netem suite, but firewalled instead of shaped: direct
+  UDP is blocked so every WebRTC pairing is forced through a real (CI-only)
+  TURN server, with exact allocation accounting and no leaked allocations.
+  See [TURN relay (relay-only) suite](#turn-relay-relay-only-suite) below.
 
 ## Running locally
 
@@ -567,3 +573,333 @@ reported) for visibility.
   climbing, that's the "netem on `lo` holds the sender's `SO_SNDBUF`" failure
   mode: move the delay to an IFB ingress qdisc on `lo` instead of the egress
   `prio`/`netem` chain used today, and update this section.
+
+## TURN relay (relay-only) suite
+
+`web/tests/relay.spec.ts` proves that a real relay-only WebRTC transfer
+works — 8 parallel lanes, both peers behind a firewall that blocks direct
+UDP — with exact TURN allocation accounting (no leaked allocations) and
+graceful degradation under a per-session TURN quota. It reuses the `sp2p`
+network namespace from [Realistic-WAN (netem) suite](#realistic-wan-netem-suite)
+above, but firewalls it instead of shaping it: `scripts/ci/relay-firewall.sh`
+blocks every direct UDP path so ICE inside the namespace can only ever
+succeed by relaying through a real (CI-only) TURN server,
+`internal/testturn`'s `testturnd`. Skipped unless `SP2P_RELAY_TEST` is set,
+which only `ci.yml`'s `relay` job and `nightly.yml`'s `relay-full` job set —
+same rationale as the netem suite's `SP2P_NETEM_PROFILE` gate: running this
+unfirewalled would silently prove nothing.
+
+**Status: shadow period**, same as `netem`: `ci.yml`'s `relay` job runs on
+every PR and push to `main` (the `@pr`-tagged Chromium-only subset — 4
+tests) but is not in `build`'s `needs:` and not a required status check
+yet. `nightly.yml`'s `relay-full` job runs the complete suite (12 tests,
+including Firefox pairings, the quota case, and the consent negative
+controls) and is wired into `report-failure` alongside `netem-nightly`,
+`compat-n2`, and `engines`.
+
+### Topology and the relay-only firewall
+
+`scripts/ci/relay-firewall.sh apply` installs a stateless iptables/ip6tables
+chain (`SP2P_RELAY`) hooked into `INPUT -i lo` inside the `sp2p` namespace —
+stateless because there is deliberately no conntrack `ESTABLISHED` accept
+rule: two peers running ICE connectivity checks against each other must
+never be treated as "replies" to one another, or the direct path this
+firewall exists to block would work again.
+
+| Traffic | Match | Verdict |
+| --- | --- | --- |
+| Signaling TCP | ports `18090,18091` (either side — `-m multiport --ports`) | ACCEPT |
+| Our own REJECT resets | any TCP with the RST flag set | ACCEPT |
+| TURN/STUN control | UDP port `3478` (either side) | ACCEPT |
+| Relayed data | UDP, **both** source and destination in `31000-31127` | ACCEPT |
+| DNS | UDP dport `53` | REJECT (fast, not a hang) |
+| Everything else UDP | any | DROP |
+| Everything else TCP | any | REJECT `tcp-reset` (fails fast, e.g. a CLI's direct-TCP attempt) |
+
+Why signaling and TURN-control use `--ports`/`-m multiport` (either source
+*or* destination) but relayed data does not: with no conntrack, a rule has
+to recognize both legs of a real exchange from the port number alone. The
+signaling server's reply to a client connected on port 18091 has *source*
+port 18091 but an ephemeral *destination* port; the same shape applies to a
+client's own control-channel traffic to the TURN server's fixed port 3478.
+A dport-only rule would reject/drop the legitimate return leg in both
+cases, so both need the permissive "either side" match.
+
+Relayed data is different, and **this was a real correctness bug caught in
+review, not a deliberate asymmetry**: a client's own local UDP socket never
+talks to a relay-range port directly — it only ever talks to the server's
+control port (3478), which relays the payload internally. The relay range
+is used exclusively for genuine relay-socket-to-relay-socket traffic (e.g.
+two TURN allocations on the same `testturnd` process, one per peer,
+exchanging relayed payload with each other directly). An earlier version of
+this rule matched "either side" here too, which meant a packet from one
+peer's own *host* candidate (ephemeral source port) straight to the *other*
+peer's relay candidate address (destination port in `31000-31127`) was also
+accepted — a mixed host↔relay ICE pair that let one side skip relaying
+entirely, silently defeating the suite's central claim. The relayed-data
+rule now requires **both** the source and destination port to be in
+`31000-31127` (`--sport X:Y --dport X:Y`, not `multiport --ports`), which
+only ever matches genuine relay↔relay traffic; a mixed host↔relay pair
+correctly falls through to the UDP DROP catch-all instead. This makes "the
+transfer completed" and "both peers actually relayed" the same fact by
+construction — no separate `getStats()`-based candidate-type assertion is
+needed in `relay.spec.ts`.
+
+Why the relay range (`31000-31127`) sits below the kernel's ephemeral range
+(`32768-60999`, `/proc/sys/net/ipv4/ip_local_port_range`): so no
+host-candidate (kernel-assigned) UDP socket that a peer opens for a direct
+WebRTC path can ever land inside the relay range and be mistaken for one.
+`relay-firewall.sh verify` checks this invariant against the namespace's
+actual `ip_local_port_range` rather than assuming it.
+
+The `netem` and `relay` suites never share a running namespace instance:
+each runs in its own CI job on its own runner, `netns.sh up` refuses to
+create a namespace that already exists, and both suites pin fixed ports
+with `workers: 1`, ruling out an accidental concurrent local run too. Don't
+run `netem.spec.ts` in a namespace that has the relay firewall applied (or
+vice versa) — the netem suite expects direct UDP to work.
+
+### `testturnd`
+
+`internal/testturn` wraps `github.com/pion/turn/v5` directly instead of
+running a real coturn instance, so CI needs no extra service to install or
+configure. Its binary, `internal/testturn/testturnd`, is a deliberate
+exception to the repo's flat `internal/` package layout (see AGENTS.md,
+CLAUDE.md): it lives nested under the one library it wraps instead of under
+`cmd/`, because it's CI test tooling built directly by CI
+(`go build ./internal/testturn/testturnd`) and never by the `Makefile` or
+`.goreleaser.yaml`.
+
+- **Credentials.** `testturnd -secret` (env `SP2P_TESTTURN_SECRET`) must
+  match the signaling server's `-turn-secret`/`SP2P_TURN_SECRET`.
+  `turn.LongTermTURNRESTAuthHandler` implements exactly the same TURN-REST
+  scheme as `internal/server/turn.go`'s `TURNCredentialGenerator`: username
+  `<unix-expiry>:<sp2p-session-id>`, password
+  `base64(HMAC-SHA1(secret, username))`. Both peers of one sp2p session
+  share a single TURN username, so `testturnd`'s per-session accounting is
+  naturally per-username too.
+- **No egress denylist.** Unlike `deploy/turnserver.conf.example` (which
+  denies loopback/private/multicast peer IPs for a real public deployment),
+  `testturnd` allows same-host peers — the whole point here is two peers on
+  the *same* CI runner relaying through it.
+- **Exact accounting, no reservation needed.** `testturnd`'s quota check
+  (`tracker.allow` in `internal/testturn/stats.go`) is a plain
+  check-then-increment with no reservation step, and it's still race-free:
+  pion runs exactly one read-loop goroutine per `turn.PacketConnConfig`
+  entry, and `testturnd` registers exactly one entry and zero
+  `ListenerConfigs`, so `QuotaHandler`, `CreateAllocation`, and the
+  resulting `OnAllocationCreated`/`OnAllocationDeleted` events are all
+  handled synchronously within that one goroutine — even under concurrent
+  client `Allocate` requests for the same session (verified by
+  `TestServer_QuotaConcurrency` in `internal/testturn/turn_test.go`, which
+  fires 12 concurrent allocation attempts at a quota of 4 and asserts
+  exactly 4 succeed). Adding a TCP/TLS listener would break this invariant
+  and require a reservation-with-timeout scheme instead.
+- **`stats.json`** is written atomically (temp file + rename, mirroring
+  `internal/cli/machine.go`'s status-snapshot pattern) on every allocation
+  event. Schema (all fields present, `users` keyed by a 16-hex-char
+  `sha256(userID)` prefix — TURN usernames, which embed the sp2p session
+  ID, are never written to disk in the clear):
+
+  ```jsonc
+  {
+    "version": 1, "seq": 42, "ready": true, "closed": false, "userQuota": 0,
+    "created": 16, "deleted": 16, "live": 0, "peakLive": 16,
+    "quotaRejected": 0, "authFailures": 0, "relayAllocFailures": 0, "anomalies": 0,
+    "pionLive": 0, // turn.Server.AllocationCount() at write time — cross-check
+    "relayedBytesFromPeers": 67145728, "relayedBytesToPeers": 67145728,
+    "users": { "<16-hex-char key>": { "created": 16, "deleted": 16, "live": 0, "peakLive": 16, "quotaRejected": 0, "relayedBytesFromPeers": 67108864, "relayedBytesToPeers": 67108864 } }
+  }
+  ```
+
+  `relay.spec.ts` polls this file directly (never over the network) to
+  assert exact per-session allocation counts and to detect a "no new TURN
+  session key appeared" leak-free release.
+- **Logging.** `-log-level` defaults to `disabled`. `pion/turn`'s
+  long-term-credential auth handler logs the full TURN username — which
+  embeds the sp2p session ID — at Trace/Error level, so `testturnd` always
+  uses a disabled logger for auth regardless of `-log-level`; anything above
+  `disabled` is for local debugging only, never CI (AGENTS.md: never log
+  transfer codes or TURN secrets).
+- **Orphan protection.** `-exit-with-parent` polls its parent PID and exits
+  cleanly within 500ms of being reparented, so a killed Playwright worker
+  can't leave a `testturnd` holding UDP port 3478 across later runs.
+
+### Allocation formula
+
+**Every lane (the primary connection plus each authenticated extra
+parallel-WebRTC lane) on every peer that actually relays makes its own TURN
+allocation.** Each lane is its own `RTCPeerConnection`/ICE agent that reuses
+the primary's already-negotiated ICE server configuration (browser:
+`web/src/webrtc-parallel.ts`'s `Lane` constructor calls
+`new RTCPeerConnection(pc.getConfiguration())`; CLI: pion's own ICE agent,
+one per lane) — TURN credentials are never re-requested per lane, but each
+lane still gathers its own candidates and therefore makes its own
+allocation. So for the full 8-lane policy relayed on both sides:
+
+```text
+created = PEERS × LANES = 2 × 8 = 16
+```
+
+Chromium's `bundlePolicy: "max-bundle"` (`web/src/webrtc.ts`'s
+`BUFFER_HINT`/`addBufferHint`, set for every non-Firefox connection) is why
+this holds at exactly one allocation per *connection*: max-bundle keeps a
+connection's data channel and its buffer-hint video section on one ICE
+transport instead of two. Removing it (mutation (a) below) is expected to
+double the per-connection count for Chromium-*offering* connections
+specifically — a Chromium *answerer* isn't affected, since it only starts
+gathering once it accepts the offer's BUNDLE group. The exact figure above
+was derived from source, not measured; **a real CI run's `relay-turn-stats`
+artifact / `test-results/relay/*.json` (surfaced by
+`web/tests/relay-summary.mjs`'s job-summary table) is the empirical
+confirmation** — if a real run disagrees with 16, treat that as a genuine
+finding, not something to paper over with a range: a uniform multiple
+across every cell points at the test harness (e.g. IPv6 or a second
+network path inside the namespace); a mismatch confined to
+Chromium-*offering* cells points at `bundlePolicy` not actually being
+honored — a real regression against the identical assumption
+`deploy/turnserver.conf.example`'s quota sizing already depends on.
+
+> Confirmed value from CI: _pending first green `relay`/`relay-full` run on
+> this branch — update this line with the observed `created` count once
+> available._
+
+### Quota and graceful degradation
+
+Both peers of one sp2p session share a single TURN username (issued once
+by the signaling server on `relay-retry` — `internal/server/handler_signal.go`),
+so `testturnd -user-quota` caps live allocations *per session*, combined
+across both peers, not per peer. The nightly-only quota case
+(`-user-quota 8`, mirroring `deploy/turnserver.conf.example`'s production
+`user-quota=32` sizing logic) transfers 64 MiB Chromium-to-Chromium and
+asserts, structurally rather than against a hardcoded number (the exact
+reduced count is recorded in `test-results/relay/quota8-chromium-chromium.*.json`
+for a human/CI-log reader, not asserted in the test):
+
+- the transfer still completes with a matching SHA-256 and size;
+- both sides independently negotiate the **same** reduced lane count
+  (mutual agreement — `1 <= count < 8`);
+- exactly 8 allocations were created (capped precisely at the quota) and at
+  least one was quota-rejected;
+- live allocations still return to 0 within the leak window once the
+  transfer completes.
+
+No protocol change is needed for "both sides agree on a reduced lane
+count": `web/src/webrtc-parallel.ts`'s `negotiateParallelWebRTC` already
+commits the *intersection* of both sides' successfully-authenticated lane
+masks (`selected = ours & peerMask`, then a `commit`/`committed`
+round-trip) — a lane whose TURN allocation was rejected by quota simply
+never authenticates, drops out of `ours`/`peerMask` on its own side, and
+the mutual intersection naturally shrinks to whatever both sides actually
+managed to connect. This is the same mechanism that already handles an
+ordinary lane connectivity failure; quota-induced ICE failure on some lanes
+is indistinguishable from that to the protocol.
+
+### Consent controls
+
+The relay path requires explicit user consent on both peers independently:
+browsers via the `confirm()` dialog in `web/src/main.ts`'s
+`establishP2PWithRetry` callers (`RELAY_CONFIRM` in `relay.spec.ts`); the
+CLI via the `relay_required` JSON event answered through the response-file
+mechanism (`internal/cli/machine.go`'s `promptRelay`) — never
+`-allow-relay`, since that would remove the very prompt whose appearance
+proves the direct path failed first. `relay.spec.ts`'s positive-path tests
+therefore register a real dialog handler on every browser page *before*
+navigation (Playwright auto-dismisses an unhandled dialog, which would
+look exactly like a genuine decline) and answer every CLI's relay prompt
+explicitly via `answerRelayPrompt`.
+
+The nightly-only negative controls dismiss/deny consent instead:
+
+- **Both browsers decline** — each independently throws
+  `"P2P connection failed and relay was declined"` (own-side decline is
+  checked before this side even learns the peer's answer — see
+  `establishP2PWithRetry`) and zero TURN allocations are ever created.
+- **A CLI receiver denies, and the browser sender independently declines**
+  — the CLI's terminal result is exactly
+  `{outcome: "failed", error: {code: "relay_denied", message: "Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay."}}`
+  with exit code 1; the browser shows the same
+  `"...relay was declined"` message.
+
+**Known asymmetric-consent-messaging gap, found while writing this suite:**
+each side's own `confirm()`/prompt decision is checked *before* that side
+learns whether its peer already agreed or declined — `relay-retry` is sent
+to the peer before showing the local prompt specifically so both prompts
+can appear in parallel, but the side that already sent `relay-retry` and
+then declines "wins" the peer's `agree-vs-deny` race as "agreed" from the
+*other* peer's perspective. So if peer A declines while peer B is still
+about to accept, B never sees "peer denied" — it proceeds to attempt 2,
+allocates a TURN relay, and then fails on a plain timeout/disconnect
+instead of a clear "peer declined the relay" message. Consent itself is
+still correctly enforced (the declining side never allocates), but the
+*other* side's error message is misleading. This is a product-behavior
+finding, not a test bug; it isn't fixed here.
+
+### Leak check
+
+Every positive-path test polls `testturnd`'s `stats.json` for up to 10s
+after the transfer completes (`LEAK_WINDOW_MS` in `relay.spec.ts`) and
+requires the session's `live` count (and pion's own independent
+`pionLive` cross-check) to reach exactly 0 — proving every lane's
+`RTCPeerConnection`, including every one that was ever created during
+setup, actually released its TURN allocation, not just the ones selected
+for the final transfer.
+
+A completed transfer alone can't prove this: `web/src/webrtc-parallel.ts`'s
+`negotiateParallelWebRTC` already closes every unselected/failed lane in
+its own `finally` block once setup succeeds, so a completed transfer's
+"lanes that were never selected" case is exercised by every ordinary
+pairing test already. What it *can't* exercise is a peer that abandons
+setup entirely partway through — the nightly-only "receiver abandons lane
+setup" test does: an injected `RTCPeerConnection` subclass on the receiver
+closes every connection on the page (primary and every extra lane) the
+instant the first extra-lane offer is applied, before that lane ever starts
+its own ICE gathering. This reaches the primary `negotiateParallelWebRTC`'s
+`!success` cleanup path (not the ordinary success path's per-lane
+cleanup), which is the one place mutation (c) below (skipping
+`lanes[id]?.close()`) can be observed to matter — every other test in this
+suite fully commits every lane it creates, so removing that line wouldn't
+change their outcome at all.
+
+### Running locally (Linux only)
+
+```bash
+sudo apt-get install -y ethtool iptables
+make build-cli build-server
+go build -o bin/testturnd ./internal/testturn/testturnd
+cd web && npm ci && npm run build && npx playwright install --with-deps chromium firefox && cd ..
+sudo scripts/ci/netns.sh up
+sudo scripts/ci/relay-firewall.sh apply
+sudo scripts/ci/relay-firewall.sh verify
+cd web
+SP2P_RELAY_TEST=1 SP2P_PW_SKIP_WEB_BUILD=1 \
+  SP2P_PW_CLI_BIN="$PWD/../bin/sp2p" SP2P_PW_SERVER_BIN="$PWD/../bin/sp2p-server" \
+  SP2P_PW_TESTTURND_BIN="$PWD/../bin/testturnd" \
+  ../scripts/ci/netns.sh exec -- npx playwright test --project=relay   # add --grep @pr for the PR subset
+cd ..
+sudo scripts/ci/relay-firewall.sh stats   # optional: packet/byte counters while it's still up
+sudo scripts/ci/relay-firewall.sh clear   # optional: only needed to re-apply/iterate without tearing the namespace down
+sudo scripts/ci/netns.sh down
+node web/tests/relay-summary.mjs --expect full   # markdown table from test-results/relay/*.json
+```
+
+`SP2P_PW_SKIP_WEB_BUILD`/`SP2P_PW_CLI_BIN`/`SP2P_PW_SERVER_BIN` behave
+exactly as in the netem suite (see above); `SP2P_PW_TESTTURND_BIN` is the
+same idea for the TURN test binary — set it to reuse a prebuilt binary
+instead of letting the suite's worker fixture `go build` a fresh one (which
+would otherwise need network access for module resolution, unavailable
+inside the namespace).
+
+### Known gaps
+
+- **WebKit isn't covered.** The netns-based approach needs a real Linux
+  network namespace; WebKit only gets meaningful coverage on `macos-15`
+  runners (see `nightly.yml`'s `engines` job), which has no netns support.
+- **TURN over TCP/TLS isn't covered** — `testturnd` registers only a UDP
+  `PacketConnConfig`, matching the one transport sp2p's signaling server
+  ever configures (`-turn-servers` only ever carries `turn:...?transport=udp`
+  URLs in this codebase today).
+- **Single-host topology.** Every peer, the signaling server, and
+  `testturnd` all run on the same CI runner, so one relay allocation per
+  lane is always sufficient — this suite doesn't (and can't, on a single
+  host) exercise a topology where a lane might need two relay hops.

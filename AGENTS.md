@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 
 - `cmd/sp2p/` and `cmd/sp2p-server/` contain CLI and signaling-server entrypoints.
-- `internal/` holds flat Go packages: `flow` orchestrates transfers, `conn` manages transports, and `crypto`, `transfer`, `archive`, and `server` implement core behavior.
+- `internal/` holds flat Go packages: `flow` orchestrates transfers, `conn` manages transports, and `crypto`, `transfer`, `archive`, and `server` implement core behavior. One deliberate exception: `internal/testturn/testturnd/` is a small CI-only TURN server binary nested under the only library (`internal/testturn`) it wraps, since it is built directly by CI workflows and never by the Makefile or `.goreleaser.yaml` — see `docs/testing.md`'s TURN relay section.
 - `web/src/` contains vanilla TypeScript; HTML/CSS assets live in `web/`. Generated `web/dist/` assets are embedded in the server.
 - Go tests accompany packages; integration tests live in `internal/`, Playwright tests in `web/tests/`, and documentation in `docs/` and `man/`.
 

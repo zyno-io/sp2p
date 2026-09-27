@@ -32,6 +32,7 @@ function waitForPort(port: number, timeout = 10_000): Promise<void> {
 export default async function globalSetup() {
   // Stale records from an earlier local run would hide a MISSING pairing.
   if (process.env.SP2P_NETEM_PROFILE) rmSync(join(__dirname, "..", "..", "test-results", "perf"), { recursive: true, force: true });
+  if (process.env.SP2P_RELAY_TEST) rmSync(join(__dirname, "..", "..", "test-results", "relay"), { recursive: true, force: true });
 
   const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-"));
 
@@ -103,6 +104,7 @@ export default async function globalSetup() {
     pid: server.pid,
     tmpDir,
     cliBin,
+    serverBin,
     port: PORT,
   }));
 
@@ -112,6 +114,7 @@ export default async function globalSetup() {
     pid: server.pid,
     tmpDir,
     cliBin,
+    serverBin,
     port: PORT,
     stateFile,
   }));

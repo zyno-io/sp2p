@@ -26,6 +26,7 @@ internal/
   semver/           Version comparison
   server/           Signaling server, ACME, TURN, rate limiting, web handlers
   signal/           WebSocket signaling client
+  testturn/         CI-only TURN relay server for relay.spec.ts (+ testturnd/ binary — the one nested exception to the flat layout below)
   transfer/         Frame-based transfer protocol (FrameReadWriter interface)
 web/src/            TypeScript frontend (esbuild → web/dist/)
 man/                Man pages
@@ -46,7 +47,7 @@ man/                Man pages
 - Go module: `github.com/zyno-io/sp2p`
 - Error handling: wrap with `fmt.Errorf("context: %w", err)`
 - Context passed explicitly through call chains
-- Packages are flat within `internal/` — no deep nesting
+- Packages are flat within `internal/` — no deep nesting (one deliberate exception: `internal/testturn/testturnd/`, a CI-only binary nested under the only library it wraps — see docs/testing.md's TURN relay section)
 - CGO_ENABLED=0 for fully static binaries
 
 ## Build Flags (ldflags)

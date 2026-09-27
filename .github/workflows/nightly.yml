@@ -150,11 +150,71 @@ jobs:
           SP2P_TEST_PREVIOUS_WEB_DIR: ${{ github.workspace }}/.compat-n2/web/dist
           SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
 
+  # Full relay-only TURN matrix (all pairings incl. Firefox, the per-user
+  # quota case, and the consent-decline negative controls) — the nightly
+  # counterpart to ci.yml's PR-gated `relay` job. See docs/testing.md's TURN
+  # relay section.
+  relay-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SP2P_RELAY_TEST: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci
+      - run: make build-web
+      - name: Build CLI, server, and test-TURN binaries
+        run: |
+          go build -o bin/sp2p ./cmd/sp2p
+          go build -o bin/sp2p-server ./cmd/sp2p-server
+          go build -o bin/testturnd ./internal/testturn/testturnd
+      - run: cd web && npx playwright install --with-deps firefox chromium
+      - name: Ensure ethtool and iptables are available
+        run: command -v ethtool && command -v iptables || (sudo apt-get update && sudo apt-get install -y ethtool iptables)
+      - name: Create the sp2p network namespace
+        run: sudo scripts/ci/netns.sh up
+      - name: Apply the relay-only firewall
+        run: sudo scripts/ci/relay-firewall.sh apply
+      - name: Preflight — hard-fail unless the relay-only firewall is in place
+        run: sudo scripts/ci/relay-firewall.sh verify
+      - name: Run the full relay suite inside the namespace
+        run: |
+          cd web
+          "$GITHUB_WORKSPACE/scripts/ci/netns.sh" exec -- npx playwright test --project=relay
+        env:
+          SP2P_PW_SKIP_WEB_BUILD: "1"
+          SP2P_PW_CLI_BIN: ${{ github.workspace }}/bin/sp2p
+          SP2P_PW_SERVER_BIN: ${{ github.workspace }}/bin/sp2p-server
+          SP2P_PW_TESTTURND_BIN: ${{ github.workspace }}/bin/testturnd
+      - name: Firewall counters (post-run, for the job log)
+        if: always()
+        run: sudo scripts/ci/relay-firewall.sh stats || true
+      - name: Relay summary (fails on missing pairings)
+        if: always()
+        run: node web/tests/relay-summary.mjs --gate --expect full
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: relay-turn-stats-nightly
+          path: test-results/relay/**
+          if-no-files-found: ignore
+      - name: Tear down the network namespace
+        if: always()
+        run: sudo scripts/ci/netns.sh down
+
   # Runs regardless of which job(s) failed (fail-fast is off on the netem
-  # matrix, and compat-n2/engines are independent of it and each other), and
-  # only on failure — a green night is silent.
+  # matrix, and compat-n2/engines/relay-full are independent of it and each
+  # other), and only on failure — a green night is silent.
   report-failure:
-    needs: [netem-nightly, compat-n2, engines]
+    needs: [netem-nightly, compat-n2, engines, relay-full]
     # A leg that hits timeout-minutes is reported as cancelled, not failed.
     if: failure() || cancelled()
     runs-on: ubuntu-latest
@@ -170,6 +230,7 @@ jobs:
           NETEM_RESULT: ${{ needs.netem-nightly.result }}
           COMPAT_N2_RESULT: ${{ needs.compat-n2.result }}
           ENGINES_RESULT: ${{ needs.engines.result }}
+          RELAY_RESULT: ${{ needs.relay-full.result }}
         run: |
           set -euo pipefail
           gh label create nightly --color b60205 \
@@ -183,10 +244,11 @@ jobs:
           if [[ "$NETEM_RESULT" != "success" ]]; then failed+="- netem-nightly: $NETEM_RESULT\n"; fi
           if [[ "$COMPAT_N2_RESULT" != "success" ]]; then failed+="- compat-n2: $COMPAT_N2_RESULT\n"; fi
           if [[ "$ENGINES_RESULT" != "success" ]]; then failed+="- engines: $ENGINES_RESULT\n"; fi
+          if [[ "$RELAY_RESULT" != "success" ]]; then failed+="- relay-full: $RELAY_RESULT\n"; fi
 
           note="Run: $RUN_URL (branch \`${GITHUB_REF_NAME}\`, commit \`${GITHUB_SHA:0:12}\`)."
           jobs=$(printf '%b' "$failed")
-          detail="See the job summary and artifacts on this run for details. netem: netem-nightly-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section). engines: the WebKit and full cross-engine matrix run on macos-15 (docs/testing.md's Engines section)."
+          detail="See the job summary and artifacts on this run for details. netem: netem-nightly-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section). engines: the WebKit and full cross-engine matrix run on macos-15 (docs/testing.md's Engines section). relay-full: relay-only TURN transfers, per-session allocation accounting, quota and consent controls (relay-turn-stats-nightly artifact; docs/testing.md's TURN relay section)."
           body=$(printf '%s\n\nFailed job(s):\n%s\n%s\n' "$note" "$jobs" "$detail")
 
           if [[ -n "$existing" && "$existing" != "null" ]]; then
