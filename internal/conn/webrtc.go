@@ -63,11 +63,16 @@ type WebRTCConn struct {
 	receiveBudget *webRTCReceiveBudget
 	enqueueMu     sync.Mutex
 
-	writeMu       sync.Mutex
-	flowMu        sync.Mutex
-	flowCond      *sync.Cond
-	closed        chan struct{}
-	closeOnce     sync.Once
+	writeMu   sync.Mutex
+	flowMu    sync.Mutex
+	flowCond  *sync.Cond
+	closed    chan struct{}
+	closeOnce sync.Once
+	// pion's PeerConnection.Close returns immediately to a second caller
+	// while the first is still closing, so the process could exit before
+	// TURN allocations were released. pcCloseOnce makes every Close wait.
+	pcCloseOnce   sync.Once
+	pcCloseErr    error
 	deadlineMu    sync.Mutex
 	deadlineTimer *time.Timer
 	bufferLimit   atomic.Uint64
@@ -581,7 +586,8 @@ func (c *WebRTCConn) Close() error {
 	if dc := c.dataChannel(); dc != nil {
 		dc.Close()
 	}
-	return c.pc.Close()
+	c.pcCloseOnce.Do(func() { c.pcCloseErr = c.pc.Close() })
+	return c.pcCloseErr
 }
 
 func (c *WebRTCConn) SetDeadline(t time.Time) error {
