@@ -80,10 +80,56 @@ jobs:
         if: always()
         run: sudo scripts/ci/netns.sh down
 
-  # Runs regardless of which matrix leg(s) failed (fail-fast is off), and
-  # only on failure — a green night is silent.
+  # N-2 previous-release compatibility: the protocol-compatibility job in
+  # ci.yml only ever exercises N-1 (scripts/ci/previous-release.sh's default
+  # --nth 1); this nightly leg additionally exercises N-2, so a peer two
+  # releases back doesn't silently regress between whenever it stops being
+  # "the previous release" and whenever someone happens to test it by hand.
+  compat-n2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Resolve N-2 previous release
+        id: previous
+        # git ls-remote queries origin directly, so this needs no extra tag
+        # fetch even with the primary checkout's default shallow history.
+        run: bash scripts/ci/previous-release.sh --nth 2 >> "$GITHUB_OUTPUT"
+      - name: Build N-2 fixture (.compat-n2)
+        uses: ./.github/actions/build-release-fixture
+        with:
+          sha: ${{ steps.previous.outputs.sha }}
+          version: ${{ steps.previous.outputs.version }}
+          path: .compat-n2
+      - run: npm --prefix web ci
+      - run: npm --prefix web run build
+      - name: Check CLI and server version matrix (N-2)
+        run: go test ./internal -run '^TestE2E_ProtocolCompatibility$' -count=1 -timeout=15m
+        env:
+          SP2P_TEST_PREVIOUS_BINARY: ${{ github.workspace }}/.compat-n2/bin/sp2p
+          SP2P_TEST_PREVIOUS_SERVER_BINARY: ${{ github.workspace }}/.compat-n2/bin/sp2p-server
+          SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
+      - run: cd web && npx playwright install --with-deps chromium
+      - name: Check browser and CLI cross-release transfers (N-2)
+        run: cd web && npx playwright test tests/compatibility.spec.ts --reporter=list
+        env:
+          SP2P_TEST_PREVIOUS_BINARY: ${{ github.workspace }}/.compat-n2/bin/sp2p
+          SP2P_TEST_PREVIOUS_WEB_DIR: ${{ github.workspace }}/.compat-n2/web/dist
+          SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
+
+  # Runs regardless of which job(s) failed (fail-fast is off on the netem
+  # matrix, and compat-n2 is independent of it), and only on failure — a
+  # green night is silent.
   report-failure:
-    needs: netem-nightly
+    needs: [netem-nightly, compat-n2]
     # A leg that hits timeout-minutes is reported as cancelled, not failed.
     if: failure() || cancelled()
     runs-on: ubuntu-latest
@@ -96,21 +142,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NETEM_RESULT: ${{ needs.netem-nightly.result }}
+          COMPAT_N2_RESULT: ${{ needs.compat-n2.result }}
         run: |
           set -euo pipefail
           gh label create nightly --color b60205 \
-            --description "Nightly netem WAN benchmark failures" --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+            --description "Nightly compatibility/benchmark failures" --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
 
-          title="Nightly netem WAN benchmark failed"
+          title="Nightly checks failed"
           existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --label nightly --state open \
             --search "in:title \"$title\"" --json number --jq '.[0].number')
 
+          failed=""
+          if [[ "$NETEM_RESULT" != "success" ]]; then failed+="- netem-nightly: $NETEM_RESULT\n"; fi
+          if [[ "$COMPAT_N2_RESULT" != "success" ]]; then failed+="- compat-n2: $COMPAT_N2_RESULT\n"; fi
+
           note="Run: $RUN_URL (branch \`${GITHUB_REF_NAME}\`, commit \`${GITHUB_SHA:0:12}\`)."
-          detail="See the job summary and the netem-nightly-perf-* artifacts on this run for per-pairing numbers and netem drops. See docs/testing.md for the netem suite design and how to reproduce it locally on Linux."
-          body=$(printf '%s\n\n%s\n' "$note" "$detail")
+          jobs=$(printf '%b' "$failed")
+          detail="See the job summary and artifacts on this run for details. netem: netem-nightly-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section)."
+          body=$(printf '%s\n\nFailed job(s):\n%s\n%s\n' "$note" "$jobs" "$detail")
 
           if [[ -n "$existing" && "$existing" != "null" ]]; then
-            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$note"
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label nightly --body "$body"
           fi

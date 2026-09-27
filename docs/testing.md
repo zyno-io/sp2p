@@ -105,6 +105,86 @@ version fails the test rather than assuming a default.
 tagged it becomes "the previous release" for CI, and the lookup fails closed
 for unlisted versions.
 
+### Browser previous-release matrix
+
+`web/tests/compatibility.spec.ts`'s `"previous release"` describe block is
+the browser-side counterpart to `TestE2E_ProtocolCompatibility`'s
+`webrtc-lanes` cases above, and is driven by the same
+`testdata/release-capabilities.json` table plus three env vars — unset any
+one and every test in the block skips cleanly:
+
+| Env var | What it points at |
+|---|---|
+| `SP2P_TEST_PREVIOUS_BINARY` | The previous release's `sp2p` CLI binary |
+| `SP2P_TEST_PREVIOUS_WEB_DIR` | The previous release's built `web/dist` |
+| `SP2P_TEST_PREVIOUS_VERSION` | Its plain `X.Y.Z` version (no `v` prefix; a `release-capabilities.json` lookup key) |
+
+It runs all four sender/receiver pairings of a new peer against a
+previous-release peer, plus a browser-to-browser test that covers both
+directions on one pair of pages, all at 64&nbsp;MiB — the `PARALLEL_MIN_BYTES`
+(`web/src/webrtc-parallel.ts`) / `parallelMinFileSize`
+(`internal/flow/send.go`, `receive.go`) auto threshold, so a browser sender
+and a previous-release CLI sender in auto mode both actually request more
+than one WebRTC lane. Each case asserts the received file's SHA-256, that
+both sides reach `.complete`/exit 0, and that both sides negotiated
+`min(8, cap(prev))` lanes (`0` lanes — no parallel WebRTC at all — for a
+protocol-2 previous release; see `expectedLaneCounts` in the spec, which
+reads this off the capabilities table rather than checking the version
+string). A cheap 5&nbsp;MiB variant covers one CLI/browser pairing without the
+cost of another 64&nbsp;MiB buffer, since the 64&nbsp;MiB cases already cover lane
+negotiation.
+
+**Fixture identity checks:** a previous/legacy browser page is served by
+intercepting routes (`serveLegacyBrowser` in the spec) rather than a real
+second `webServer`; if that interception ever misses (e.g. a route regex that
+stops matching a renamed asset), Playwright silently falls through to the
+live app and the test would pass while comparing new-vs-new instead of
+old/previous-vs-new. `assertBundleIdentity` guards against this: it reads the
+page's loaded `script[src*="main-"]` basename and asserts it equals the
+`main-*.js` file actually present in the fixture's web dir. This runs for
+every legacy/previous browser page, including the pre-existing pinned
+v0.4.0/v0.5.0 cases. The CLI side has an equivalent check: `sp2p version`'s
+output must contain `SP2P_TEST_PREVIOUS_VERSION`.
+
+**CI wiring:** `.github/actions/build-release-fixture` is a composite action
+that checks out a commit SHA (never a moving tag), builds its web assets, CLI,
+and server, and caches the result keyed on both the SHA and the version
+(`compat-<sha>-<version>-<os>-v1` — the version is included because a commit
+can end up tagged with more than one version, e.g. a no-op re-release, and
+the version string is baked into the binaries via `-ldflags`, so the SHA
+alone isn't a safe cache key). `ci.yml`'s `protocol-compatibility` job uses
+it to build `.compat-prev` (resolved via `previous-release.sh`'s default
+`--nth 1`, i.e. N-1) and feeds both the Go test and this Playwright spec from
+it. `nightly.yml`'s `compat-n2` job builds a second fixture the same way at
+`--nth 2` (N-2), so a peer two releases back also keeps getting exercised,
+not just whichever release happens to be "the previous one" at any given
+moment.
+
+**Protocol-2 previous releases aren't reachable from CI today.** The
+`expectedLaneCounts` branch above that expects no lane negotiation exists so
+the spec stays correct *if* `SP2P_TEST_PREVIOUS_VERSION` is ever pointed at a
+protocol-2 release (verified locally against a real v0.4.0 fixture — 7/7
+pass), but neither `ci.yml` nor `nightly.yml` can currently produce that:
+`previous-release.sh`'s `--nth 1`/`--nth 2` both resolve to protocol-3
+releases today, and `TestE2E_ProtocolCompatibility` (which runs before this
+spec in both jobs) isn't protocol-2-aware for the `SP2P_TEST_PREVIOUS_*` env
+vars — it would fail first. Revisit both if a future release ever makes N-2
+protocol-2 again.
+
+### Pinned fixtures and the tag-move policy
+
+The v0.4.0 and (original) v0.5.0 fixtures in `ci.yml` are checked out by
+commit SHA, not by tag, specifically so a moved or re-pushed tag can never
+change what they test. **Policy: if a release tag ever has to move** (as
+v0.5.0's did, from `d303e1a947ca8ef6bb000dfe8660e7a05c7738cd` to its current
+commit), pin the tag's pre-move SHA as a new historical fixture before
+moving it, the same way v0.5.0's pre-move SHA is pinned today — never let a
+historical-compatibility fixture depend on a tag that can move out from
+under it. The resolved-at-runtime "previous release"/"N-2" fixtures above
+are the deliberate exception: they always track a real, current tag by
+design, since they exist to test whatever the previous release(s) actually
+are right now.
+
 ## Opt-in WAN harnesses
 
 `web/tests/wan-*.mjs` are standalone scripts, not Playwright specs — they are
