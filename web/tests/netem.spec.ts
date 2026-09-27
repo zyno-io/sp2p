@@ -456,11 +456,13 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
 
   // Negative control: proves the rb sampler actually distinguishes hinted
   // from unhinted connections, rather than always reporting a large number.
-  test("negative control: disabling the buffer hint keeps rb at the unhinted size", async ({ browser, baseURL }) => {
+  test("negative control: disabling the buffer hint keeps rb at the unhinted size", async ({ browserType, launchOptions, baseURL }) => {
     // Large enough to stay open for several sampling ticks at 150 ms RTT, but
     // below the 64 MiB parallel threshold.
     const controlContents = randomBytes(32 * 1024 * 1024);
     const controlHash = createHash("sha256").update(controlContents).digest("hex");
+    // A fresh browser process, so sockets from earlier tests can't count.
+    const browser = await browserType.launch(launchOptions);
     const sender = await browser.newPage({ baseURL });
     const receiver = await browser.newPage({ baseURL });
     // addBufferHint (web/src/webrtc.ts) wraps its addTransceiver call in a
@@ -487,6 +489,7 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
     } finally {
       await sender.close();
       await receiver.close();
+      await browser.close();
     }
   });
 });
