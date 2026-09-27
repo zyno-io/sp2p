@@ -14,11 +14,10 @@
 // (playwright.config.ts) declares no browserName of its own — it exists
 // only to scope which tests run.
 //
-// Receivers use the OPFS-free hashingPicker sink (web/tests/helpers.ts), not
-// receiveToDisk/an arrayBuffer read-back of the whole file — see
-// docs/testing.md's Engines section: a spike found Playwright's bundled
-// WebKit's OPFS createWritable() unreliable, and hashingPicker sidesteps
-// that entirely by hashing incrementally as chunks are written.
+// Each receiver uses installReceiverSink (web/tests/helpers.ts), which picks
+// each engine's own real receive path: real OPFS on Chromium, the in-memory
+// blob + downloadBlob path on Firefox/WebKit (neither implements
+// showSaveFilePicker for real) — see docs/testing.md's Engines section.
 //
 // Chromium↔Firefox (both directions) and CLI↔Firefox (both directions) are
 // tagged @pr and gate PRs cheaply (ci.yml's browser-firefox job, `--project
@@ -33,12 +32,15 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Page, PlaywrightWorkerArgs } from "@playwright/test";
 import { expect } from "./fixtures";
 import {
-  chooseFile, cleanupTemporaryDirectories, hashingPicker, isolatedServerTest as test,
-  observeConnections, temporaryDirectory, verifyHashingSink, watchCLI,
+  chooseFile, cleanupTemporaryDirectories, flushDiagnostics, installReceiverSink, isolatedServerTest as test,
+  observeConnections, temporaryDirectory, trackForDiagnostics, verifyReceiverSink, watchCLI,
 } from "./helpers";
 
 test.setTimeout(120_000);
-test.afterEach(() => { cleanupTemporaryDirectories(); });
+test.afterEach(async ({}, testInfo) => {
+  cleanupTemporaryDirectories();
+  await flushDiagnostics(testInfo);
+});
 
 // Matches PARALLEL_MIN_BYTES (web/src/webrtc-parallel.ts) / parallelMinFileSize
 // (internal/flow) — the auto threshold at which both sides request the full
@@ -60,19 +62,19 @@ async function launchEnginePage(pw: Playwright, engine: EngineName, baseURL: str
 async function runBrowserToBrowser(pw: Playwright, baseURL: string, senderEngine: EngineName, receiverEngine: EngineName): Promise<void> {
   const { browser: senderBrowser, page: sender } = await launchEnginePage(pw, senderEngine, baseURL);
   const { browser: receiverBrowser, page: receiver } = await launchEnginePage(pw, receiverEngine, baseURL);
-  await hashingPicker(receiver);
+  await installReceiverSink(receiver, receiverEngine);
+  trackForDiagnostics(receiver, "receiver");
   try {
     const senderCounts = observeConnections(sender);
     const receiverCounts = observeConnections(receiver);
     const code = await chooseFile(sender, contents, "engine-matrix.bin");
     await receiver.goto(`/r#${code}`);
-    await receiver.addScriptTag({ url: "/crypto-test.js" });
     await receiver.locator(".confirm-btn").click();
     await expect(sender.locator(".complete")).toBeVisible({ timeout: COMPLETE_TIMEOUT });
     await expect(receiver.locator(".complete")).toBeVisible({ timeout: COMPLETE_TIMEOUT });
     expect(senderCounts).toEqual([LANE_COUNT]);
     expect(receiverCounts).toEqual([LANE_COUNT]);
-    await verifyHashingSink(receiver, contents.length, expectedHash);
+    await verifyReceiverSink(receiver, receiverEngine, contents.length, expectedHash);
   } finally {
     await senderBrowser.close();
     await receiverBrowser.close();
@@ -81,8 +83,9 @@ async function runBrowserToBrowser(pw: Playwright, baseURL: string, senderEngine
 
 async function runCLIToBrowser(pw: Playwright, baseURL: string, wsUrl: string, cliBin: string, receiverEngine: EngineName): Promise<void> {
   const { browser, page } = await launchEnginePage(pw, receiverEngine, baseURL);
+  await installReceiverSink(page, receiverEngine);
+  trackForDiagnostics(page, "receiver");
   try {
-    await hashingPicker(page);
     const src = join(temporaryDirectory("sp2p-engine-matrix-send-"), "engine-matrix.bin");
     writeFileSync(src, contents);
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", src]);
@@ -90,13 +93,12 @@ async function runCLIToBrowser(pw: Playwright, baseURL: string, wsUrl: string, c
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);
-      await page.addScriptTag({ url: "/crypto-test.js" });
       await page.locator(".confirm-btn").click();
       await expect(page.locator(".complete")).toBeVisible({ timeout: COMPLETE_TIMEOUT });
       const status = await cli.exited;
       expect(status).toBe(0);
       expect(cli.counts).toEqual([LANE_COUNT]);
-      await verifyHashingSink(page, contents.length, expectedHash);
+      await verifyReceiverSink(page, receiverEngine, contents.length, expectedHash);
     } finally {
       child.kill();
     }

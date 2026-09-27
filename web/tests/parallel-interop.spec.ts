@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-// Uses the OPFS-free hashingPicker sink (not receiveToDisk) so this spec's
-// browser-receiver tests run for real on every engine: a spike found
-// Playwright's bundled WebKit's OPFS createWritable() unreliable (see
-// docs/testing.md's Engines section).
+// Each browser receiver uses installReceiverSink (web/tests/helpers.ts),
+// which picks each engine's own real receive path: real OPFS on Chromium,
+// the in-memory blob + downloadBlob path on Firefox/WebKit (neither
+// implements showSaveFilePicker for real) — see docs/testing.md's Engines
+// section.
 
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -12,8 +13,8 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Page } from "@playwright/test";
 import { expect } from "./fixtures";
 import {
-  chooseFile, cleanupTemporaryDirectories, hashingPicker, isolatedServerTest as test,
-  observeConnections, temporaryDirectory, verifyHashingSink, watchCLI,
+  chooseFile, cleanupTemporaryDirectories, flushDiagnostics, installReceiverSink, isolatedServerTest as test,
+  observeConnections, temporaryDirectory, trackForDiagnostics, verifyReceiverSink, watchCLI,
 } from "./helpers";
 
 test.setTimeout(90000);
@@ -21,21 +22,25 @@ test.setTimeout(90000);
 // their 256 KiB decoded chunks, including compression with parallel lanes.
 const contents = randomBytes(64 * 1024 * 1024);
 const expectedHash = createHash("sha256").update(contents).digest("hex");
-test.afterEach(() => { cleanupTemporaryDirectories(); });
+test.afterEach(async ({}, testInfo) => {
+  cleanupTemporaryDirectories();
+  await flushDiagnostics(testInfo);
+});
 
 function choose(page: Page): Promise<string> {
   return chooseFile(page, contents, "parallel.bin");
 }
 
-function verifyReceived(page: Page): Promise<void> {
-  return verifyHashingSink(page, contents.length, expectedHash);
+function verifyReceived(page: Page, browserName: string): Promise<void> {
+  return verifyReceiverSink(page, browserName, contents.length, expectedHash);
 }
 
 for (const blockedExtras of [0, 1, 3, 7]) {
-  test(`browser parallel WebRTC verifies ${8 - blockedExtras} agreed lanes`, async ({ browser, baseURL }) => {
+  test(`browser parallel WebRTC verifies ${8 - blockedExtras} agreed lanes`, async ({ browser, baseURL, browserName }) => {
     const sender = await browser.newPage({ baseURL }), receiver = await browser.newPage({ baseURL });
     const senderCounts = observeConnections(sender), receiverCounts = observeConnections(receiver);
-    await hashingPicker(receiver);
+    await installReceiverSink(receiver, browserName);
+    trackForDiagnostics(receiver, "receiver");
     if (blockedExtras) await sender.addInitScript(blockedExtras => {
       const Native = RTCPeerConnection;
       let count = 0;
@@ -50,13 +55,12 @@ for (const blockedExtras of [0, 1, 3, 7]) {
     try {
       const code = await choose(sender);
       await receiver.goto(`/r#${code}`);
-      await receiver.addScriptTag({ url: "/crypto-test.js" });
       await receiver.locator(".confirm-btn").click();
       await expect(sender.locator(".complete")).toBeVisible({ timeout: 60000 });
       await expect(receiver.locator(".complete")).toBeVisible({ timeout: 60000 });
       expect(senderCounts).toEqual([8 - blockedExtras]);
       expect(receiverCounts).toEqual(senderCounts);
-      await verifyReceived(receiver);
+      await verifyReceived(receiver, browserName);
     } finally { await sender.close(); await receiver.close(); }
   });
 }
@@ -78,23 +82,23 @@ test("browser parallel WebRTC sender interoperates with CLI receiver", async ({ 
 });
 
 for (const compression of [0, 3]) {
-  test(`CLI parallel WebRTC sender interoperates with disk browser, compression ${compression}`, async ({ page, cliBin, wsUrl }) => {
+  test(`CLI parallel WebRTC sender interoperates with disk browser, compression ${compression}`, async ({ page, cliBin, wsUrl, browserName }) => {
     const src = join(temporaryDirectory("sp2p-parallel-send-"), "parallel.bin");
     writeFileSync(src, contents);
     const counts = observeConnections(page);
-    await hashingPicker(page);
+    await installReceiverSink(page, browserName);
+    trackForDiagnostics(page, "receiver");
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-compress", String(compression), src]);
     const cli = watchCLI(child);
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);
-      await page.addScriptTag({ url: "/crypto-test.js" });
       await page.locator(".confirm-btn").click();
       await expect(page.locator(".complete")).toBeVisible({ timeout: 60000 });
       const status = await cli.exited;
       expect(status).toBe(0);
       expect(counts).toEqual([8]); expect(cli.counts).toEqual([8]);
-      await verifyReceived(page);
+      await verifyReceived(page, browserName);
     } finally { child.kill(); }
   });
 }

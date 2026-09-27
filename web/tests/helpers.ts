@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 
 // Shared Playwright test helpers used by more than one spec file: an
-// isolated-signaling-server fixture, a throwaway-directory allocator, a CLI
-// JSON event watcher, a WebRTC lane count observer, an OPFS-backed save-file
-// sink, an OPFS-free incremental-hashing save-file sink (for cross-engine
-// use), and a share-code chooser.
+// isolated-signaling-server fixture, a throwaway-directory allocator,
+// dump-on-failure diagnostics, a CLI JSON event watcher, a WebRTC lane
+// count observer, a cross-engine receive-path sink (real OPFS on Chromium,
+// a hashed in-memory blob on Firefox/WebKit — each engine's real receive
+// path), and a share-code chooser.
 
 import { execSync, spawn } from "node:child_process";
 import { writeFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -56,6 +57,52 @@ export function temporaryDirectory(prefix: string): string {
 // Call from a test.afterEach to remove every directory allocated so far.
 export function cleanupTemporaryDirectories(): void {
   for (const dir of temporaryDirectories.splice(0)) rmSync(dir, { recursive: true, force: true });
+}
+
+// ── Failure diagnostics (console + step/status text; never codes/URLs) ─────
+
+// Registers a receiver page's console/pageerror output for dump-on-failure
+// diagnostics. Call once per receiver page near the start of a test, and
+// call flushDiagnostics(testInfo) from a test.afterEach in the same file —
+// see webrtc-policy.spec.ts for the pattern. A failing receive test (e.g. a
+// ".complete" that never appears) then logs *why* instead of just the bare
+// assertion failure: the page's step/status/error text and buffered console
+// output. Never reads URLs, share codes, or SDP.
+const diagnosticPages: { page: Page; label: string }[] = [];
+const consoleLogs = new WeakMap<Page, string[]>();
+
+export function trackForDiagnostics(page: Page, label = "page"): void {
+  const logs: string[] = [];
+  consoleLogs.set(page, logs);
+  page.on("console", message => { logs.push(`console.${message.type()}: ${message.text()}`); });
+  page.on("pageerror", error => { logs.push(`pageerror: ${error.message}`); });
+  diagnosticPages.push({ page, label });
+}
+
+export async function flushDiagnostics(testInfo: { status?: string; expectedStatus: string }): Promise<void> {
+  const pages = diagnosticPages.splice(0);
+  if (testInfo.status === testInfo.expectedStatus) return;
+  for (const { page, label } of pages) {
+    if (page.isClosed()) { console.log(`[diagnostics] ${label}: page already closed`); continue; }
+    try {
+      const snapshot = await page.evaluate(() => {
+        const text = (selector: string) => document.querySelector(selector)?.textContent ?? null;
+        const complete = document.querySelector(".complete");
+        return {
+          stepP2P: text(".step-p2p"),
+          statusText: text(".status-text"),
+          errorMessage: text(".error-message"),
+          completeVisible: complete ? !complete.classList.contains("hidden") : null,
+        };
+      });
+      console.log(`[diagnostics] ${label} DOM snapshot: ${JSON.stringify(snapshot)}`);
+    } catch (error) {
+      console.log(`[diagnostics] ${label}: page.evaluate failed: ${error}`);
+    }
+    const logs = consoleLogs.get(page) ?? [];
+    console.log(`[diagnostics] ${label}: ${logs.length} buffered console/pageerror lines`);
+    for (const line of logs) console.log(`[diagnostics] ${label} ${line}`);
+  }
 }
 
 // ── CLI JSON event watcher ──────────────────────────────────────────────────
@@ -143,51 +190,48 @@ export async function verifyDisk(page: Page, expectedSize: number, expectedHash:
   expect(received).toEqual({ size: expectedSize, hash: expectedHash });
 }
 
-// ── Hashing sink (OPFS-free; works on every engine) ─────────────────────────
+// ── Cross-engine receive-path sink ──────────────────────────────────────────
 
-// Redirects the page's save-file picker to a fake handle whose "writable"
-// streams every chunk into the incremental SHA-256 from web/src/sha256.ts
-// (exposed as window.__cryptoTest.SHA256 by the crypto-test bundle — see
-// global-setup.ts) instead of buffering the file or depending on OPFS.
-// receiveToDisk (above) is real OPFS and a spike found WebKit's bundled-with-
-// Playwright createWritable() unreliable (see docs/testing.md's Engines
-// section); this sink has no OPFS dependency at all, so it works identically
-// on Chromium, Firefox, and WebKit.
-//
-// Callers must load the crypto-test bundle on the page — after navigating,
-// before the confirm click that triggers showSaveFilePicker() — with:
-//   await page.addScriptTag({ url: "/crypto-test.js" });
-// (see crypto-vectors.spec.ts for the same pattern). The fake only reads
-// window.__cryptoTest.SHA256 lazily inside createWritable(), so this can
-// happen any time before the first write, not necessarily before goto.
-export async function hashingPicker(page: Page): Promise<void> {
+// Chromium gets the real OPFS disk path (receiveToDisk/verifyDisk above).
+// Firefox and WebKit do not implement showSaveFilePicker for real (Firefox
+// 155, WebKit 26.6, as tested here) — a real user on either engine takes
+// main.ts's in-memory sink + downloadBlob (ui.ts) path, so this installs no
+// picker at all for them, letting `"showSaveFilePicker" in window` read its
+// real (false) value. Instead it hooks URL.createObjectURL — which
+// downloadBlob calls on the Blob the app already built in memory — to hash
+// that same buffer via one-shot Web Crypto, rather than reading anything
+// back a second time or depending on Playwright's download handling. (An
+// earlier version of this sink faked showSaveFilePicker on every engine,
+// which forced Firefox/WebKit down the disk-streaming code path real users
+// on those engines never take — see docs/testing.md's Engines section.)
+export async function installReceiverSink(page: Page, browserName: string): Promise<void> {
+  if (browserName === "chromium") {
+    await receiveToDisk(page);
+    return;
+  }
   await page.addInitScript(() => {
-    (window as any).showSaveFilePicker = async () => ({
-      createWritable: async () => {
-        const SHA256 = (window as any).__cryptoTest.SHA256;
-        const hasher = new SHA256();
-        let size = 0;
+    const native = URL.createObjectURL.bind(URL);
+    (window as any).__blobHashPromise = null;
+    (URL as any).createObjectURL = (blob: Blob) => {
+      (window as any).__blobHashPromise = (async () => {
+        const buffer = await blob.arrayBuffer();
+        const digest = await crypto.subtle.digest("SHA-256", buffer);
         return {
-          write: async (chunk: Uint8Array) => {
-            hasher.update(chunk);
-            size += chunk.byteLength ?? (chunk as any).length ?? 0;
-          },
-          close: async () => {
-            const digest: Uint8Array = hasher.digest();
-            (window as any).__hashingSink = {
-              size,
-              hash: Array.from(digest, (b: number) => b.toString(16).padStart(2, "0")).join(""),
-            };
-          },
-          abort: async () => { /* nothing buffered to discard */ },
+          size: buffer.byteLength,
+          hash: Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join(""),
         };
-      },
-    });
+      })();
+      return native(blob);
+    };
   });
 }
 
-export async function verifyHashingSink(page: Page, expectedSize: number, expectedHash: string): Promise<void> {
-  const received = await page.evaluate(() => (window as any).__hashingSink);
+export async function verifyReceiverSink(page: Page, browserName: string, expectedSize: number, expectedHash: string): Promise<void> {
+  if (browserName === "chromium") {
+    await verifyDisk(page, expectedSize, expectedHash);
+    return;
+  }
+  const received = await page.evaluate(async () => await (window as any).__blobHashPromise);
   expect(received).toEqual({ size: expectedSize, hash: expectedHash });
 }
 

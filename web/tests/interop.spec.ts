@@ -4,6 +4,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createHash } from "node:crypto";
 import { test, expect } from "./fixtures";
+import { flushDiagnostics, trackForDiagnostics } from "./helpers";
+
+test.afterEach(async ({}, testInfo) => { await flushDiagnostics(testInfo); });
 
 async function extractCodeFromShareUrl(page: { locator: (selector: string) => any }): Promise<string> {
   const shareUrl = page.locator(".share-url");
@@ -58,6 +61,7 @@ test("browser sender → browser receiver transfers a file", async ({
   const senderPage = await senderContext.newPage();
   const receiverContext = await browser.newContext();
   const receiverPage = await receiverContext.newPage();
+  trackForDiagnostics(receiverPage, "receiver");
   if (process.env.SP2P_TEST_WEBRTC_DEBUG === "1") {
     for (const [role, page] of [["sender", senderPage], ["receiver", receiverPage]] as const) {
       page.on("console", message => {
@@ -119,6 +123,7 @@ test("browser sender → browser receiver transfers a file", async ({
 test("active browser transfer removes commands and reports sending and connection stages", async ({ browser }) => {
   const sender = await browser.newPage();
   const receiver = await browser.newPage();
+  trackForDiagnostics(receiver, "receiver");
   const stages: string[] = [];
   sender.on("console", message => { if (message.text().includes("WebRTC:")) stages.push(message.text()); });
   await receiver.addInitScript(() => {
@@ -176,6 +181,7 @@ test("CLI sender → browser receiver transfers a file", async ({
   cliBin,
   wsUrl,
 }) => {
+  trackForDiagnostics(page, "receiver");
   const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-cli-"));
   const srcFile = join(tmpDir, "cli-to-browser.txt");
   const fileContent = "CLI to browser test — " + Date.now();

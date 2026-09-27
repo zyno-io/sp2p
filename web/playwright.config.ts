@@ -6,6 +6,13 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   fullyParallel: false, // tests share a server
   retries: 0,
+  // A test that only passes after a retry is still telling us something is
+  // wrong (see docs/testing.md's Engines section) — fail the run instead of
+  // letting a retry quietly launder it. This is a global option (Playwright
+  // has no per-project equivalent); it also applies to the pre-existing
+  // netem project's retries: process.env.CI ? 1 : 0, which only changes that
+  // job's own reported status (it is not a required check).
+  failOnFlakyTests: !!process.env.CI,
   workers: 1, // serial — share a single server process
   use: {
     baseURL: "http://127.0.0.1:18090",
@@ -33,23 +40,21 @@ export default defineConfig({
       name: "firefox",
       use: { browserName: "firefox" },
       testMatch: [/interop\.spec\.ts/, /parallel-interop\.spec\.ts/, /webrtc-policy\.spec\.ts/],
-      // Observed once in CI: interop.spec.ts's real (non-faked)
-      // page.waitForEvent("download") occasionally exceeds its 30s timeout
-      // on Firefox/Linux, unrelated to any assertion here — see
-      // docs/testing.md's Engines section.
-      retries: process.env.CI ? 1 : 0,
+      // No retries: a "flaky" pass here has so far turned out to be a real
+      // hang (a receive test's .complete never appearing) rather than
+      // real-network timing noise — a retry masked it by starting a fresh
+      // worker. See docs/testing.md's Engines section for the investigation
+      // and root cause.
     },
     {
       name: "webkit",
       use: { browserName: "webkit" },
       testMatch: [/interop\.spec\.ts/, /parallel-interop\.spec\.ts/, /webrtc-policy\.spec\.ts/],
-      // Real-timing WebRTC lane negotiation (web/src/webrtc-parallel.ts's
-      // per-lane 8s auth timeout) occasionally lands one lane short of the
-      // full count under CPU contention — see docs/testing.md's Engines
-      // section. One retry absorbs that noise without loosening any
-      // assertion; a lane count that's consistently short is still a
-      // failure after the retry.
-      retries: process.env.CI ? 1 : 0,
+      // No retries: the occasional lane shortfall below is environment-
+      // specific (this multi-homed dev machine), not expected on CI's
+      // single-NIC runners — see docs/testing.md's Engines section. If it
+      // shows up for real on the macos-15 nightly job, handle it there
+      // instead of absorbing it here.
     },
     // engine-matrix.spec.ts's tests never request the `browser`/`page`
     // fixtures — every engine involved is launched explicitly through the
@@ -58,10 +63,7 @@ export default defineConfig({
     {
       name: "engines",
       testMatch: /engine-matrix\.spec\.ts/,
-      // See the retries comment on the "webkit" project above — the same
-      // per-lane timing margin applies here, including on the @pr-tagged
-      // cells that gate PRs.
-      retries: process.env.CI ? 1 : 0,
+      // No retries — see the "webkit" project's comment above.
     },
     {
       name: "netem",

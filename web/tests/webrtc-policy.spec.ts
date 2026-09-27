@@ -15,9 +15,10 @@
 // (bundle policy, m-line kinds, video direction/codecs, byte length) — never
 // ICE candidates or addresses.
 //
-// Uses the OPFS-free hashingPicker sink (not receiveToDisk) so these
-// assertions run for real on every engine: a spike found Playwright's
-// bundled WebKit's OPFS createWritable() unreliable (docs/testing.md).
+// Each receiver uses installReceiverSink (web/tests/helpers.ts), which picks
+// each engine's own real receive path: real OPFS on Chromium, the in-memory
+// blob + downloadBlob path on Firefox/WebKit (neither implements
+// showSaveFilePicker for real) — see docs/testing.md's Engines section.
 
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -25,9 +26,15 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { expect } from "./fixtures";
-import { chooseFile, cleanupTemporaryDirectories, hashingPicker, isolatedServerTest as test, temporaryDirectory, verifyHashingSink, watchCLI } from "./helpers";
+import {
+  chooseFile, cleanupTemporaryDirectories, flushDiagnostics, installReceiverSink,
+  isolatedServerTest as test, temporaryDirectory, trackForDiagnostics, verifyReceiverSink, watchCLI,
+} from "./helpers";
 
-test.afterEach(() => { cleanupTemporaryDirectories(); });
+test.afterEach(async ({}, testInfo) => {
+  cleanupTemporaryDirectories();
+  await flushDiagnostics(testInfo);
+});
 
 test.setTimeout(60_000);
 
@@ -160,11 +167,11 @@ test.describe("browser ↔ browser", () => {
     const receiver = await browser.newPage({ baseURL });
     await installPolicyRecorder(sender);
     await installPolicyRecorder(receiver);
-    await hashingPicker(receiver);
+    await installReceiverSink(receiver, browserName);
+    trackForDiagnostics(receiver, "receiver");
     try {
       const code = await chooseFile(sender, contents, "policy-b2b.bin");
       await receiver.goto(`/r#${code}`);
-      await receiver.addScriptTag({ url: "/crypto-test.js" });
       await receiver.locator(".confirm-btn").click();
       await expect(sender.locator(".complete")).toBeVisible({ timeout: 60_000 });
       await expect(receiver.locator(".complete")).toBeVisible({ timeout: 60_000 });
@@ -180,7 +187,7 @@ test.describe("browser ↔ browser", () => {
       assertLaneSizeLimits(senderRecords);
       assertLaneSizeLimits(receiverRecords);
 
-      await verifyHashingSink(receiver, contents.length, expectedHash);
+      await verifyReceiverSink(receiver, browserName, contents.length, expectedHash);
     } finally {
       await sender.close();
       await receiver.close();
@@ -218,9 +225,10 @@ test.describe("browser → CLI", () => {
 });
 
 test.describe("CLI → browser", () => {
-  test("CLI offers recvonly VP8-only video; browser answers inactive", async ({ page, cliBin, wsUrl }) => {
+  test("CLI offers recvonly VP8-only video; browser answers inactive", async ({ page, cliBin, wsUrl, browserName }) => {
     await installPolicyRecorder(page);
-    await hashingPicker(page);
+    await installReceiverSink(page, browserName);
+    trackForDiagnostics(page, "receiver");
     const src = join(temporaryDirectory("sp2p-policy-send-"), "policy-c2b.bin");
     writeFileSync(src, contents);
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", src]);
@@ -228,7 +236,6 @@ test.describe("CLI → browser", () => {
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);
-      await page.addScriptTag({ url: "/crypto-test.js" });
       await page.locator(".confirm-btn").click();
       await expect(page.locator(".complete")).toBeVisible({ timeout: 60_000 });
       expect(cli.counts).toEqual([LANE_COUNT]);
@@ -250,7 +257,7 @@ test.describe("CLI → browser", () => {
         }
       }
 
-      await verifyHashingSink(page, contents.length, expectedHash);
+      await verifyReceiverSink(page, browserName, contents.length, expectedHash);
     } finally {
       child.kill();
     }

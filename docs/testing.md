@@ -39,13 +39,25 @@
 go test ./...                          # everything, Go side
 go vet ./...
 cd web && npx tsc --noEmit              # type-check web/src (not web/tests)
-cd web && npm test                      # Playwright, all specs
-cd web && npx playwright test tests/webrtc-policy.spec.ts   # one spec
+cd web && npm test                      # Playwright, Chromium only (pins --project=chromium)
+cd web && npx playwright test tests/webrtc-policy.spec.ts   # one spec, but see below
 ```
 
 Focused runs: `go test ./internal/transfer -run TestName`, or
 `go test ./internal -run '^TestE2E_ProtocolCompatibility$'` for just the
 compatibility matrix.
+
+**`npm test` is Chromium-only** (`package.json`'s `test` script pins
+`playwright test --project=chromium`); this keeps the existing single-engine
+default. Running `npx playwright test` directly, with no `--project` flag —
+as in the one-spec example above — is **not** Chromium-only: it runs every
+project whose `testMatch` includes that spec, so a spec named on the command
+line without `--project` also runs under `firefox` and `webkit` if it's one
+of the three cross-engine specs (needs `npx playwright install firefox
+webkit` first — see [Engines](#engines-firefox-and-webkit) below for which
+specs those are and why). A bare `npx playwright test` with no arguments at
+all runs the full suite across every project, including the 15-cell,
+64&nbsp;MiB `engines` project — expect it to take several minutes.
 
 ## Protocol compatibility and previous-release resolution
 
@@ -272,37 +284,28 @@ dispatched before this change merges, so its exact command was instead
 validated locally on macOS (see below) rather than by triggering the
 workflow itself.
 
-**Known rough edge: WebKit's per-lane authentication timing margin.**
-`web/src/webrtc-parallel.ts`'s `Lane.wait()` drops any extra lane that
-doesn't finish key-confirmation authentication within 8 seconds of its
-answer being set, and the transfer proceeds with however many lanes
-survived — by design, not a bug. Locally, WebKit occasionally lands on 6-7
-of the requested 8 lanes instead of 8 when it's *answering* several
-CLI-initiated lane offers concurrently (`parallel-interop.spec.ts`'s "CLI
-parallel WebRTC sender interoperates with disk browser" cases), and the
-same per-lane margin was observed once, non-reproducibly, on a
-Firefox-sender→Chromium-receiver `engine-matrix.spec.ts` cell under local
-CPU contention (it then passed cleanly across four more isolated reruns).
-Both the `webkit` and `engines` projects now set `retries: process.env.CI ?
-1 : 0` (matching the existing `netem` project's convention) to absorb this
-kind of transient timing noise without loosening any lane-count or SHA-256
-assertion — a lane count that is short after the retry is still a failure.
-This is exactly the class of engine-specific timing margin the nightly-only
-WebKit rollout exists to surface before promoting it to gate PRs; it has
-not been root-caused further (e.g., whether Chromium/WebKit exhibit
-different local ICE-candidate/port behavior as answerer under load) because
-that is a product-level WebRTC investigation, not a CI-plumbing one.
-
-**Known rough edge: a real (non-faked) browser download event on
-Firefox/Linux.** `interop.spec.ts`'s "CLI sender → browser receiver" test
-deletes `showSaveFilePicker` and waits on a genuine
-`page.waitForEvent("download")` — the one cross-engine test that exercises
-Firefox's actual download manager rather than a JS-faked picker. It passed
-on the first real CI run (`ubuntu-latest`) and then exceeded its 30s
-timeout on a second, otherwise-identical run. The `firefox` project now
-also sets `retries: process.env.CI ? 1 : 0` for the same reason as `webkit`
-above; this is unrelated to the buffer-hint policy or lane counts and was
-only ever observed on this one test.
+**Known rough edge: WebKit's lane sockets and a multi-homed host.** On the
+Mac this was developed on — two active interfaces on the same /24 (Wi-Fi
+`en0` and Ethernet `en9`) — WebKit occasionally lands on 6-7 of the
+requested 8 parallel-WebRTC lanes instead of 8. This is **not** the
+8-second per-lane authentication timeout in `web/src/webrtc-parallel.ts`'s
+`Lane.wait()` running out (a timing margin that a retry could reasonably
+absorb): the affected lane's ICE connectivity check makes *zero* progress
+for the entire 8 seconds. WebKit's lane sockets bind `INADDR_ANY`, and on a
+multi-homed host they can answer a STUN connectivity check from a different
+local address than the one the check was sent to; pion (the CLI/server's
+WebRTC stack) discards that reply outright — "Discard message: transaction
+source and destination does not match expected" (RFC 8445 §7.2.5.2.1) — so
+the lane never has a chance to connect at all, regardless of how long it
+waits. This is specific to a multi-homed, same-subnet host, not expected on
+CI's single-NIC runners (`ubuntu-latest`, `macos-15`), so no retry was added
+for it — a retry would only be masking noise if the failure were timing-
+sensitive, and this one isn't. If the macos-15 nightly `engines` job shows
+the same lane shortfall for real, that's the point to investigate further:
+it would mean either that runner is multi-homed too, or that this is a
+genuine Safari/WebKit-multi-lane interoperability issue independent of
+network topology (the transfer itself still completes over however many
+lanes did connect — this reduces parallelism, it doesn't break transfers).
 
 **Local validation results** (this Mac, one run each unless noted):
 
