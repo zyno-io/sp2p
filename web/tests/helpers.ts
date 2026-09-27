@@ -86,21 +86,28 @@ export async function flushDiagnostics(testInfo: { status?: string; expectedStat
   await flushCLIDiagnostics(failed);
   if (!failed) return;
   for (const { page, label } of pages) {
-    if (page.isClosed()) { console.log(`[diagnostics] ${label}: page already closed`); continue; }
-    try {
-      const snapshot = await page.evaluate(() => {
-        const text = (selector: string) => document.querySelector(selector)?.textContent ?? null;
-        const complete = document.querySelector(".complete");
-        return {
-          stepP2P: text(".step-p2p"),
-          statusText: text(".status-text"),
-          errorMessage: text(".error-message"),
-          completeVisible: complete ? !complete.classList.contains("hidden") : null,
-        };
-      });
-      console.log(`[diagnostics] ${label} DOM snapshot: ${JSON.stringify(snapshot)}`);
-    } catch (error) {
-      console.log(`[diagnostics] ${label}: page.evaluate failed: ${error}`);
+    // Buffered console/pageerror lines were captured live via page.on(...)
+    // and survive the page closing (e.g. a helper's own try/finally closing
+    // the browser before this afterEach runs) — dump them regardless. Only
+    // the live DOM snapshot below needs an open page.
+    if (page.isClosed()) {
+      console.log(`[diagnostics] ${label}: page already closed (dumping buffered console/pageerror lines only)`);
+    } else {
+      try {
+        const snapshot = await page.evaluate(() => {
+          const text = (selector: string) => document.querySelector(selector)?.textContent ?? null;
+          const complete = document.querySelector(".complete");
+          return {
+            stepP2P: text(".step-p2p"),
+            statusText: text(".status-text"),
+            errorMessage: text(".error-message"),
+            completeVisible: complete ? !complete.classList.contains("hidden") : null,
+          };
+        });
+        console.log(`[diagnostics] ${label} DOM snapshot: ${JSON.stringify(snapshot)}`);
+      } catch (error) {
+        console.log(`[diagnostics] ${label}: page.evaluate failed: ${error}`);
+      }
     }
     const logs = consoleLogs.get(page) ?? [];
     console.log(`[diagnostics] ${label}: ${logs.length} buffered console/pageerror lines`);

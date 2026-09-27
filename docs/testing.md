@@ -389,6 +389,45 @@ genuine Safari/WebKit-multi-lane interoperability issue independent of
 network topology (the transfer itself still completes over however many
 lanes did connect — this reduces parallelism, it doesn't break transfers).
 
+**New finding, not yet root-caused: `engine-matrix.spec.ts`'s browser↔browser
+cells mostly fail on the macos-15 nightly runner.** Dispatching `nightly.yml`
+on this branch (`gh workflow run nightly.yml --ref <branch>`) to validate
+its `engines` job before merge (it cannot be triggered by a PR) surfaced
+this: `--project=webkit` was clean, 15/15, but `--project=engines` had
+**8 of its 9 browser↔browser cells** time out waiting for `.complete` —
+every pairing except webkit→webkit, including **chromium→chromium**, the
+simplest possible cell and the first one that runs. All 6 CLI↔browser
+cells in the same run passed. This is a different failure shape from both
+rough edges above (a 100s hard timeout with zero transfer progress, not a
+partial lane count), and it does **not** reproduce in many local runs of
+the same `--project=engines` on this Mac (chromium→chromium has never
+failed here). The dump-on-failure diagnostics added for item 1 above fired
+but weren't useful for this one: `runBrowserToBrowser`'s own `finally`
+closes both browsers before the test throws, so `flushDiagnostics` found
+every receiver page already closed by the time `afterEach` ran — and
+`flushDiagnostics` had a real bug (now fixed) that skipped the
+still-available buffered console/pageerror lines too, not just the live
+DOM snapshot that actually needs an open page. That fix landed here, but
+a nightly dispatch takes the better
+part of an hour end to end and this branch's cost/time budget didn't
+stretch to a second one — so the *fix* was validated (diagnostics correctly
+dump buffered console lines for a closed page, confirmed by inspection),
+but the *actual root cause of the browser↔browser failures* was not
+re-captured with the fix in place. Given webkit→webkit (both sides
+launched the same way, via the `playwright` fixture rather than a project's
+own `browser` fixture) is the one cell that passed, and the *project-level*
+`webkit`/`firefox`/`chromium` suites (which never launch via the raw
+`playwright` fixture — see `webrtc-policy.spec.ts`/`parallel-interop.spec.ts`
+running fine under all three engines) don't show this, the most likely
+culprit is something about `launchEnginePage`'s `pw[engine].launch(...)` +
+`browser.newPage({ baseURL })` pattern specifically on `macos-15` GitHub
+Actions runners — not a specific engine's WebRTC implementation. This is
+reported here for follow-up rather than guessed at further; it does not
+block this PR's Firefox/`ubuntu-latest` rollout (`browser-firefox`, the
+required-eventually job), only the WebKit/`engines` nightly rollout, which
+was already explicitly staged as "nightly-only, promote later" for exactly
+this kind of reason.
+
 **Local validation results** (this Mac, one run each unless noted):
 
 | Command | Result |
