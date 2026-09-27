@@ -77,18 +77,35 @@ async function signalingHealthMedianMs(baseURL: string): Promise<number> {
 
 // Wraps window.RTCPeerConnection before any app code runs so every
 // connection (primary + every lane) on this page is reachable for
-// getStats(). Only numeric stats are ever read back.
+// getStats(). Only numeric stats are ever read back. Also logs the ICE
+// candidate *types* gathered (host/srflx/relay — never addresses) if a
+// connection fails, so a future ICE regression inside the namespace is
+// debuggable from the job log instead of just "timed out".
 async function installStatsRecorder(page: Page): Promise<void> {
   await page.addInitScript(() => {
     (window as any).__pcInstances = [];
     const Native = window.RTCPeerConnection;
     class RecordingPeerConnection extends Native {
+      __candidateTypes: string[] = [];
       constructor(config?: RTCConfiguration) {
         super(config);
         (window as any).__pcInstances.push(this);
+        this.addEventListener("icecandidate", (event: any) => {
+          if (event.candidate?.type) this.__candidateTypes.push(event.candidate.type);
+        });
+        const logIfFailed = (state: string, label: string) => {
+          if (state === "failed") {
+            console.log(`netem-debug: ${label} failed; candidate types gathered: ${this.__candidateTypes.join(",") || "(none)"}`);
+          }
+        };
+        this.addEventListener("connectionstatechange", () => logIfFailed(this.connectionState, "connection"));
+        this.addEventListener("iceconnectionstatechange", () => logIfFailed(this.iceConnectionState, "ICE"));
       }
     }
     (window as any).RTCPeerConnection = RecordingPeerConnection;
+  });
+  page.on("console", message => {
+    if (message.text().startsWith("netem-debug:")) console.log(`[browser] ${message.text()}`);
   });
 }
 
