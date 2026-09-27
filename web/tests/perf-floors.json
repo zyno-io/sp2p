@@ -1,6 +1,6 @@
 {
-  "browser-browser": 1.0,
-  "browser-cli": 1.0,
-  "cli-browser": 1.0,
-  "cli-cli-webrtc": 1.0
+  "browser-browser": 0.7,
+  "browser-cli": 0.75,
+  "cli-browser": 0.75,
+  "cli-cli-webrtc": 0.7
 }

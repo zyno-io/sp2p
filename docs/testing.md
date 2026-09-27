@@ -143,7 +143,13 @@ status check yet, until its floors are calibrated against enough real runs
   candidates; because the peer's candidate is also a local address of this
   same host, the kernel actually delivers that traffic over `lo` regardless
   (a locally-owned destination is always routed via `lo`), which is why
-  shaping targets `lo`, not `dummy0`. `exec` runs a command as the *calling*
+  shaping targets `lo`, not `dummy0`. **`up` also adds a default route via
+  `dummy0`** (`ip route add default dev dummy0`): Chromium's network
+  enumeration skips interfaces it considers unroutable, and without a default
+  route it gathered zero usable host candidates at all (every browser pairing
+  failed with "no TURN relay available" until this was added) — the route
+  only changes what Chromium considers viable, not where traffic actually
+  goes (still `lo`, per above). `exec` runs a command as the *calling*
   (non-root) user — it escalates internally only for the `ip netns
   exec`/`setpriv` step, then drops back to that uid/gpid before running the
   command, forwarding `PATH`, `HOME`, and a small allowlist of other
@@ -222,14 +228,27 @@ the median of `--repeat-each=3`; the PR/push job runs it without `--gate` and
 relies on the per-test `expect` inside `netem.spec.ts` instead, which asserts
 the same floors as it goes).
 
-**Performance floor calibration:** the floors committed alongside this suite
-are deliberately low placeholders (1.0 MB/s), not calibrated numbers — there
-was no Linux box available to establish a real baseline before merging.
-Calibrate them once the `netem` job has a run of real numbers: set each
-floor to roughly 35% of the observed MB/s for that pairing, push, and confirm
-the job stays green. Re-calibrate if a legitimate protocol change shifts
-throughput meaningfully; don't let floors silently drift stale in the other
-direction either.
+**Performance floor calibration:** floors are set to roughly 35% of a real
+`wan150` `netem` job run's observed MB/s per pairing (rounded down slightly),
+per this table from the run that first went green end-to-end:
+
+| Pairing | Observed MB/s | Floor (35%) |
+| --- | ---: | ---: |
+| browser-browser | 2.09 | 0.7 |
+| browser-cli | 2.24 | 0.75 |
+| cli-browser | 2.24 | 0.75 |
+| cli-cli-webrtc | 2.12 | 0.7 |
+
+That run also confirmed the mechanics this suite exists to prove: all three
+browser-involving pairings negotiated 8 lanes and reported a UDP receive
+buffer of exactly 2097152 bytes (the doubled 1 MiB hint); `cli-cli-auto`
+picked TCP with 6 parallel connections (not WebRTC — recorded, not gated,
+see below); netem's drop ratio stayed near the configured 0.1% loss on every
+pairing (e.g. 212/194263 ≈ 0.11%); and the signaling `/health` median stayed
+under 3ms on every pairing versus the profile's ~150ms shaped RTT. Re-run
+this calibration if a legitimate protocol change shifts throughput
+meaningfully; don't let floors silently drift stale in the other direction
+either.
 
 `cli-cli-auto` intentionally has no floor: transport racing may legitimately
 pick either TCP or WebRTC depending on timing, and the two have different
@@ -240,17 +259,36 @@ reported) for visibility.
 
 ### Known rough edges
 
-- `packetsDiscardedOnSend` (from `RTCPeerConnection.getStats()`) is recorded
-  per pairing but not gated. If a `wan500` (no-loss) nightly run shows it
-  climbing, that's the "netem on `lo` holds the sender's `SO_SNDBUF`" failure
-  mode: move the delay to an IFB ingress qdisc on `lo` instead of the egress
-  `prio`/`netem` chain used today, and update this section.
+- **RTT and socket-buffer sampling happens *during* the transfer, not
+  after.** The app closes every WebRTC connection immediately once a
+  transfer completes (right after showing `.complete`), and a closed
+  `RTCPeerConnection`'s `getStats()` can come back with no candidate-pair
+  report at all. `startSampling()` in `netem.spec.ts` instead polls
+  `getStats()` and `udpSockets()` roughly once a second for the whole
+  transfer and keeps the maximum/accumulated readings, closing over that
+  race entirely.
+- **The buffer-hint check is a threshold, not an exact match.** A plain
+  headless Chromium opens its own background UDP sockets unrelated to
+  WebRTC — one was observed with a coincidental ~1 MiB receive buffer, on a
+  freshly launched browser that never even loaded the app. That ruled out
+  both "it's stale state from an earlier test" and "filter by `ss` state
+  (ESTAB vs UNCONN)" as fixes (the real, correctly-hinted WebRTC socket did
+  not reliably show as `ESTAB` either). `udpSockets()` therefore returns
+  every UDP socket for the browser's process tree, and callers compare the
+  *maximum* rb against the hinted threshold (2 MiB) rather than asserting
+  an exact byte count — true for both the positive checks (`>=` 2 MiB) and
+  the negative control (`<` 2 MiB, not "equals exactly 131072").
 - `web/tests/helpers.ts`'s `udpSockets()` and `netem.spec.ts`'s `tc -s qdisc
   show` both assume an unprivileged read of `ss -uanmp` / `tc -s qdisc show`
-  works from inside the namespace as the non-root test-runner user (true on
-  current Ubuntu kernels for read-only queries); if a future runner image
+  works from inside the namespace as the non-root test-runner user — confirmed
+  on the `ubuntu-latest` runner image as of this writing; if a future image
   restricts this, those reads will need to move to a small root-run helper
   instead.
 - The `ss -m` "drops" (`d<N>`) skmem field is parsed best-effort and recorded
   but not asserted on, since its exact availability/format across
   kernel/iproute2 versions wasn't verified ahead of time.
+- `packetsDiscardedOnSend` (from `RTCPeerConnection.getStats()`) is recorded
+  per pairing but not gated. If a `wan500` (no-loss) nightly run shows it
+  climbing, that's the "netem on `lo` holds the sender's `SO_SNDBUF`" failure
+  mode: move the delay to an IFB ingress qdisc on `lo` instead of the egress
+  `prio`/`netem` chain used today, and update this section.
