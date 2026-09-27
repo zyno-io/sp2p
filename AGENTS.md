@@ -35,4 +35,6 @@ Use short, descriptive imperative subjects; history includes optional prefixes s
 
 Never log transfer codes or commit credentials. Follow [SECURITY.md](SECURITY.md) for vulnerability reports. Preserve negotiated v2 compatibility and v3 authentication guarantees.
 
+Never run, dispatch, or re-run the Publish Packages workflow (`.github/workflows/publish-packages.yml`). Publishing to Homebrew, Scoop, AUR, Chocolatey, and WinGet is always a manual maintainer action. Agents may change that workflow in a pull request. When a release is cut, stop once its GitHub Release is published and tell the maintainer it is ready to publish.
+
 During code review, do not run tests unless you previously wrote code needing verification. Validate documentation non-visually; use a browser or visual inspection only when explicitly requested.
