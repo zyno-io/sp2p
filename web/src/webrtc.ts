@@ -104,8 +104,7 @@ export function establishWebRTC(
     log(`WebRTC: creating peer connection with ${rtcIceServers.length} ICE servers (isSender=${isSender})`);
     const pc = new RTCPeerConnection({
       iceServers: rtcIceServers,
-      // MUTATION (a) for relay CI validation: bundlePolicy intentionally
-      // dropped here. Revert before merging.
+      ...(BUFFER_HINT ? { bundlePolicy: "max-bundle" as const } : {}),
     });
 
     let settled = false;
