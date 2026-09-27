@@ -772,6 +772,18 @@ honored — a real regression against the identical assumption
 > attempt direct/mixed host↔relay pairs and they were correctly rejected,
 > forcing every connection through a genuine relay↔relay path rather than
 > silently succeeding some other way.
+>
+> Also confirmed across the full `@pr` + Firefox + CLI set: a clean
+> `relay-full` dispatch
+> ([36354141441](https://github.com/zyno-io/sp2p/actions/runs/36354141441))
+> passed all 12 tests, with `created == 16` identically on all eight
+> relay-carrying pairings — `chromium-chromium`, `chromium-cli`,
+> `cli-chromium`, `cli-cli`, `chromium-firefox`, `cli-firefox`,
+> `firefox-chromium`, `firefox-cli` — confirming the formula holds for
+> Firefox too (Firefox's balanced `bundlePolicy` was already expected to
+> hold at one allocation per connection just like a Chromium *answerer*
+> does, per the derivation above; this run confirms it empirically for
+> both Firefox roles).
 
 ### Quota and graceful degradation
 
@@ -922,17 +934,24 @@ inside the namespace).
 
 ### Known rough edges (found while validating this branch)
 
-Three real `relay-full` dispatches on this branch
+Four real `relay-full` dispatches on this branch
 ([36351500512](https://github.com/zyno-io/sp2p/actions/runs/36351500512),
 [36352419122](https://github.com/zyno-io/sp2p/actions/runs/36352419122),
-[36353067890](https://github.com/zyno-io/sp2p/actions/runs/36353067890))
-all landed 8-10/12, with the two most novel cases — the abandon-setup
-leak check (`created == 9`, exactly the derived count) and the quota case
+[36353067890](https://github.com/zyno-io/sp2p/actions/runs/36353067890),
+[36354141441](https://github.com/zyno-io/sp2p/actions/runs/36354141441))
+landed 8-12/12, with the two most novel cases — the abandon-setup leak
+check (`created == 9`, exactly the derived count) and the quota case
 (structurally passed, `lanes == 1`) — passing cleanly and precisely every
-time. `ci.yml`'s `@pr` subset was and remains green throughout. Four real
-findings, all confined to nightly-only tests. Two are fixed and confirmed;
-one fix was tried, caused a worse regression, and was reverted; one
-remains open.
+single time. The fourth dispatch (after the fixes and the revert below)
+was fully clean, 12/12. Four real findings surfaced across the first
+three dispatches, all confined to nightly-only tests: two are fixed and
+confirmed (including by the clean fourth run); one fix was tried, caused
+a worse regression, and was reverted; one remains open, intermittent, and
+did not recur in the clean fourth run — consistent with it being a real
+but rare timing race rather than a hard, always-reproducing failure.
+`ci.yml`'s `@pr` subset was green on every dispatch except one, where it
+independently hit the same open `cli-cli` finding below (expected, since
+the underlying race isn't specific to the larger `relay-full` job).
 
 - **"Both browsers decline consent" hung until its 60s timeout, both
   runs, identically.** Root-caused: `web/src/main.ts` calls
