@@ -258,19 +258,14 @@ async function startTurn(env: RelayEnv, quota: number): Promise<TurnHandle> {
     "-min-port", String(RELAY_MIN_PORT), "-max-port", String(RELAY_MAX_PORT),
     "-realm", "sp2p.test", "-user-quota", String(quota),
     "-stats", statsPath, "-exit-with-parent",
-    // Confirmed against pion/turn's client (internal/client/udp_conn.go):
-    // its refresh timer fires at lifetime/2, proportional to whatever the
-    // server grants, so a short lifetime is safe for any connection that's
-    // still actually in use -- it refreshes well before expiry regardless
-    // of the absolute value. This bounds how long an ABANDONED allocation
-    // (e.g. a short-lived CLI process that exits before its async
-    // connection-close goroutine sends a TURN Refresh(0) --
-    // internal/conn/webrtc.go's unawaited `go conn.Close()`) can stay live:
-    // observed real transfers complete in low single-digit seconds after
-    // their relay allocation succeeds, so 8s leaves ample margin for an
-    // active transfer while still comfortably clearing within
-    // LEAK_WINDOW_MS (10s) for a genuinely abandoned one.
-    "-allocation-lifetime", "8s",
+    // NOT passing -allocation-lifetime: a short value (tried 8s) fixed the
+    // CLI<->CLI leak-window race (pion/turn's client refreshes at
+    // lifetime/2, verified in internal/client/udp_conn.go) but broke every
+    // Firefox pairing with "your TURN server appears to be broken" --
+    // Firefox's own (non-pion) WebRTC/ICE stack does not refresh
+    // proportionally to a short granted lifetime the same way, and 8s
+    // wasn't enough for it. Confirmed on real CI: reverted. See
+    // docs/testing.md's "Known rough edges" section.
   ], { env: { ...process.env, SP2P_TESTTURN_SECRET: env.secret } });
   child.stderr?.on("data", chunk => { stderr.push(chunk.toString()); });
   let earlyExitCode: number | null = null;

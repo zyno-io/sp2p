@@ -920,16 +920,19 @@ instead of letting the suite's worker fixture `go build` a fresh one (which
 would otherwise need network access for module resolution, unavailable
 inside the namespace).
 
-### Known rough edges (found and fixed while validating this branch)
+### Known rough edges (found while validating this branch)
 
-Two real `relay-full` dispatches on this branch before these fixes
+Three real `relay-full` dispatches on this branch
 ([36351500512](https://github.com/zyno-io/sp2p/actions/runs/36351500512),
-[36352419122](https://github.com/zyno-io/sp2p/actions/runs/36352419122))
-both landed 9-10/12, with the two most novel cases — the abandon-setup
+[36352419122](https://github.com/zyno-io/sp2p/actions/runs/36352419122),
+[36353067890](https://github.com/zyno-io/sp2p/actions/runs/36353067890))
+all landed 8-10/12, with the two most novel cases — the abandon-setup
 leak check (`created == 9`, exactly the derived count) and the quota case
-(structurally passed, `lanes == 1` both times) — passing cleanly and
-precisely both runs. `ci.yml`'s `@pr` subset was and remains green
-throughout. Three real findings, all confined to nightly-only tests:
+(structurally passed, `lanes == 1`) — passing cleanly and precisely every
+time. `ci.yml`'s `@pr` subset was and remains green throughout. Four real
+findings, all confined to nightly-only tests. Two are fixed and confirmed;
+one fix was tried, caused a worse regression, and was reverted; one
+remains open.
 
 - **"Both browsers decline consent" hung until its 60s timeout, both
   runs, identically.** Root-caused: `web/src/main.ts` calls
@@ -948,34 +951,11 @@ throughout. Three real findings, all confined to nightly-only tests:
   actually moves, the shim just needs to exist so the confirm click's
   awaited promise resolves immediately instead of hanging on a real,
   unresolvable native API call.
-- **CLI↔CLI: one allocation missed the 10s leak window, both `relay-full`
-  runs (but not the earlier, separate `@pr` run).** `pollSessionRelease`
-  found `live: 1` (not 0) after the full 10s poll, both times with an
-  identical shape. Root cause: `internal/conn/webrtc.go` closes a Go
-  WebRTC connection via `go conn.Close()` (a goroutine, not awaited), and
-  a short-lived CLI process that exits immediately after printing its
-  `result` event isn't guaranteed to still be alive when that goroutine
-  gets around to sending the TURN `Refresh(lifetime=0)` deallocation — a
-  real race between process exit and an unawaited background goroutine.
-  For CLI↔CLI specifically, *both* peers' allocations are exposed to this
-  race (for a browser-involved pairing, only the CLI side is, and the
-  browser stays open well past its own leak-window poll). Fixed at the
-  test-server layer instead of loosening the 10s bar or touching
-  `internal/conn`'s product code: `testturnd -allocation-lifetime 8s`
-  (wired into `startTurn()`) gives every allocation a real, bounded
-  server-side backstop. Confirmed safe for active transfers by reading
-  pion/turn's own client (`internal/client/udp_conn.go`): its refresh
-  timer fires at `lifetime/2`, proportional to whatever the server
-  grants, so a short lifetime doesn't risk truncating a connection that's
-  still genuinely in use — real observed transfers in this suite complete
-  in low single-digit seconds after their relay allocation succeeds, well
-  under the 4s a client would refresh at, while an abandoned allocation
-  now clears within 8s — comfortably inside `LEAK_WINDOW_MS` (10s).
-- **The CLI-denial race (also fixed):** `"CLI receiver denies, browser
-  sender declines"` failed once with `cli.results[0].error` = `{code:
-  "operation_failed", message: "Peer denied relay connection"}` instead
-  of the hardcoded `{code: "relay_denied", message: CLI_DENIED}` — a
-  genuine, unavoidable race (not a bug): this CLI's own
+- **The CLI-denial race (fixed and confirmed):** `"CLI receiver denies,
+  browser sender declines"` failed once with `cli.results[0].error` =
+  `{code: "operation_failed", message: "Peer denied relay connection"}`
+  instead of the hardcoded `{code: "relay_denied", message: CLI_DENIED}`
+  — a genuine, unavoidable race (not a bug): this CLI's own
   `answerRelayPrompt("deny")` (written to a file the CLI polls every
   100ms) and the browser sender's independent decline (which notifies the
   peer immediately, without waiting to learn the peer's own answer first
@@ -988,9 +968,40 @@ throughout. Three real findings, all confined to nightly-only tests:
   a correct "consent was denied, nothing relayed" outcome. The test now
   asserts that shared shape (outcome, exit code, zero allocations, one of
   the two known error shapes) instead of one hardcoded race winner, and
-  passed cleanly on the next run.
-
-A third `relay-full` dispatch is validating all three fixes together.
+  has passed cleanly on every run since.
+- **A `testturnd -allocation-lifetime 8s` fix for the CLI↔CLI leak-window
+  race (below) was tried, worked for its target, and was reverted after
+  it broke every Firefox pairing.** With the short lifetime wired into
+  `startTurn()`, `cli to cli`'s leak-window miss disappeared — but all
+  four Firefox pairings (`firefox-chromium`, `chromium-firefox`,
+  `cli-firefox`, `firefox-cli`) started failing with Firefox's own
+  `"WebRTC: ICE failed, your TURN server appears to be broken"`. The
+  `lifetime/2` proportional-refresh behavior confirmed for pion/turn's
+  client (used by the CLI) does not extend to Firefox's own, separate
+  (non-pion) WebRTC/ICE stack — whatever Firefox's real refresh timing
+  actually is, 8s wasn't enough for it. Reverted; `testturnd` keeps the
+  `-allocation-lifetime` flag (harmless, unused by default, and now known
+  to need real per-engine verification before ever being turned on for
+  this suite) but `relay.spec.ts` no longer passes it.
+- **CLI↔CLI: one allocation intermittently misses the 10s leak window —
+  open, not fixed.** `pollSessionRelease` found `live: 1` (not 0) after
+  the full 10s poll on two of three `relay-full` runs, always with the
+  identical shape, but the same test passed cleanly in a separate,
+  smaller `@pr`-only run. Likely mechanism: `internal/conn/webrtc.go`
+  closes a Go WebRTC connection via `go conn.Close()` (a goroutine, not
+  awaited), and a short-lived CLI process that exits immediately after
+  printing its `result` event isn't guaranteed to still be alive when
+  that goroutine gets around to sending the TURN `Refresh(lifetime=0)`
+  deallocation. For CLI↔CLI specifically, *both* peers' allocations are
+  exposed to this race (a browser-involved pairing only exposes the CLI
+  side, and the browser itself stays open well past its own leak-window
+  poll), which is a plausible reason it shows up here first. Left
+  deliberately unfixed rather than reaching for another guess after the
+  allocation-lifetime attempt's real-world Firefox regression above: the
+  right fix is either confirming the CLI's own shutdown path should wait
+  for `Close()`'s cleanup before exiting (a product change, out of scope
+  here) or a per-engine-verified, more targeted server-side backstop —
+  neither of which this PR should rush.
 
 ### Known gaps
 
