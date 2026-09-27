@@ -293,6 +293,17 @@ not been root-caused further (e.g., whether Chromium/WebKit exhibit
 different local ICE-candidate/port behavior as answerer under load) because
 that is a product-level WebRTC investigation, not a CI-plumbing one.
 
+**Known rough edge: a real (non-faked) browser download event on
+Firefox/Linux.** `interop.spec.ts`'s "CLI sender → browser receiver" test
+deletes `showSaveFilePicker` and waits on a genuine
+`page.waitForEvent("download")` — the one cross-engine test that exercises
+Firefox's actual download manager rather than a JS-faked picker. It passed
+on the first real CI run (`ubuntu-latest`) and then exceeded its 30s
+timeout on a second, otherwise-identical run. The `firefox` project now
+also sets `retries: process.env.CI ? 1 : 0` for the same reason as `webkit`
+above; this is unrelated to the buffer-hint policy or lane counts and was
+only ever observed on this one test.
+
 **Local validation results** (this Mac, one run each unless noted):
 
 | Command | Result |

@@ -33,6 +33,11 @@ export default defineConfig({
       name: "firefox",
       use: { browserName: "firefox" },
       testMatch: [/interop\.spec\.ts/, /parallel-interop\.spec\.ts/, /webrtc-policy\.spec\.ts/],
+      // Observed once in CI: interop.spec.ts's real (non-faked)
+      // page.waitForEvent("download") occasionally exceeds its 30s timeout
+      // on Firefox/Linux, unrelated to any assertion here — see
+      // docs/testing.md's Engines section.
+      retries: process.env.CI ? 1 : 0,
     },
     {
       name: "webkit",
