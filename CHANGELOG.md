@@ -6,6 +6,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Added
+
+- CI now proves a real relay-only WebRTC transfer end to end — 8 parallel lanes, exact TURN allocation accounting, no leaked allocations, and graceful degradation under a per-session TURN quota — using a CI-only TURN relay server and a firewalled network namespace that blocks direct connectivity. See [testing](docs/testing.md#turn-relay-relay-only-suite).
+
 ## [0.6.1] - 2026-09-27
 
 ### Fixed
