@@ -456,9 +456,9 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
   // Negative control: proves the rb sampler actually distinguishes hinted
   // from unhinted connections, rather than always reporting a large number.
   test("negative control: disabling the buffer hint keeps rb at the unhinted size", async ({ playwright, launchOptions, baseURL }) => {
-    // Large enough to stay open for several sampling ticks at 150 ms RTT, but
-    // below the 64 MiB parallel threshold.
-    const controlContents = randomBytes(32 * 1024 * 1024);
+    // One lane moves ~0.3 MB/s at 150 ms RTT with 0.1% loss, so 8 MiB stays
+    // open for many sampling ticks and still finishes well inside the timeout.
+    const controlContents = randomBytes(8 * 1024 * 1024);
     const controlHash = createHash("sha256").update(controlContents).digest("hex");
     // A fresh browser process (there's no "browserType" fixture; the
     // netem project only ever uses chromium), so sockets from earlier
