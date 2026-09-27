@@ -40,11 +40,13 @@ export default defineConfig({
       name: "firefox",
       use: { browserName: "firefox" },
       testMatch: [/interop\.spec\.ts/, /parallel-interop\.spec\.ts/, /webrtc-policy\.spec\.ts/],
-      // No retries: a "flaky" pass here has so far turned out to be a real
-      // hang (a receive test's .complete never appearing) rather than
-      // real-network timing noise — a retry masked it by starting a fresh
-      // worker. See docs/testing.md's Engines section for the investigation
-      // and root cause.
+      // No retries: an intermittent CLI-sender WebRTC stall (the CLI's own
+      // offer never reaches the receiver within its 15s connect timeout)
+      // has been caught here with full diagnostics, real on CI but not
+      // reproduced locally — a retry would mask it rather than absorb
+      // network-timing noise. See docs/testing.md's Engines section for
+      // the evidence; this is not fixed here (product-level, not
+      // CI-plumbing) and is exactly why this job isn't required yet.
     },
     {
       name: "webkit",

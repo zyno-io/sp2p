@@ -284,10 +284,86 @@ dispatched before this change merges, so its exact command was instead
 validated locally on macOS (see below) rather than by triggering the
 workflow itself.
 
-**Known rough edge: WebKit's lane sockets and a multi-homed host.** On the
-Mac this was developed on — two active interfaces on the same /24 (Wi-Fi
-`en0` and Ethernet `en9`) — WebKit occasionally lands on 6-7 of the
-requested 8 parallel-WebRTC lanes instead of 8. This is **not** the
+**Investigated: an intermittent CLI-sender→Firefox-receiver stall, real on
+CI, not reproduced locally.** A PR review flagged that the `firefox`
+project's original `retries: 1` was masking real failures rather than
+absorbing network-timing noise — three "flaky" (fail-then-pass-on-retry)
+CLI→browser-shaped tests in one real `ubuntu-latest` run, and a hard
+failure with the identical `.complete`-never-appears symptom in an earlier
+run. That retry was removed (see the `firefox` project's comment in
+`playwright.config.ts`) and dump-on-failure diagnostics were added for both
+the receiver page (`trackForDiagnostics`/`flushDiagnostics`) and the CLI
+process (`trackCLIForDiagnostics`, a sanitized JSON-event log plus stderr,
+with the resolved code actively redacted from every line before printing —
+never log transfer codes). The very next real CI failure came back with a
+complete evidence trail:
+
+- The CLI sender's own event log: `connection {method: webrtc, state:
+  trying}` at T+0, then nothing at all until `error {code: operation_failed,
+  message: "Receiver disconnected"}` at **T+15s**.
+- The Firefox receiver's console log, same window: `WebRTC: creating peer
+  connection...` → `WebRTC: Waiting for sender's offer` at T+0, then
+  `P2P attempt 1 failed: WebRTC connection timed out` at **T+15s** (the
+  client-side `establishWebRTC` timeout — `timeoutMs` defaults to 15000 in
+  `web/src/webrtc.ts`), followed immediately by `signaling connection
+  closed`.
+- The receiver's `.error-message`: `"Could not establish P2P connection (no
+  TURN relay available)"`.
+
+Reading those together: the CLI's WebRTC attempt never progressed past
+"trying" for the full 15 seconds — no offer ever reached the receiver, which
+just sat waiting until its own client-side timeout fired and it disconnected
+from signaling. The CLI's "Receiver disconnected" is a *downstream*
+symptom of that disconnect, not the root cause — the root cause is
+whatever kept the CLI's own ICE/offer-creation from completing in time.
+This reproduced on the very next real CI run and confirmed the diagnosis is
+accurate, but:
+
+- It has **not reproduced once** in ~15 local runs of the full `firefox`
+  project on this Mac (macOS, native), nor in ~14 more runs of the same
+  project inside a Linux (`arm64`, Ubuntu 24.04) Docker container sized to
+  match a GitHub-hosted `ubuntu-latest` runner (2 vCPU, ~8&nbsp;GiB — via
+  Colima). The same isolated-server/CLI/Firefox code paths, run identically,
+  simply did not stall locally, on either OS.
+- Running the *same* CLI→Firefox-receiver test many times back-to-back on
+  real CI (`gh run rerun --job`) reproduced it again on one further attempt
+  out of several, i.e., it is real but intermittent (rough order of
+  magnitude: roughly 1 in 4-5 real-CI attempts, from a small sample) —
+  consistent with something specific to real, multi-tenant cloud runner
+  infrastructure (CPU steal time, network-namespace/virtualized-NIC
+  behavior, IPv6 STUN-path quirks) that a resource-matched local VM does not
+  reproduce, rather than a deterministic code defect.
+- The identical test run 10 times back-to-back against **Chromium** in the
+  same Docker container came back 10/10 clean, and the pre-existing,
+  Chromium-only `browser-interop` CI job has run this same
+  `webrtc-policy.spec.ts` "CLI → browser" test green on every push in this
+  PR so far. That is consistent with (but does not conclusively prove) this
+  being specific to Firefox as the receiving peer, rather than a
+  CLI/pion-side issue that would surface equally against any engine.
+
+**This looks like a real, intermittent product-level timing issue in the
+CLI/pion WebRTC stack (or its interaction with Firefox as the answering
+peer) under real cloud CI infrastructure, not a bug in this PR's test
+code.** Per review guidance, it was not "fixed" here (no timeout increase,
+no retry to mask it, no change to `internal/conn/webrtc.go` or
+`web/src/webrtc.ts`'s ICE/offer logic) — that would be masking or guessing
+at a product change without understanding *why* the CLI's ICE/offer
+creation occasionally does not complete within 15 seconds specifically on
+GitHub's runners. It is reported here with the evidence above for a
+follow-up investigation (e.g., packet capture or pion-level debug logging
+on a real `ubuntu-latest` runner) and is exactly why `browser-firefox` is
+not yet a required check: it needs to run clean for a while, or this needs
+to be root-caused and fixed, before it gates PRs for real.
+
+**Known rough edge: multi-homed-host lane sockets (WebKit and browser↔browser
+alike).** On the Mac this was developed on — two active interfaces on the
+same /24 (Wi-Fi `en0` and Ethernet `en9`) — WebKit occasionally lands on 6-7
+of the requested 8 parallel-WebRTC lanes instead of 8, and the same
+symptom (lanes stuck at a fixed, well-below-8 count) has also been observed
+locally on an `engine-matrix.spec.ts` browser↔browser cell where Chromium is
+answering Firefox's lane offers, so this isn't exclusively a WebKit
+behavior — it's whichever side's lane socket happens to bind wrong on this
+particular multi-homed host. This is **not** the
 8-second per-lane authentication timeout in `web/src/webrtc-parallel.ts`'s
 `Lane.wait()` running out (a timing margin that a retry could reasonably
 absorb): the affected lane's ICE connectivity check makes *zero* progress
