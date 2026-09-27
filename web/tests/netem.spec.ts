@@ -131,8 +131,10 @@ async function candidatePairStats(page: Page): Promise<CandidatePairSample[]> {
 }
 
 function assertShapedRtt(samples: CandidatePairSample[]): void {
-  expect(samples.length).toBeGreaterThan(0);
-  for (const sample of samples) {
+  // Pairs report no RTT until their first consent check completes.
+  const measured = samples.filter(sample => sample.rttSec > 0);
+  expect(measured.length, "no candidate-pair RTT sampled during the transfer").toBeGreaterThan(0);
+  for (const sample of measured) {
     expect(sample.rttSec).toBeGreaterThanOrEqual(SHAPED_RTT_FLOOR_SEC);
   }
 }
@@ -149,11 +151,33 @@ function pageBrowser(page: Page): Browser {
   return browser!;
 }
 
-async function maxRb(browser: Browser): Promise<{ max: number; sockets: number }> {
-  const pids = await browserProcessPids(browser);
-  const sockets = udpSockets(pids);
-  expect(sockets.length, "no UDP sockets found for this browser's process tree").toBeGreaterThan(0);
-  return { max: sockets.reduce((max, s) => Math.max(max, s.rb), 0), sockets: sockets.length };
+
+// Connections and sockets close when a transfer completes, so RTT and socket
+// buffers are sampled while it runs.
+interface TransferSamples { pairs: CandidatePairSample[]; rbMax: number; sockets: number; }
+
+function startSampling(pages: Page[], browser: Browser): { stop(): Promise<TransferSamples> } {
+  const result: TransferSamples = { pairs: [], rbMax: 0, sockets: 0 };
+  let running = true;
+  const tick = async () => {
+    for (const page of pages) {
+      try { result.pairs.push(...await candidatePairStats(page)); } catch { /* page navigating or closed */ }
+    }
+    try {
+      const sockets = udpSockets(await browserProcessPids(browser));
+      result.sockets = Math.max(result.sockets, sockets.length);
+      for (const socket of sockets) result.rbMax = Math.max(result.rbMax, socket.rb);
+    } catch { /* process exited between listing and reading */ }
+  };
+  // Bounded so a failed assertion can't leave the loop polling forever.
+  const deadline = Date.now() + 10 * 60_000;
+  const loop = (async () => {
+    while (running && Date.now() < deadline) {
+      await tick();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  })();
+  return { async stop() { running = false; await loop; return result; } };
 }
 
 // ── netem qdisc counters (drops/packets, for the loss-ratio sanity check) ──
@@ -217,19 +241,22 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
       const start = Date.now();
       const code = await chooseFile(sender, contents, "netem-b2b.bin");
       await receiver.goto(`/r#${code}`);
+      const sampling = startSampling([sender, receiver], browser);
       await receiver.locator(".confirm-btn").click();
       await expect(sender.locator(".complete")).toBeVisible({ timeout: 180_000 });
       await expect(receiver.locator(".complete")).toBeVisible({ timeout: 180_000 });
       const durationMs = Date.now() - start;
+      const samples = await sampling.stop();
       const after = netemQdiscStats();
 
       await verifyDisk(receiver, contents.length, expectedHash);
 
       expect(senderCounts).toEqual([8]);
       expect(receiverCounts).toEqual([8]);
-      const senderStats = await candidatePairStats(sender);
+      const senderStats = samples.pairs;
       assertShapedRtt(senderStats);
-      const { max: rbMax, sockets: socketCount } = await maxRb(browser);
+      const { rbMax, sockets: socketCount } = samples;
+      expect(socketCount, "no UDP sockets sampled for this browser's process tree").toBeGreaterThan(0);
       expect(rbMax).toBeGreaterThanOrEqual(BUFFER_HINT_RB_BYTES);
       const netem = assertLossWithinBudget(before, after);
 
@@ -258,10 +285,12 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
     const code = await chooseFile(page, contents, "netem-b2c.bin");
     const child = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-output", dest, code]);
     const cli = watchCLI(child);
+    const sampling = startSampling([page], pageBrowser(page));
     try {
       await expect(page.locator(".complete")).toBeVisible({ timeout: 180_000 });
       expect(await cli.exited).toBe(0);
       const durationMs = Date.now() - start;
+      const samples = await sampling.stop();
       const after = netemQdiscStats();
 
       const received = readFileSync(join(dest, "netem-b2c.bin"));
@@ -270,9 +299,10 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
 
       expect(cli.counts).toEqual([8]);
       expect(browserCounts).toEqual([8]);
-      const pageStats = await candidatePairStats(page);
+      const pageStats = samples.pairs;
       assertShapedRtt(pageStats);
-      const { max: rbMax, sockets: socketCount } = await maxRb(pageBrowser(page));
+      const { rbMax, sockets: socketCount } = samples;
+      expect(socketCount, "no UDP sockets sampled for this browser's process tree").toBeGreaterThan(0);
       expect(rbMax).toBeGreaterThanOrEqual(BUFFER_HINT_RB_BYTES);
       const netem = assertLossWithinBudget(before, after);
 
@@ -307,19 +337,22 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);
+      const sampling = startSampling([page], pageBrowser(page));
       await page.locator(".confirm-btn").click();
       await expect(page.locator(".complete")).toBeVisible({ timeout: 180_000 });
       expect(await cli.exited).toBe(0);
       const durationMs = Date.now() - start;
+      const samples = await sampling.stop();
       const after = netemQdiscStats();
 
       await verifyDisk(page, contents.length, expectedHash);
 
       expect(cli.counts).toEqual([8]);
       expect(browserCounts).toEqual([8]);
-      const pageStats = await candidatePairStats(page);
+      const pageStats = samples.pairs;
       assertShapedRtt(pageStats);
-      const { max: rbMax, sockets: socketCount } = await maxRb(pageBrowser(page));
+      const { rbMax, sockets: socketCount } = samples;
+      expect(socketCount, "no UDP sockets sampled for this browser's process tree").toBeGreaterThan(0);
       expect(rbMax).toBeGreaterThanOrEqual(BUFFER_HINT_RB_BYTES);
       const netem = assertLossWithinBudget(before, after);
 
@@ -424,7 +457,9 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
   // Negative control: proves the rb sampler actually distinguishes hinted
   // from unhinted connections, rather than always reporting a large number.
   test("negative control: disabling the buffer hint keeps rb at the unhinted size", async ({ browser, baseURL }) => {
-    const controlContents = randomBytes(1024 * 1024);
+    // Large enough to stay open for several sampling ticks at 150 ms RTT, but
+    // below the 64 MiB parallel threshold.
+    const controlContents = randomBytes(32 * 1024 * 1024);
     const controlHash = createHash("sha256").update(controlContents).digest("hex");
     const sender = await browser.newPage({ baseURL });
     const receiver = await browser.newPage({ baseURL });
@@ -440,12 +475,13 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
     try {
       const code = await chooseFile(sender, controlContents, "netem-control.bin");
       await receiver.goto(`/r#${code}`);
+      const sampling = startSampling([sender, receiver], browser);
       await receiver.locator(".confirm-btn").click();
-      await expect(sender.locator(".complete")).toBeVisible({ timeout: 60_000 });
-      await expect(receiver.locator(".complete")).toBeVisible({ timeout: 60_000 });
+      await expect(sender.locator(".complete")).toBeVisible({ timeout: 120_000 });
+      await expect(receiver.locator(".complete")).toBeVisible({ timeout: 120_000 });
+      const { rbMax, sockets: socketCount } = await sampling.stop();
       await verifyDisk(receiver, controlContents.length, controlHash);
 
-      const { max: rbMax, sockets: socketCount } = await maxRb(browser);
       expect(socketCount).toBeGreaterThan(0);
       expect(rbMax).toBe(NO_HINT_RB_BYTES);
     } finally {
