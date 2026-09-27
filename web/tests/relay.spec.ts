@@ -106,6 +106,12 @@ function relayStepText(connections: number): string {
 
 // ── TURN stats.json contract (internal/testturn/stats.go) — read-only ─────
 
+interface TurnAllocationRecord {
+  clientPort: number;
+  createdAtMs: number;
+  deletedAtMs?: number;
+}
+
 interface TurnUserStats {
   created: number;
   deleted: number;
@@ -114,6 +120,8 @@ interface TurnUserStats {
   quotaRejected: number;
   relayedBytesFromPeers: number;
   relayedBytesToPeers: number;
+  // Leak-debugging aid (see internal/testturn/stats.go's AllocationRecord).
+  allocations?: TurnAllocationRecord[];
 }
 
 interface TurnSnapshot {
@@ -375,22 +383,122 @@ function trackRelayAnswer(list: Promise<void>[], promise: Promise<void>): void {
 
 // ── Session-release poll (shared by every scenario below) ────────────────
 
-async function pollSessionRelease(turn: TurnHandle, before: TurnSnapshot): Promise<{ releaseMs: number; newKey: string | undefined; after: TurnSnapshot }> {
+async function pollSessionRelease(
+  turn: TurnHandle, before: TurnSnapshot,
+  debug?: { pids: { label: string; pid: number | undefined }[]; portHistory: () => string[] },
+): Promise<{ releaseMs: number; newKey: string | undefined; after: TurnSnapshot }> {
   const pollStart = Date.now();
   let after!: TurnSnapshot;
   const beforeKeys = new Set(Object.keys(before.users));
   let newKey: string | undefined;
-  await expect.poll(() => {
-    after = turn.snapshot();
-    const newKeys = Object.keys(after.users).filter(k => !beforeKeys.has(k));
-    newKey = newKeys[0];
-    return {
-      newSessions: newKeys.length,
-      live: newKeys.reduce((sum, k) => sum + after.users[k].live, 0),
-      pionLiveDelta: after.pionLive - before.pionLive,
-    };
-  }, { timeout: LEAK_WINDOW_MS, intervals: [250] }).toEqual({ newSessions: 1, live: 0, pionLiveDelta: 0 });
+  try {
+    await expect.poll(() => {
+      after = turn.snapshot();
+      const newKeys = Object.keys(after.users).filter(k => !beforeKeys.has(k));
+      newKey = newKeys[0];
+      return {
+        newSessions: newKeys.length,
+        live: newKeys.reduce((sum, k) => sum + after.users[k].live, 0),
+        pionLiveDelta: after.pionLive - before.pionLive,
+      };
+    }, { timeout: LEAK_WINDOW_MS, intervals: [250] }).toEqual({ newSessions: 1, live: 0, pionLiveDelta: 0 });
+  } catch (error) {
+    if (debug) dumpLeakDiagnostics(turn, before, debug.pids, debug.portHistory());
+    throw error;
+  }
   return { releaseMs: Date.now() - pollStart, newKey, after };
+}
+
+// TEMPORARY, investigation-only (see docs/testing.md's "Known rough edges"
+// -- the CLI<->CLI leak-window finding). Both CLI processes will have
+// already exited (with code 0) by the time a leak-window failure is
+// detected -- the kernel reclaims every FD, including any leaked TURN
+// client socket, the instant a process exits, so checking `ss -uanp`
+// *after* exit can never show who owned a leaked port; the mapping has to
+// be captured *while the processes are still alive*. samplePortPids below
+// polls `ss -H -uanp` every 300ms for the CLI-visible lifetime of a test
+// and keeps every raw snapshot; dumpLeakDiagnostics then searches all of
+// them for the specific leaked port(s), so even a port whose owning
+// process already exited by the time of the *next* sample can still be
+// attributed to a known CLI pid/role from an earlier one. Remove once the
+// leak is root-caused and fixed and this is no longer needed.
+interface PortPidSampler {
+  // Live snapshot of everything captured so far, without stopping the
+  // sampler -- call this from inside a failure handler, since the sampler
+  // must keep running through pollSessionRelease's own up-to-10s poll.
+  peek(): string[];
+  // Stops the background loop. Call once the pairing is fully done
+  // (success or failure), typically from a `finally` block.
+  stop(): void;
+}
+
+function samplePortPidHistory(intervalMs = 300): PortPidSampler {
+  const snapshots: string[] = [];
+  let running = true;
+  const loop = (async () => {
+    while (running) {
+      try {
+        snapshots.push(execSync("ss -H -uanp", { encoding: "utf8" }));
+      } catch {
+        // best effort -- a transient exec failure just skips this tick.
+      }
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+  })();
+  return {
+    peek(): string[] {
+      return snapshots.slice();
+    },
+    stop(): void {
+      running = false;
+      void loop;
+    },
+  };
+}
+
+// Dumps, for a leak-window failure: the known CLI pids/roles, every
+// allocation record for the new session(s) (client port + timestamps, from
+// testturn's stats.json), and -- for each still-live (leaked) port -- every
+// line from the sampled `ss -uanp` history that mentions that port,
+// including its pid, so the leaked connection's owner (sender vs receiver,
+// and whether/when that pid stopped appearing) can be read off the CI log.
+// Each CLI's own [pc-debug] PeerConnection lifecycle lines (see debugLeak's
+// SP2P_DEBUG_PC_LIFECYCLE wiring in runRelayPairing) are NOT repeated here --
+// they're already printed, per pid, by the existing flushCLIDiagnostics
+// failure path (trackCLIForDiagnostics + "[diagnostics] <label> stderr:"),
+// which every test in this file already relies on. Cross-reference a pid
+// from this dump's "known CLI pids" line against those stderr lines to see
+// which PeerConnection (primary vs lane#N) that process created and whether
+// it ever logged "Close() returned".
+function dumpLeakDiagnostics(
+  turn: TurnHandle, before: TurnSnapshot, pids: { label: string; pid: number | undefined }[], portHistory: string[],
+): void {
+  const after = turn.snapshot();
+  const beforeKeys = new Set(Object.keys(before.users));
+  const newKeys = Object.keys(after.users).filter(k => !beforeKeys.has(k));
+  console.log(`[leak-debug] known CLI pids: ${pids.map(p => `${p.label}=${p.pid ?? "(none)"}`).join(", ")}`);
+  console.log(`[leak-debug] new session keys: ${newKeys.length}, ss snapshots captured: ${portHistory.length}`);
+  for (const key of newKeys) {
+    const u = after.users[key];
+    console.log(`[leak-debug] session ${key}: live=${u.live} created=${u.created} deleted=${u.deleted}`);
+    for (const rec of u.allocations ?? []) {
+      const status = rec.deletedAtMs ? `deleted ${rec.deletedAtMs - rec.createdAtMs}ms after creation` : "STILL LIVE";
+      console.log(`[leak-debug]   allocation clientPort=${rec.clientPort} createdAtMs=${rec.createdAtMs} ${status}`);
+      if (!rec.deletedAtMs) {
+        const needle = `:${rec.clientPort} `;
+        let hits = 0;
+        for (let i = 0; i < portHistory.length; i++) {
+          for (const line of portHistory[i].split("\n")) {
+            if (line.includes(needle)) {
+              hits++;
+              console.log(`[leak-debug]     ss[${i}]: ${line.trim()}`);
+            }
+          }
+        }
+        if (hits === 0) console.log(`[leak-debug]     port ${rec.clientPort} never appeared in any ss snapshot`);
+      }
+    }
+  }
 }
 
 // ── Browser side setup ────────────────────────────────────────────────────
@@ -437,6 +545,11 @@ interface RunRelayPairingOptions {
   expectedConnections: number;
   expectedCreated: number;
   expectedQuotaRejected?: number;
+  // TEMPORARY, investigation-only (see dumpLeakDiagnostics/samplePortPidHistory
+  // above): when true, samples `ss -uanp` for the duration of this pairing
+  // and dumps a port/pid-correlated diagnostic if the leak-window check
+  // fails. Remove once the CLI<->CLI leak is root-caused and fixed.
+  debugLeak?: boolean;
 }
 
 async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
@@ -445,6 +558,7 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
 
   const before = turn.snapshot();
   const start = Date.now();
+  const portSampler = opts.debugLeak ? samplePortPidHistory() : undefined;
 
   const browsers: Browser[] = [];
   const childProcesses: ChildProcess[] = [];
@@ -454,6 +568,8 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
   let senderCLI: CLIWatch | undefined;
   let receiverCLI: CLIWatch | undefined;
   let receiverDestDir = "";
+  let senderPid: number | undefined;
+  let receiverPid: number | undefined;
 
   try {
     let code: string;
@@ -473,8 +589,11 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
         ...(receiver.kind === "browser" ? ["-transport", "webrtc"] : []),
         srcPath,
       ];
-      const child = spawn(relayEnv.cliBin, args, { env: { ...process.env, XDG_CONFIG_HOME: xdg } });
+      const child = spawn(relayEnv.cliBin, args, {
+        env: { ...process.env, XDG_CONFIG_HOME: xdg, ...(opts.debugLeak ? { SP2P_DEBUG_PC_LIFECYCLE: "1" } : {}) },
+      });
       childProcesses.push(child);
+      senderPid = child.pid;
       senderCLI = watchCLI(child);
       trackCLIForDiagnostics(senderCLI, `${label}-sender`);
       trackRelayAnswer(relayAnswerPromises, guardedAnswerRelayPrompt(senderCLI, "allow"));
@@ -495,8 +614,11 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
         ...(sender.kind === "browser" ? ["-transport", "webrtc"] : []),
         "-output", receiverDestDir, code,
       ];
-      const child = spawn(relayEnv.cliBin, args, { env: { ...process.env, XDG_CONFIG_HOME: xdg } });
+      const child = spawn(relayEnv.cliBin, args, {
+        env: { ...process.env, XDG_CONFIG_HOME: xdg, ...(opts.debugLeak ? { SP2P_DEBUG_PC_LIFECYCLE: "1" } : {}) },
+      });
       childProcesses.push(child);
+      receiverPid = child.pid;
       receiverCLI = watchCLI(child);
       trackCLIForDiagnostics(receiverCLI, `${label}-receiver`);
       trackRelayAnswer(relayAnswerPromises, guardedAnswerRelayPrompt(receiverCLI, "allow"));
@@ -521,7 +643,10 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
     }
 
     // ── Session release (no leaked allocations) ──
-    const { releaseMs, newKey, after } = await pollSessionRelease(turn, before);
+    const { releaseMs, newKey, after } = await pollSessionRelease(turn, before, portSampler && {
+      pids: [{ label: "sender", pid: senderPid }, { label: "receiver", pid: receiverPid }],
+      portHistory: () => portSampler.peek(),
+    });
     expect(newKey, "no new TURN session key appeared for this transfer").toBeDefined();
     const userStats = after.users[newKey!];
 
@@ -569,6 +694,7 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
       durationMs: Date.now() - start,
     });
   } finally {
+    portSampler?.stop();
     for (const child of childProcesses) child.kill();
     for (const browser of browsers) await browser.close();
   }
@@ -624,6 +750,9 @@ test.describe("relay: sender/receiver pairings", () => {
       playwright, relayEnv, turn,
       sender: { kind: "cli" }, receiver: { kind: "cli" },
       label: "cli-cli", expectedConnections: LANES, expectedCreated: EXPECTED_ALLOCATIONS_FULL,
+      // TEMPORARY, investigation-only: see dumpLeakDiagnostics/samplePortPidHistory
+      // above. Remove this flag once the CLI<->CLI leak is root-caused and fixed.
+      debugLeak: true,
     });
   });
 

@@ -212,11 +212,11 @@ func New(cfg Config) (*Server, error) {
 			return t.allow(userID)
 		},
 		EventHandler: turn.EventHandler{
-			OnAllocationCreated: func(_, _ net.Addr, _, userID, _ string, _ net.Addr, _ int) {
-				t.recordCreated(userID)
+			OnAllocationCreated: func(srcAddr, _ net.Addr, _, userID, _ string, _ net.Addr, _ int) {
+				t.recordCreated(userID, udpPort(srcAddr))
 			},
-			OnAllocationDeleted: func(_, _ net.Addr, _, userID, _ string) {
-				t.recordDeleted(userID)
+			OnAllocationDeleted: func(srcAddr, _ net.Addr, _, userID, _ string) {
+				t.recordDeleted(userID, udpPort(srcAddr))
 			},
 			// OnAuth's verdict is the STUN MESSAGE-INTEGRITY check against the
 			// key AuthHandler returned -- i.e. a real credential mismatch
@@ -342,4 +342,15 @@ func (c *countingPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 		c.bytes.toPeers.Add(uint64(n))
 	}
 	return n, err
+}
+
+// udpPort extracts the port from a client's TURN-request source address,
+// for the leak-debugging AllocationRecord (see stats.go). 0 if addr isn't a
+// *net.UDPAddr (should not happen for this server, which registers only a
+// UDP PacketConnConfig).
+func udpPort(addr net.Addr) int {
+	if udpAddr, ok := addr.(*net.UDPAddr); ok {
+		return udpAddr.Port
+	}
+	return 0
 }

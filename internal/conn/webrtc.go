@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,25 @@ import (
 	"github.com/zyno-io/sp2p/internal/signal"
 	"github.com/zyno-io/sp2p/internal/transfer"
 )
+
+// debugPCLifecycle is TEMPORARY instrumentation for investigating the relay
+// suite's CLI<->CLI TURN-allocation leak (see docs/testing.md's "Known
+// rough edges"). Gated behind an env var so it is a no-op in every normal
+// build or run, including with -v: unlike -v's OnLog callback, this never
+// touches SDP, and only ever prints numeric identifiers (this process's own
+// pid, a connection tag, an ICE candidate's local port, a connection-state
+// string) to stderr -- never transfer codes or secrets. Remove this
+// variable, debugPC, and every call site once the leak is root-caused and
+// fixed; it exists solely to answer "which process/connection created and
+// closed the allocation at client port N, and when".
+var debugPCLifecycle = os.Getenv("SP2P_DEBUG_PC_LIFECYCLE") == "1"
+
+func debugPC(tag, format string, args ...any) {
+	if !debugPCLifecycle {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[pc-debug] pid=%d %s "+format+"\n", append([]any{os.Getpid(), tag}, args...)...)
+}
 
 const (
 	dataChannelLabel     = "sp2p"
@@ -71,8 +91,10 @@ type WebRTCConn struct {
 	// pion's PeerConnection.Close returns immediately to a second caller
 	// while the first is still closing, so the process could exit before
 	// TURN allocations were released. pcCloseOnce makes every Close wait.
-	pcCloseOnce   sync.Once
-	pcCloseErr    error
+	pcCloseOnce sync.Once
+	pcCloseErr  error
+	// debugTag is TEMPORARY instrumentation (see debugPCLifecycle above).
+	debugTag      string
 	deadlineMu    sync.Mutex
 	deadlineTimer *time.Timer
 	bufferLimit   atomic.Uint64
@@ -183,11 +205,15 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 		browserPeer:   browserPeer,
 	}
 	conn.flowCond = sync.NewCond(&conn.flowMu)
+	debugTag := fmt.Sprintf("primary sender=%v", cfg.IsSender)
+	conn.debugTag = debugTag
+	debugPC(debugTag, "created")
 
 	// Close the connection when the peer disconnects (e.g. browser tab closed).
 	// Run in a goroutine to avoid deadlocking pion's internal locks.
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		logVerbose(cfg.OnLog, "WebRTC: connection state → %s", state.String())
+		debugPC(debugTag, "state=%s", state.String())
 		switch state {
 		case webrtc.PeerConnectionStateDisconnected,
 			webrtc.PeerConnectionStateFailed,
@@ -203,6 +229,9 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 			return
 		}
 		logVerbose(cfg.OnLog, "WebRTC: local ICE candidate: %s %s", c.Typ.String(), c.Address)
+		if c.Typ == webrtc.ICECandidateTypeHost {
+			debugPC(debugTag, "local host candidate port=%d", c.Port)
+		}
 		init := c.ToJSON()
 		if err := sigClient.Send(ctx, signal.TypeCandidate, signal.Candidate{
 			Candidate:     init.Candidate,
@@ -577,6 +606,7 @@ func (c *WebRTCConn) SetSendBufferLimit(limit uint64) {
 }
 
 func (c *WebRTCConn) Close() error {
+	debugPC(c.debugTag, "Close() called")
 	c.closeOnce.Do(func() {
 		close(c.closed)
 		c.flowMu.Lock()
@@ -587,6 +617,7 @@ func (c *WebRTCConn) Close() error {
 		dc.Close()
 	}
 	c.pcCloseOnce.Do(func() { c.pcCloseErr = c.pc.Close() })
+	debugPC(c.debugTag, "Close() returned err=%v", c.pcCloseErr)
 	return c.pcCloseErr
 }
 
