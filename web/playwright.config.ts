@@ -38,6 +38,13 @@ export default defineConfig({
       name: "webkit",
       use: { browserName: "webkit" },
       testMatch: [/interop\.spec\.ts/, /parallel-interop\.spec\.ts/, /webrtc-policy\.spec\.ts/],
+      // Real-timing WebRTC lane negotiation (web/src/webrtc-parallel.ts's
+      // per-lane 8s auth timeout) occasionally lands one lane short of the
+      // full count under CPU contention — see docs/testing.md's Engines
+      // section. One retry absorbs that noise without loosening any
+      // assertion; a lane count that's consistently short is still a
+      // failure after the retry.
+      retries: process.env.CI ? 1 : 0,
     },
     // engine-matrix.spec.ts's tests never request the `browser`/`page`
     // fixtures — every engine involved is launched explicitly through the
@@ -46,6 +53,10 @@ export default defineConfig({
     {
       name: "engines",
       testMatch: /engine-matrix\.spec\.ts/,
+      // See the retries comment on the "webkit" project above — the same
+      // per-lane timing margin applies here, including on the @pr-tagged
+      // cells that gate PRs.
+      retries: process.env.CI ? 1 : 0,
     },
     {
       name: "netem",
