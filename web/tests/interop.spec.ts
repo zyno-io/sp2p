@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createHash } from "node:crypto";
 import { test, expect } from "./fixtures";
-import { flushDiagnostics, trackForDiagnostics } from "./helpers";
+import { flushDiagnostics, trackCLIForDiagnostics, trackForDiagnostics } from "./helpers";
 
 test.afterEach(async ({}, testInfo) => { await flushDiagnostics(testInfo); });
 
@@ -196,17 +196,22 @@ test("CLI sender → browser receiver transfers a file", async ({
     },
   });
 
-  // Extract code from sender's stderr.
+  // Extract code from sender's stderr. stderrChunks is a live array — passed
+  // to trackCLIForDiagnostics below so a later dump-on-failure sees every
+  // chunk received up to that point, not just what arrived before the code.
+  const stderrChunks: string[] = [];
   const code = await new Promise<string>((resolve, reject) => {
     const codeRe = /sp2p receive ([A-Za-z0-9-]+)/;
     let output = "";
     const timer = setTimeout(() => {
       sender.kill();
-      reject(new Error(`Timeout waiting for code.\nstderr: ${output}`));
+      reject(new Error("Timeout waiting for code."));
     }, 15_000);
 
     sender.stderr?.on("data", (chunk: Buffer) => {
-      output += chunk.toString();
+      const text = chunk.toString();
+      stderrChunks.push(text);
+      output += text;
       const match = codeRe.exec(output);
       if (match) {
         clearTimeout(timer);
@@ -219,6 +224,10 @@ test("CLI sender → browser receiver transfers a file", async ({
       reject(err);
     });
   });
+  trackCLIForDiagnostics({
+    code: Promise.resolve(code), stderr: stderrChunks, eventLog: [],
+    exited: new Promise(resolve => sender.once("exit", resolve)), counts: [], transports: [],
+  }, "sender");
 
   try {
     // Browser receiver: navigate to receive page with the code.

@@ -33,7 +33,7 @@ import type { Page, PlaywrightWorkerArgs } from "@playwright/test";
 import { expect } from "./fixtures";
 import {
   chooseFile, cleanupTemporaryDirectories, flushDiagnostics, installReceiverSink, isolatedServerTest as test,
-  observeConnections, temporaryDirectory, trackForDiagnostics, verifyReceiverSink, watchCLI,
+  observeConnections, temporaryDirectory, trackCLIForDiagnostics, trackForDiagnostics, verifyReceiverSink, watchCLI,
 } from "./helpers";
 
 test.setTimeout(120_000);
@@ -90,6 +90,7 @@ async function runCLIToBrowser(pw: Playwright, baseURL: string, wsUrl: string, c
     writeFileSync(src, contents);
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", src]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, "sender");
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);
@@ -114,6 +115,7 @@ async function runBrowserToCLI(pw: Playwright, baseURL: string, wsUrl: string, c
     const code = await chooseFile(page, contents, "engine-matrix.bin");
     const child = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-output", dest, code]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, "receiver");
     try {
       await expect(page.locator(".complete")).toBeVisible({ timeout: COMPLETE_TIMEOUT });
       const status = await cli.exited;

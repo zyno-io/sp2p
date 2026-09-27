@@ -14,7 +14,7 @@ import type { Page } from "@playwright/test";
 import { expect } from "./fixtures";
 import {
   chooseFile, cleanupTemporaryDirectories, flushDiagnostics, installReceiverSink, isolatedServerTest as test,
-  observeConnections, temporaryDirectory, trackForDiagnostics, verifyReceiverSink, watchCLI,
+  observeConnections, temporaryDirectory, trackCLIForDiagnostics, trackForDiagnostics, verifyReceiverSink, watchCLI,
 } from "./helpers";
 
 test.setTimeout(90000);
@@ -71,6 +71,7 @@ test("browser parallel WebRTC sender interoperates with CLI receiver", async ({ 
   const code = await choose(page);
   const child = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-output", dest, code]);
   const cli = watchCLI(child);
+  trackCLIForDiagnostics(cli, "receiver");
   try {
     await expect(page.locator(".complete")).toBeVisible({ timeout: 60000 });
     const status = await cli.exited;
@@ -90,6 +91,7 @@ for (const compression of [0, 3]) {
     trackForDiagnostics(page, "receiver");
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-compress", String(compression), src]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, "sender");
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);

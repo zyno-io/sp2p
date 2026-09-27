@@ -28,7 +28,8 @@ import type { Page } from "@playwright/test";
 import { expect } from "./fixtures";
 import {
   chooseFile, cleanupTemporaryDirectories, flushDiagnostics, installReceiverSink,
-  isolatedServerTest as test, temporaryDirectory, trackForDiagnostics, verifyReceiverSink, watchCLI,
+  isolatedServerTest as test, temporaryDirectory, trackCLIForDiagnostics, trackForDiagnostics,
+  verifyReceiverSink, watchCLI,
 } from "./helpers";
 
 test.afterEach(async ({}, testInfo) => {
@@ -202,6 +203,7 @@ test.describe("browser → CLI", () => {
     const code = await chooseFile(page, contents, "policy-b2c.bin");
     const child = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-output", dest, code]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, "receiver");
     try {
       await expect(page.locator(".complete")).toBeVisible({ timeout: 60_000 });
       expect(await cli.exited).toBe(0);
@@ -233,6 +235,7 @@ test.describe("CLI → browser", () => {
     writeFileSync(src, contents);
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", src]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, "sender");
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);

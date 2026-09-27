@@ -2,9 +2,10 @@
 
 // Shared Playwright test helpers used by more than one spec file: an
 // isolated-signaling-server fixture, a throwaway-directory allocator,
-// dump-on-failure diagnostics, a CLI JSON event watcher, a WebRTC lane
-// count observer, a cross-engine receive-path sink (real OPFS on Chromium,
-// a hashed in-memory blob on Firefox/WebKit — each engine's real receive
+// dump-on-failure diagnostics for both browser pages and CLI processes
+// (never transfer codes), a CLI JSON event watcher, a WebRTC lane count
+// observer, a cross-engine receive-path sink (real OPFS on Chromium, a
+// hashed in-memory blob on Firefox/WebKit — each engine's real receive
 // path), and a share-code chooser.
 
 import { execSync, spawn } from "node:child_process";
@@ -81,7 +82,9 @@ export function trackForDiagnostics(page: Page, label = "page"): void {
 
 export async function flushDiagnostics(testInfo: { status?: string; expectedStatus: string }): Promise<void> {
   const pages = diagnosticPages.splice(0);
-  if (testInfo.status === testInfo.expectedStatus) return;
+  const failed = testInfo.status !== testInfo.expectedStatus;
+  await flushCLIDiagnostics(failed);
+  if (!failed) return;
   for (const { page, label } of pages) {
     if (page.isClosed()) { console.log(`[diagnostics] ${label}: page already closed`); continue; }
     try {
@@ -116,6 +119,16 @@ export interface CLIWatch {
   // "connected" — lets a test that runs in transport "auto" record which
   // one the CLI actually picked instead of assuming it.
   transports: string[];
+  // Sanitized event log for dump-on-failure diagnostics (see
+  // trackCLIForDiagnostics/flushDiagnostics below): every parsed event's
+  // "event" field plus non-sensitive fields — the "session" event's "code"
+  // field is dropped, never buffered here in the first place.
+  eventLog: string[];
+  // Raw stderr chunks. -format json always keeps the human "sp2p receive
+  // <code>" announcement (internal/cli/progress.go) off stderr — that's
+  // format=human-only — but flushDiagnostics still actively redacts the
+  // resolved code from this before printing, as a defense-in-depth measure.
+  stderr: string[];
 }
 
 // Watches a CLI child process's JSON stdout for its session code, any
@@ -125,6 +138,8 @@ export function watchCLI(child: ChildProcess): CLIWatch {
   let pending = "";
   const counts: number[] = [];
   const transports: string[] = [];
+  const eventLog: string[] = [];
+  const stderr: string[] = [];
   let resolveCode!: (code: string) => void;
   let rejectCode!: (error: Error) => void;
   const code = new Promise<string>((resolve, reject) => { resolveCode = resolve; rejectCode = reject; });
@@ -141,13 +156,42 @@ export function watchCLI(child: ChildProcess): CLIWatch {
       if (event.event === "connection" && event.connection?.state === "connected") {
         transports.push(event.connection.method);
       }
+      const { code: _omitted, ...safe } = event;
+      eventLog.push(JSON.stringify(safe));
     }
   });
+  child.stderr?.on("data", bytes => { stderr.push(bytes.toString()); });
   const exited = new Promise<number | null>((resolve, reject) => {
     child.once("error", error => { reject(error); rejectCode(error); });
     child.once("exit", status => { resolve(status); rejectCode(new Error("CLI exited before session creation")); });
   });
-  return { code, exited, counts, transports };
+  return { code, exited, counts, transports, eventLog, stderr };
+}
+
+// ── CLI failure diagnostics (see trackForDiagnostics above) ────────────────
+
+const diagnosticCLIs: { cli: CLIWatch; label: string }[] = [];
+
+export function trackCLIForDiagnostics(cli: CLIWatch, label = "cli"): void {
+  diagnosticCLIs.push({ cli, label });
+}
+
+// Called by flushDiagnostics (above) — kept as a separate function so a spec
+// that only tracks CLI processes (no page) doesn't need to touch pages.
+async function flushCLIDiagnostics(failed: boolean): Promise<void> {
+  const clis = diagnosticCLIs.splice(0);
+  if (!failed) return;
+  for (const { cli, label } of clis) {
+    // Actively redact the resolved code (if any) from everything printed
+    // below, even though -format json keeps it off stdout/stderr already —
+    // never log transfer codes.
+    const resolvedCode = await cli.code.catch(() => null);
+    const redact = (text: string): string => resolvedCode ? text.split(resolvedCode).join("[redacted]") : text;
+    console.log(`[diagnostics] ${label}: ${cli.eventLog.length} JSON events`);
+    for (const line of cli.eventLog) console.log(`[diagnostics] ${label} event: ${redact(line)}`);
+    if (cli.stderr.length) console.log(`[diagnostics] ${label}: ${cli.stderr.length} stderr chunks`);
+    for (const chunk of cli.stderr) console.log(`[diagnostics] ${label} stderr: ${redact(chunk.trimEnd())}`);
+  }
 }
 
 // ── Lane observer ────────────────────────────────────────────────────────────
