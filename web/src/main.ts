@@ -143,6 +143,7 @@ async function establishP2PWithRetry(
   // rather than waiting for us to click OK first.
   log("P2P: requesting TURN relay credentials");
   onStage("Direct connection failed; requesting relay access");
+  sigClient.discardHeld();
   sigClient.send("relay-retry", {});
 
   // Ask user for consent while the peer is being notified in parallel.

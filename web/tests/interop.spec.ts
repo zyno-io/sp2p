@@ -257,6 +257,66 @@ test("CLI sender → browser receiver transfers a file", async ({
   }
 });
 
+// A CLI sender's offer can arrive before the browser receiver has finished
+// deriving session keys and started listening for it. Slowing key derivation
+// forces that ordering; the offer must still be answered.
+test("CLI sender offer that arrives before the browser listens is still answered", async ({
+  page,
+  cliBin,
+  wsUrl,
+}) => {
+  trackForDiagnostics(page, "receiver");
+  const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-cli-"));
+  const srcFile = join(tmpDir, "early-offer.txt");
+  const fileContent = "early offer — " + Date.now();
+  writeFileSync(srcFile, fileContent);
+
+  const sender = spawn(cliBin, ["send", "-transport", "webrtc", srcFile], {
+    env: { ...process.env, SP2P_SERVER: wsUrl, SP2P_URL: "http://127.0.0.1:18090" },
+  });
+  const stderrChunks: string[] = [];
+  const code = await new Promise<string>((resolve, reject) => {
+    const codeRe = /sp2p receive ([A-Za-z0-9-]+)/;
+    let output = "";
+    const timer = setTimeout(() => { sender.kill(); reject(new Error("Timeout waiting for code.")); }, 15_000);
+    sender.stderr?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderrChunks.push(text);
+      output += text;
+      const match = codeRe.exec(output);
+      if (match) { clearTimeout(timer); resolve(match[1]); }
+    });
+    sender.on("error", (err) => { clearTimeout(timer); reject(err); });
+  });
+  trackCLIForDiagnostics({
+    code: Promise.resolve(code), stderr: stderrChunks, eventLog: [],
+    exited: new Promise(resolve => sender.once("exit", resolve)), counts: [], transports: [],
+  }, "sender");
+
+  try {
+    await page.addInitScript(() => {
+      delete (window as any).showSaveFilePicker;
+      // Each HKDF derivation takes an extra second, so the CLI's offer
+      // (sent within about a second of key exchange) lands first.
+      const derive = crypto.subtle.deriveBits.bind(crypto.subtle);
+      crypto.subtle.deriveBits = (async (...args: Parameters<SubtleCrypto["deriveBits"]>) => {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        return derive(...args);
+      }) as SubtleCrypto["deriveBits"];
+    });
+    const downloadPromise = page.waitForEvent("download", { timeout: 60_000 });
+    await page.goto(`/r#${code}`);
+    await maybeConfirmBrowserDownload(page);
+    await expect(page.locator(".complete")).toBeVisible({ timeout: 60_000 });
+    const download = await downloadPromise;
+    const downloadPath = await download.path();
+    expect(downloadPath).toBeTruthy();
+    expect(readFileSync(downloadPath!, "utf-8")).toBe(fileContent);
+  } finally {
+    sender.kill();
+  }
+});
+
 // ── Browser → CLI ───────────────────────────────────────────────────────────
 
 test("browser sender → CLI receiver transfers a file", async ({

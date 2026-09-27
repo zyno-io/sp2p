@@ -279,87 +279,23 @@ yet a required check) runs `--project=firefox` plus
 (`macos-15` — closer to Safari's WebKit than a Linux runner) runs
 `--project=webkit` plus the full, untagged `--project=engines` (all 15
 cells); it was added to `report-failure`'s `needs` and failure-summary
-logic alongside `netem-nightly` and `compat-n2`. The nightly job cannot be
-dispatched before this change merges, so its exact command was instead
-validated locally on macOS (see below) rather than by triggering the
-workflow itself.
+logic alongside `netem-nightly` and `compat-n2`. Browsers in the matrix
+expose plain host candidates (Chromium's `WebRtcHideLocalIpsWithMdns`
+disabled, Firefox's `media.peerconnection.ice.obfuscate_host_addresses`
+off): hosted macOS runners don't reliably resolve the `.local` names, which
+broke browser↔browser cells while CLI cells passed.
 
-**Investigated: an intermittent CLI-sender→Firefox-receiver stall, real on
-CI, not reproduced locally.** A PR review flagged that the `firefox`
-project's original `retries: 1` was masking real failures rather than
-absorbing network-timing noise — three "flaky" (fail-then-pass-on-retry)
-CLI→browser-shaped tests in one real `ubuntu-latest` run, and a hard
-failure with the identical `.complete`-never-appears symptom in an earlier
-run. That retry was removed (see the `firefox` project's comment in
-`playwright.config.ts`) and dump-on-failure diagnostics were added for both
-the receiver page (`trackForDiagnostics`/`flushDiagnostics`) and the CLI
-process (`trackCLIForDiagnostics`, a sanitized JSON-event log plus stderr,
-with the resolved code actively redacted from every line before printing —
-never log transfer codes). The very next real CI failure came back with a
-complete evidence trail:
-
-- The CLI sender's own event log: `connection {method: webrtc, state:
-  trying}` at T+0, then nothing at all until `error {code: operation_failed,
-  message: "Receiver disconnected"}` at **T+15s**.
-- The Firefox receiver's console log, same window: `WebRTC: creating peer
-  connection...` → `WebRTC: Waiting for sender's offer` at T+0, then
-  `P2P attempt 1 failed: WebRTC connection timed out` at **T+15s** (the
-  client-side `establishWebRTC` timeout — `timeoutMs` defaults to 15000 in
-  `web/src/webrtc.ts`), followed immediately by `signaling connection
-  closed`.
-- The receiver's `.error-message`: `"Could not establish P2P connection (no
-  TURN relay available)"`.
-
-Reading those together: the CLI's WebRTC attempt never progressed past
-"trying" for the full 15 seconds — no offer ever reached the receiver, which
-just sat waiting until its own client-side timeout fired and it disconnected
-from signaling. The CLI's "Receiver disconnected" is a *downstream*
-symptom of that disconnect, not the root cause — the root cause is
-whatever kept the CLI's own ICE/offer-creation from completing in time.
-This reproduced on the very next real CI run and confirmed the diagnosis is
-accurate, but:
-
-- It has **not reproduced once** in ~15 local runs of the full `firefox`
-  project on this Mac (macOS, native), nor in ~14 more runs of the same
-  project inside a Linux (`arm64`, Ubuntu 24.04) Docker container sized to
-  match a GitHub-hosted `ubuntu-latest` runner (2 vCPU, ~8&nbsp;GiB — via
-  Colima). The same isolated-server/CLI/Firefox code paths, run identically,
-  simply did not stall locally, on either OS.
-- Running the *same* `firefox` project many times back-to-back on real CI
-  (`gh run rerun --job`, plus further pushes) reproduced it on several
-  further attempts — every one with the identical signature: the CLI
-  sender's event log goes straight from `connection {method: webrtc, state:
-  trying}` to `error {message: "Receiver disconnected"}` 15 seconds later,
-  with *nothing* logged in between, while the receiver's console sits at
-  `WebRTC: Waiting for sender's offer` for that same window. It is real,
-  reproduces with a highly consistent signature every time it does, and
-  is intermittent in *whether* it happens on a given run, not in *what*
-  happens when it does — consistent with something specific to real,
-  multi-tenant cloud runner infrastructure (CPU steal time,
-  network-namespace/virtualized-NIC behavior, IPv6 STUN-path quirks) that a
-  resource-matched local VM does not reproduce, rather than a deterministic
-  code defect.
-- The identical test run 10 times back-to-back against **Chromium** in the
-  same Docker container came back 10/10 clean, and the pre-existing,
-  Chromium-only `browser-interop` CI job has run this same
-  `webrtc-policy.spec.ts` "CLI → browser" test green on every push in this
-  PR so far. That is consistent with (but does not conclusively prove) this
-  being specific to Firefox as the receiving peer, rather than a
-  CLI/pion-side issue that would surface equally against any engine.
-
-**This looks like a real, intermittent product-level timing issue in the
-CLI/pion WebRTC stack (or its interaction with Firefox as the answering
-peer) under real cloud CI infrastructure, not a bug in this PR's test
-code.** Per review guidance, it was not "fixed" here (no timeout increase,
-no retry to mask it, no change to `internal/conn/webrtc.go` or
-`web/src/webrtc.ts`'s ICE/offer logic) — that would be masking or guessing
-at a product change without understanding *why* the CLI's ICE/offer
-creation occasionally does not complete within 15 seconds specifically on
-GitHub's runners. It is reported here with the evidence above for a
-follow-up investigation (e.g., packet capture or pion-level debug logging
-on a real `ubuntu-latest` runner) and is exactly why `browser-firefox` is
-not yet a required check: it needs to run clean for a while, or this needs
-to be root-caused and fixed, before it gates PRs for real.
+**Fixed: CLI sender → browser receiver stall.** On hosted runners, CLI →
+browser transfers occasionally hung for 15 s: the CLI logged `webrtc trying`
+and then `Receiver disconnected`, while the browser sat at `Waiting for
+sender's offer`. The CLI sends its offer as soon as its own key derivation and
+ICE gathering finish, which can be before the browser has derived its session
+keys and registered an `offer` handler, and `SignalClient` dropped messages
+with no handler. It now holds `offer`/`answer`/`candidate` messages until a
+handler registers, and drops held messages before sending `relay-retry` (the
+peer only starts its next attempt after receiving it). `interop.spec.ts` has a
+regression test that slows the receiver's key derivation to force the
+ordering; it fails without the fix with the same signature seen on CI.
 
 **Known rough edge: multi-homed-host lane sockets (WebKit and browser↔browser
 alike).** On the Mac this was developed on — two active interfaces on the
