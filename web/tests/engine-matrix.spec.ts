@@ -53,8 +53,18 @@ const COMPLETE_TIMEOUT = 100_000;
 type EngineName = "chromium" | "firefox" | "webkit";
 type Playwright = PlaywrightWorkerArgs["playwright"];
 
+// Hosted CI runners don't reliably resolve the mDNS (.local) names Chromium and
+// Firefox use to hide host candidates, which breaks browser-to-browser ICE
+// while CLI peers (plain addresses) still connect. Expose plain local
+// addresses; WebKit doesn't obfuscate them.
+const LAUNCH_OPTIONS: Record<EngineName, Parameters<Playwright["chromium"]["launch"]>[0]> = {
+  chromium: { headless: true, args: ["--disable-features=WebRtcHideLocalIpsWithMdns"] },
+  firefox: { headless: true, firefoxUserPrefs: { "media.peerconnection.ice.obfuscate_host_addresses": false } },
+  webkit: { headless: true },
+};
+
 async function launchEnginePage(pw: Playwright, engine: EngineName, baseURL: string): Promise<{ browser: import("@playwright/test").Browser; page: Page }> {
-  const browser = await pw[engine].launch({ headless: true });
+  const browser = await pw[engine].launch(LAUNCH_OPTIONS[engine]);
   const page = await browser.newPage({ baseURL });
   return { browser, page };
 }
