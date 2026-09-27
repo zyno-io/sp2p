@@ -258,6 +258,19 @@ async function startTurn(env: RelayEnv, quota: number): Promise<TurnHandle> {
     "-min-port", String(RELAY_MIN_PORT), "-max-port", String(RELAY_MAX_PORT),
     "-realm", "sp2p.test", "-user-quota", String(quota),
     "-stats", statsPath, "-exit-with-parent",
+    // Confirmed against pion/turn's client (internal/client/udp_conn.go):
+    // its refresh timer fires at lifetime/2, proportional to whatever the
+    // server grants, so a short lifetime is safe for any connection that's
+    // still actually in use -- it refreshes well before expiry regardless
+    // of the absolute value. This bounds how long an ABANDONED allocation
+    // (e.g. a short-lived CLI process that exits before its async
+    // connection-close goroutine sends a TURN Refresh(0) --
+    // internal/conn/webrtc.go's unawaited `go conn.Close()`) can stay live:
+    // observed real transfers complete in low single-digit seconds after
+    // their relay allocation succeeds, so 8s leaves ample margin for an
+    // active transfer while still comfortably clearing within
+    // LEAK_WINDOW_MS (10s) for a genuinely abandoned one.
+    "-allocation-lifetime", "8s",
   ], { env: { ...process.env, SP2P_TESTTURN_SECRET: env.secret } });
   child.stderr?.on("data", chunk => { stderr.push(chunk.toString()); });
   let earlyExitCode: number | null = null;
@@ -831,6 +844,18 @@ test.describe("relay: consent", () => {
     const receiverPage = await receiverBrowser.newPage({ baseURL: relayEnv.url });
     const senderDialogs = registerDialog(senderPage, false);
     const receiverDialogs = registerDialog(receiverPage, false);
+    // web/src/main.ts calls showSaveFilePicker() synchronously inside the
+    // confirm button's click handler, before the receiver even connects to
+    // signaling ("Invoke the picker in the click handler itself, before
+    // transient activation expires during ICE/key exchange"). Without this
+    // shim, the real (unshimmed) browser API hangs forever in headless
+    // Chromium -- there is no display for a native picker to resolve
+    // against -- which blocks everything downstream on both pages (the
+    // sender waits for the receiver to join, which never happens). Every
+    // other test in this suite calls this for its browser receiver(s);
+    // this one is declined before any actual file moves, but still needs
+    // the shim purely so the confirm click's awaited promise resolves.
+    await installReceiverSink(receiverPage, "chromium");
     trackForDiagnostics(senderPage, "consent-both-decline-sender");
     trackForDiagnostics(receiverPage, "consent-both-decline-receiver");
 
