@@ -4,7 +4,7 @@
   "scripts": {
     "build": "node build.js",
     "watch": "cp index.html receive.html style.css dist/ && esbuild src/main.ts --bundle --outfile=dist/app.js --sourcemap --target=es2020 --watch",
-    "test": "playwright test",
+    "test": "playwright test --project=chromium",
     "test:ui": "playwright test --ui"
   },
   "devDependencies": {

@@ -26,7 +26,6 @@ import {
   receiveToDisk, temporaryDirectory, udpSockets, verifyDisk, watchCLI,
 } from "./helpers";
 
-test.setTimeout(240_000);
 test.skip(!process.env.SP2P_NETEM_PROFILE, "set SP2P_NETEM_PROFILE (see docs/testing.md) to run this suite inside the shaped sp2p netns");
 
 // Above the 64 MiB parallel-negotiation threshold on both browser and CLI

@@ -4,6 +4,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createHash } from "node:crypto";
 import { test, expect } from "./fixtures";
+import { flushDiagnostics, trackCLIForDiagnostics, trackForDiagnostics } from "./helpers";
+
+test.afterEach(async ({}, testInfo) => { await flushDiagnostics(testInfo); });
 
 async function extractCodeFromShareUrl(page: { locator: (selector: string) => any }): Promise<string> {
   const shareUrl = page.locator(".share-url");
@@ -58,6 +61,7 @@ test("browser sender → browser receiver transfers a file", async ({
   const senderPage = await senderContext.newPage();
   const receiverContext = await browser.newContext();
   const receiverPage = await receiverContext.newPage();
+  trackForDiagnostics(receiverPage, "receiver");
   if (process.env.SP2P_TEST_WEBRTC_DEBUG === "1") {
     for (const [role, page] of [["sender", senderPage], ["receiver", receiverPage]] as const) {
       page.on("console", message => {
@@ -119,6 +123,7 @@ test("browser sender → browser receiver transfers a file", async ({
 test("active browser transfer removes commands and reports sending and connection stages", async ({ browser }) => {
   const sender = await browser.newPage();
   const receiver = await browser.newPage();
+  trackForDiagnostics(receiver, "receiver");
   const stages: string[] = [];
   sender.on("console", message => { if (message.text().includes("WebRTC:")) stages.push(message.text()); });
   await receiver.addInitScript(() => {
@@ -176,6 +181,7 @@ test("CLI sender → browser receiver transfers a file", async ({
   cliBin,
   wsUrl,
 }) => {
+  trackForDiagnostics(page, "receiver");
   const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-cli-"));
   const srcFile = join(tmpDir, "cli-to-browser.txt");
   const fileContent = "CLI to browser test — " + Date.now();
@@ -190,17 +196,22 @@ test("CLI sender → browser receiver transfers a file", async ({
     },
   });
 
-  // Extract code from sender's stderr.
+  // Extract code from sender's stderr. stderrChunks is a live array — passed
+  // to trackCLIForDiagnostics below so a later dump-on-failure sees every
+  // chunk received up to that point, not just what arrived before the code.
+  const stderrChunks: string[] = [];
   const code = await new Promise<string>((resolve, reject) => {
     const codeRe = /sp2p receive ([A-Za-z0-9-]+)/;
     let output = "";
     const timer = setTimeout(() => {
       sender.kill();
-      reject(new Error(`Timeout waiting for code.\nstderr: ${output}`));
+      reject(new Error("Timeout waiting for code."));
     }, 15_000);
 
     sender.stderr?.on("data", (chunk: Buffer) => {
-      output += chunk.toString();
+      const text = chunk.toString();
+      stderrChunks.push(text);
+      output += text;
       const match = codeRe.exec(output);
       if (match) {
         clearTimeout(timer);
@@ -213,6 +224,10 @@ test("CLI sender → browser receiver transfers a file", async ({
       reject(err);
     });
   });
+  trackCLIForDiagnostics({
+    code: Promise.resolve(code), stderr: stderrChunks, eventLog: [],
+    exited: new Promise(resolve => sender.once("exit", resolve)), counts: [], transports: [],
+  }, "sender");
 
   try {
     // Browser receiver: navigate to receive page with the code.
@@ -237,6 +252,83 @@ test("CLI sender → browser receiver transfers a file", async ({
       const downloadedContent = readFileSync(downloadPath, "utf-8");
       expect(downloadedContent).toBe(fileContent);
     }
+  } finally {
+    sender.kill();
+  }
+});
+
+// A CLI sender's offer can arrive before the browser receiver has finished
+// deriving session keys and started listening for it. Slowing key derivation
+// forces that ordering; the offer must still be answered.
+test("CLI sender offer that arrives before the browser listens is still answered", async ({
+  page,
+  cliBin,
+  wsUrl,
+}) => {
+  trackForDiagnostics(page, "receiver");
+  const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-cli-"));
+  const srcFile = join(tmpDir, "early-offer.txt");
+  const fileContent = "early offer — " + Date.now();
+  writeFileSync(srcFile, fileContent);
+
+  const sender = spawn(cliBin, ["send", "-transport", "webrtc", srcFile], {
+    env: { ...process.env, SP2P_SERVER: wsUrl, SP2P_URL: "http://127.0.0.1:18090" },
+  });
+  const stderrChunks: string[] = [];
+  const code = await new Promise<string>((resolve, reject) => {
+    const codeRe = /sp2p receive ([A-Za-z0-9-]+)/;
+    let output = "";
+    const timer = setTimeout(() => { sender.kill(); reject(new Error("Timeout waiting for code.")); }, 15_000);
+    sender.stderr?.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderrChunks.push(text);
+      output += text;
+      const match = codeRe.exec(output);
+      if (match) { clearTimeout(timer); resolve(match[1]); }
+    });
+    sender.on("error", (err) => { clearTimeout(timer); reject(err); });
+  });
+  trackCLIForDiagnostics({
+    code: Promise.resolve(code), stderr: stderrChunks, eventLog: [],
+    exited: new Promise(resolve => sender.once("exit", resolve)), counts: [], transports: [],
+  }, "sender");
+
+  try {
+    await page.addInitScript(() => {
+      delete (window as any).showSaveFilePicker;
+      // Hold the receiver's X25519 key agreement (the step before it starts
+      // listening for an offer) until the CLI's offer has reached the page.
+      let offerSeen!: () => void;
+      const offerArrived = new Promise<void>(resolve => { offerSeen = resolve; });
+      const NativeWebSocket = window.WebSocket;
+      window.WebSocket = class extends NativeWebSocket {
+        constructor(...args: ConstructorParameters<typeof WebSocket>) {
+          super(...args);
+          this.addEventListener("message", event => {
+            // Release on a later task, after the app's own handler has seen
+            // this frame; microtasks between listeners would let Chromium
+            // finish key agreement before the app processes the offer.
+            if (typeof event.data === "string" && event.data.includes('"type":"offer"')) setTimeout(offerSeen, 50);
+          });
+        }
+      } as typeof WebSocket;
+      const derive = crypto.subtle.deriveBits.bind(crypto.subtle);
+      crypto.subtle.deriveBits = (async (...args: Parameters<SubtleCrypto["deriveBits"]>) => {
+        const algorithm = args[0] as { name?: string };
+        if (algorithm?.name === "X25519") {
+          await Promise.race([offerArrived, new Promise(resolve => setTimeout(resolve, 10_000))]);
+        }
+        return derive(...args);
+      }) as SubtleCrypto["deriveBits"];
+    });
+    const downloadPromise = page.waitForEvent("download", { timeout: 60_000 });
+    await page.goto(`/r#${code}`);
+    await maybeConfirmBrowserDownload(page);
+    await expect(page.locator(".complete")).toBeVisible({ timeout: 60_000 });
+    const download = await downloadPromise;
+    const downloadPath = await download.path();
+    expect(downloadPath).toBeTruthy();
+    expect(readFileSync(downloadPath!, "utf-8")).toBe(fileContent);
   } finally {
     sender.kill();
   }

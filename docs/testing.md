@@ -10,11 +10,14 @@
 - **Playwright (browser) tests** — `web/tests/*.spec.ts`. Cover the browser
   UI, crypto vectors, handshake/session security, parallel WebRTC lanes
   (`parallel.spec.ts`, `parallel-interop.spec.ts`), the WebRTC buffer-hint
-  policy (`webrtc-policy.spec.ts`), and CLI↔browser interop
-  (`interop.spec.ts`). `web/tests/helpers.ts` holds fixtures/helpers shared
-  across more than one spec file (an isolated signaling server, a CLI JSON
-  event watcher, the WebRTC lane observer, and the OPFS-backed save-file
-  sink) — reuse it before duplicating a helper into a new spec.
+  policy (`webrtc-policy.spec.ts`), CLI↔browser interop (`interop.spec.ts`),
+  and the cross-engine sender/receiver matrix (`engine-matrix.spec.ts` — see
+  [Engines](#engines-firefox-and-webkit) below). `web/tests/helpers.ts` holds
+  fixtures/helpers shared across more than one spec file (an isolated
+  signaling server, a CLI JSON event watcher, the WebRTC lane observer, an
+  OPFS-backed save-file sink, and an OPFS-free incremental-hashing save-file
+  sink for cross-engine use) — reuse it before duplicating a helper into a
+  new spec.
 - **Protocol compatibility** — `internal/compatibility_test.go`
   (`TestE2E_ProtocolCompatibility`) and `web/tests/compatibility.spec.ts`
   build real fixtures from past releases and run them against the current
@@ -36,13 +39,25 @@
 go test ./...                          # everything, Go side
 go vet ./...
 cd web && npx tsc --noEmit              # type-check web/src (not web/tests)
-cd web && npm test                      # Playwright, all specs
-cd web && npx playwright test tests/webrtc-policy.spec.ts   # one spec
+cd web && npm test                      # Playwright, Chromium only (pins --project=chromium)
+cd web && npx playwright test tests/webrtc-policy.spec.ts   # one spec, but see below
 ```
 
 Focused runs: `go test ./internal/transfer -run TestName`, or
 `go test ./internal -run '^TestE2E_ProtocolCompatibility$'` for just the
 compatibility matrix.
+
+**`npm test` is Chromium-only** (`package.json`'s `test` script pins
+`playwright test --project=chromium`); this keeps the existing single-engine
+default. Running `npx playwright test` directly, with no `--project` flag —
+as in the one-spec example above — is **not** Chromium-only: it runs every
+project whose `testMatch` includes that spec, so a spec named on the command
+line without `--project` also runs under `firefox` and `webkit` if it's one
+of the three cross-engine specs (needs `npx playwright install firefox
+webkit` first — see [Engines](#engines-firefox-and-webkit) below for which
+specs those are and why). A bare `npx playwright test` with no arguments at
+all runs the full suite across every project, including the 15-cell,
+64&nbsp;MiB `engines` project — expect it to take several minutes.
 
 ## Protocol compatibility and previous-release resolution
 
@@ -184,6 +199,181 @@ under it. The resolved-at-runtime "previous release"/"N-2" fixtures above
 are the deliberate exception: they always track a real, current tag by
 design, since they exist to test whatever the previous release(s) actually
 are right now.
+
+## Engines (Firefox and WebKit)
+
+Playwright projects (`web/playwright.config.ts`): `chromium` (default, full
+spec set minus the two below), `firefox` and `webkit` (the cross-engine
+interop specs only), and `engines` (`engine-matrix.spec.ts` only). `npm test`
+and `ci.yml`'s `browser-interop` job pin `--project=chromium` explicitly, so
+existing behavior is unchanged; `web/playwright.cross-browser.config.ts` (an
+older, narrower two-project config) has been folded in and removed.
+
+**Why only three specs run cross-engine.** `firefox`/`webkit` `testMatch`
+only `interop.spec.ts`, `parallel-interop.spec.ts`, and `webrtc-policy.spec.ts`
+— the specs that exercise a real `browser`/`page` fixture and generalize
+across engines. Everything else (crypto vectors, session security,
+Node-only `parallel.spec.ts`, the env-gated `netem`/`compatibility` specs)
+stays Chromium-only; running them again per engine would test the same
+Node-side logic three times for no added coverage.
+
+**The buffer-hint policy is asymmetric by design** (`web/src/webrtc.ts`'s
+`BUFFER_HINT`): Firefox's own offers never carry the video section and never
+set `bundlePolicy: "max-bundle"` (older pion's `bundle-only` incompatibility —
+see `docs/browser-high-rtt.md`), but Firefox answers a Chromium/WebKit/CLI
+offer that has the hint completely normally. `webrtc-policy.spec.ts`'s
+`assertOfferingPolicy` branches on `browserName` for exactly this: the
+Firefox branch asserts no video section and non-`max-bundle`; every other
+engine (including WebKit, which gets identical assertions to Chromium) keeps
+the original assertions. The CLI→browser direction has no branch at all,
+because a Firefox *answerer* behaves like every other engine.
+
+**The OPFS-free hashing sink.** `web/tests/helpers.ts`'s `receiveToDisk`
+fakes `showSaveFilePicker` with a real OPFS file handle; a local spike
+(`navigator.storage.getDirectory()` → `getFileHandle` → `createWritable()`
+→ `write()`/`close()` → read back) found this reliable on Firefox but
+throwing `NotReadableError`-class failures ("operation failed for an
+unknown transient reason") on Playwright's bundled WebKit build. Rather than
+skip most of `webrtc-policy.spec.ts`/`parallel-interop.spec.ts` on WebKit,
+both specs now use the new `hashingPicker`/`verifyHashingSink` instead: the
+fake `showSaveFilePicker` returns a handle whose `createWritable()` streams
+every written chunk into the incremental SHA-256 from `web/src/sha256.ts`
+(loaded on the page via the existing `crypto-test.js` bundle — see
+`crypto-vectors.spec.ts` for the same load pattern) and records
+`{size, hash}` on `window.__hashingSink` at `close()`. No OPFS, no
+`arrayBuffer()` read-back of the whole file — it works identically on every
+engine. `engine-matrix.spec.ts` uses the same sink for its receivers.
+`receiveToDisk`/`verifyDisk` are unchanged and still used by
+`compatibility.spec.ts` and `netem.spec.ts`, which only ever run on
+Chromium-family engines.
+
+**The shared config's `baseURL` fix.** `playwright.config.ts`'s top-level
+`use.baseURL` was `http://localhost:18090`. On a machine where `localhost`
+resolves IPv6 (`::1`) first, Firefox's ICE agent gathered *zero* local
+candidates and failed instantly ("ICE failed, add a TURN server") whenever
+the page's origin was the IPv6 loopback address; Chromium and WebKit were
+unaffected on the same machine. Changed to the literal `http://127.0.0.1:18090`
+— a real fix, confirmed by toggling it back and forth against the same
+Firefox failure. No spec asserts the literal string `"localhost"` in
+rendered UI (`ui.spec.ts`'s origin test reads `page.url()` dynamically), and
+the two places that do (`ui.spec.ts`'s agent-doc check, `interop.spec.ts`'s
+`SP2P_URL` CLI env var) refer to the *server's own* `--base-url`, set
+separately in `global-setup.ts` and unrelated to Playwright's navigation
+`baseURL`.
+
+**`engine-matrix.spec.ts`** covers the full sender×receiver matrix
+(chromium/firefox/webkit, 3×3 = 9 cells) plus the CLI against each engine in
+both directions (6 more cells) — 15 total — at 64 MiB of random content,
+asserting the received SHA-256 and that both sides negotiate the full
+8-lane parallel-WebRTC policy. Every engine is launched explicitly through
+the `playwright` fixture (e.g. `playwright.firefox.launch()`) and closed in
+a `finally`, never through the project's own `browser`/`page` fixtures, so
+the `engines` project declares no `browserName` — it exists only to scope
+enumeration. Chromium↔Firefox and CLI↔Firefox (both directions each, 4
+cells) are tagged `@pr`; the rest — anything touching WebKit, plus
+CLI↔Chromium — is nightly-only.
+
+**CI wiring.** `ci.yml`'s new `browser-firefox` job (`ubuntu-latest`, not
+yet a required check) runs `--project=firefox` plus
+`--project=engines --grep @pr`. `nightly.yml`'s new `engines` job
+(`macos-15` — closer to Safari's WebKit than a Linux runner) runs
+`--project=webkit` plus the full, untagged `--project=engines` (all 15
+cells); it was added to `report-failure`'s `needs` and failure-summary
+logic alongside `netem-nightly` and `compat-n2`. Browsers in the matrix
+expose plain host candidates (Chromium's `WebRtcHideLocalIpsWithMdns`
+disabled, Firefox's `media.peerconnection.ice.obfuscate_host_addresses`
+off): hosted macOS runners don't reliably resolve the `.local` names, which
+broke browser↔browser cells while CLI cells passed.
+
+**Fixed: CLI sender → browser receiver stall.** On hosted runners, CLI →
+browser transfers occasionally hung for 15 s: the CLI logged `webrtc trying`
+and then `Receiver disconnected`, while the browser sat at `Waiting for
+sender's offer`. The CLI sends its offer as soon as its own key derivation and
+ICE gathering finish, which can be before the browser has derived its session
+keys and registered an `offer` handler, and `SignalClient` dropped messages
+with no handler. It now holds `offer`/`answer`/`candidate` messages until a
+handler registers, and drops held messages before sending `relay-retry` (the
+peer only starts its next attempt after receiving it). `interop.spec.ts` has a
+regression test that slows the receiver's key derivation to force the
+ordering; it fails without the fix with the same signature seen on CI.
+
+**Known rough edge: multi-homed-host lane sockets (WebKit and browser↔browser
+alike).** On the Mac this was developed on — two active interfaces on the
+same /24 (Wi-Fi `en0` and Ethernet `en9`) — WebKit occasionally lands on 6-7
+of the requested 8 parallel-WebRTC lanes instead of 8, and the same
+symptom (lanes stuck at a fixed, well-below-8 count) has also been observed
+locally on an `engine-matrix.spec.ts` browser↔browser cell where Chromium is
+answering Firefox's lane offers, so this isn't exclusively a WebKit
+behavior — it's whichever side's lane socket happens to bind wrong on this
+particular multi-homed host. This is **not** the
+8-second per-lane authentication timeout in `web/src/webrtc-parallel.ts`'s
+`Lane.wait()` running out (a timing margin that a retry could reasonably
+absorb): the affected lane's ICE connectivity check makes *zero* progress
+for the entire 8 seconds. WebKit's lane sockets bind `INADDR_ANY`, and on a
+multi-homed host they can answer a STUN connectivity check from a different
+local address than the one the check was sent to; pion (the CLI/server's
+WebRTC stack) discards that reply outright — "Discard message: transaction
+source and destination does not match expected" (RFC 8445 §7.2.5.2.1) — so
+the lane never has a chance to connect at all, regardless of how long it
+waits. This is specific to a multi-homed, same-subnet host, not expected on
+CI's single-NIC runners (`ubuntu-latest`, `macos-15`), so no retry was added
+for it — a retry would only be masking noise if the failure were timing-
+sensitive, and this one isn't. If the macos-15 nightly `engines` job shows
+the same lane shortfall for real, that's the point to investigate further:
+it would mean either that runner is multi-homed too, or that this is a
+genuine Safari/WebKit-multi-lane interoperability issue independent of
+network topology (the transfer itself still completes over however many
+lanes did connect — this reduces parallelism, it doesn't break transfers).
+
+**New finding, not yet root-caused: `engine-matrix.spec.ts`'s browser↔browser
+cells mostly fail on the macos-15 nightly runner.** Dispatching `nightly.yml`
+on this branch (`gh workflow run nightly.yml --ref <branch>`) to validate
+its `engines` job before merge (it cannot be triggered by a PR) surfaced
+this: `--project=webkit` was clean, 15/15, but `--project=engines` had
+**8 of its 9 browser↔browser cells** time out waiting for `.complete` —
+every pairing except webkit→webkit, including **chromium→chromium**, the
+simplest possible cell and the first one that runs. All 6 CLI↔browser
+cells in the same run passed. This is a different failure shape from both
+rough edges above (a 100s hard timeout with zero transfer progress, not a
+partial lane count), and it does **not** reproduce in many local runs of
+the same `--project=engines` on this Mac (chromium→chromium has never
+failed here). The dump-on-failure diagnostics added for item 1 above fired
+but weren't useful for this one: `runBrowserToBrowser`'s own `finally`
+closes both browsers before the test throws, so `flushDiagnostics` found
+every receiver page already closed by the time `afterEach` ran — and
+`flushDiagnostics` had a real bug (now fixed) that skipped the
+still-available buffered console/pageerror lines too, not just the live
+DOM snapshot that actually needs an open page. That fix landed here, but
+a nightly dispatch takes the better
+part of an hour end to end and this branch's cost/time budget didn't
+stretch to a second one — so the *fix* was validated (diagnostics correctly
+dump buffered console lines for a closed page, confirmed by inspection),
+but the *actual root cause of the browser↔browser failures* was not
+re-captured with the fix in place. Given webkit→webkit (both sides
+launched the same way, via the `playwright` fixture rather than a project's
+own `browser` fixture) is the one cell that passed, and the *project-level*
+`webkit`/`firefox`/`chromium` suites (which never launch via the raw
+`playwright` fixture — see `webrtc-policy.spec.ts`/`parallel-interop.spec.ts`
+running fine under all three engines) don't show this, the most likely
+culprit is something about `launchEnginePage`'s `pw[engine].launch(...)` +
+`browser.newPage({ baseURL })` pattern specifically on `macos-15` GitHub
+Actions runners — not a specific engine's WebRTC implementation. This is
+reported here for follow-up rather than guessed at further; it does not
+block this PR's Firefox/`ubuntu-latest` rollout (`browser-firefox`, the
+required-eventually job), only the WebKit/`engines` nightly rollout, which
+was already explicitly staged as "nightly-only, promote later" for exactly
+this kind of reason.
+
+**Local validation results** (this Mac, one run each unless noted):
+
+| Command | Result |
+| --- | --- |
+| `npx tsc --noEmit` | passes (test files aren't type-checked) |
+| `npx playwright test --project=firefox` (15 tests) | 15 passed, ~2.1m |
+| `npx playwright test --project=webkit` (15 tests) | 13 passed, 2 failed (the lane-count rough edge above); a later isolated rerun of just those two passed once and failed once more — consistent with transient flakiness, not a hard failure |
+| `npx playwright test --project=engines` (15 cells) | 14 passed, 1 failed (the same rough edge, on a browser↔browser cell); reran the failing cell in isolation twice more and it passed both times |
+| Mutation: `BUFFER_HINT = true` unconditionally | Firefox policy tests fail as expected (`bundlePolicy`/video assertions); reverted exactly (`git diff` clean) |
+| Mutation: remove `bundlePolicy` from the peer connection config | WebKit policy tests fail as expected; reverted exactly (`git diff` clean) |
 
 ## Opt-in WAN harnesses
 

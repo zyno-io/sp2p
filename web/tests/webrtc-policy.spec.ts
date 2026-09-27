@@ -5,9 +5,20 @@
 // newOfferPeerConnection): every offering side of a browser-involved
 // connection must request max-bundle and carry a media-less video section,
 // and a browser answering a CLI's VP8-only recvonly offer must come back
-// inactive. An init script wraps RTCPeerConnection to record only structural
-// SDP properties (bundle policy, m-line kinds, video direction/codecs, byte
-// length) — never ICE candidates or addresses.
+// inactive. Firefox is the deliberate exception on the offering side only —
+// BUFFER_HINT is false there (see web/src/webrtc.ts), so a Firefox offer
+// carries no video section and keeps the default (non-max-bundle) bundle
+// policy; Firefox still answers a CLI's video-hint offer normally (see
+// docs/browser-high-rtt.md's Firefox note and docs/testing.md's Engines
+// section). WebKit gets the same assertions as Chromium throughout. An init
+// script wraps RTCPeerConnection to record only structural SDP properties
+// (bundle policy, m-line kinds, video direction/codecs, byte length) — never
+// ICE candidates or addresses.
+//
+// Each receiver uses installReceiverSink (web/tests/helpers.ts), which picks
+// each engine's own real receive path: real OPFS on Chromium, the in-memory
+// blob + downloadBlob path on Firefox/WebKit (neither implements
+// showSaveFilePicker for real) — see docs/testing.md's Engines section.
 
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -15,9 +26,16 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
 import { expect } from "./fixtures";
-import { chooseFile, cleanupTemporaryDirectories, isolatedServerTest as test, receiveToDisk, temporaryDirectory, verifyDisk, watchCLI } from "./helpers";
+import {
+  chooseFile, cleanupTemporaryDirectories, flushDiagnostics, installReceiverSink,
+  isolatedServerTest as test, temporaryDirectory, trackCLIForDiagnostics, trackForDiagnostics,
+  verifyReceiverSink, watchCLI,
+} from "./helpers";
 
-test.afterEach(() => { cleanupTemporaryDirectories(); });
+test.afterEach(async ({}, testInfo) => {
+  cleanupTemporaryDirectories();
+  await flushDiagnostics(testInfo);
+});
 
 test.setTimeout(60_000);
 
@@ -124,26 +142,34 @@ function assertLaneSizeLimits(records: PolicyRecord[], limit = SDP_LANE_LIMIT): 
 // A browser-side offering connection (primary or lane) must bundle
 // everything onto one candidate pair and carry a media-less, inactive video
 // section — the "buffer hint" that widens Chrome's UDP socket buffers.
-function assertOfferingPolicy(records: PolicyRecord[]): void {
+// Firefox is excluded from the hint (BUFFER_HINT in web/src/webrtc.ts): its
+// offers carry no video section at all and keep the default bundle policy.
+function assertOfferingPolicy(records: PolicyRecord[], browserName: string): void {
   expect(records).toHaveLength(LANE_COUNT);
   for (const record of records) {
-    expect(record.bundlePolicy).toBe("max-bundle");
     const offers = record.localDescriptions;
     expect(offers.length).toBeGreaterThan(0);
-    for (const offer of offers) {
-      expect(offer.mLines).toContain("video");
-      expect(offer.video?.direction).toBe("inactive");
+    if (browserName === "firefox") {
+      expect(record.bundlePolicy).not.toBe("max-bundle");
+      for (const offer of offers) expect(offer.mLines).not.toContain("video");
+    } else {
+      expect(record.bundlePolicy).toBe("max-bundle");
+      for (const offer of offers) {
+        expect(offer.mLines).toContain("video");
+        expect(offer.video?.direction).toBe("inactive");
+      }
     }
   }
 }
 
 test.describe("browser ↔ browser", () => {
-  test("every offer is max-bundle with an inactive video section on both sides", async ({ browser, baseURL }) => {
+  test("every offer is max-bundle with an inactive video section on both sides (Firefox omits the hint)", async ({ browser, baseURL, browserName }) => {
     const sender = await browser.newPage({ baseURL });
     const receiver = await browser.newPage({ baseURL });
     await installPolicyRecorder(sender);
     await installPolicyRecorder(receiver);
-    await receiveToDisk(receiver);
+    await installReceiverSink(receiver, browserName);
+    trackForDiagnostics(receiver, "receiver");
     try {
       const code = await chooseFile(sender, contents, "policy-b2b.bin");
       await receiver.goto(`/r#${code}`);
@@ -153,13 +179,16 @@ test.describe("browser ↔ browser", () => {
 
       const senderRecords = await policyRecords(sender);
       const receiverRecords = await policyRecords(receiver);
-      assertOfferingPolicy(senderRecords);
+      assertOfferingPolicy(senderRecords, browserName);
       expect(receiverRecords).toHaveLength(LANE_COUNT);
-      for (const record of receiverRecords) expect(record.bundlePolicy).toBe("max-bundle");
+      for (const record of receiverRecords) {
+        if (browserName === "firefox") expect(record.bundlePolicy).not.toBe("max-bundle");
+        else expect(record.bundlePolicy).toBe("max-bundle");
+      }
       assertLaneSizeLimits(senderRecords);
       assertLaneSizeLimits(receiverRecords);
 
-      await verifyDisk(receiver, contents.length, expectedHash);
+      await verifyReceiverSink(receiver, browserName, contents.length, expectedHash);
     } finally {
       await sender.close();
       await receiver.close();
@@ -168,19 +197,20 @@ test.describe("browser ↔ browser", () => {
 });
 
 test.describe("browser → CLI", () => {
-  test("browser sender offers max-bundle with inactive video; CLI answers stay small", async ({ page, cliBin, wsUrl }) => {
+  test("browser sender offers max-bundle with inactive video; CLI answers stay small", async ({ page, cliBin, wsUrl, browserName }) => {
     await installPolicyRecorder(page);
     const dest = temporaryDirectory("sp2p-policy-recv-");
     const code = await chooseFile(page, contents, "policy-b2c.bin");
     const child = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-output", dest, code]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, "receiver");
     try {
       await expect(page.locator(".complete")).toBeVisible({ timeout: 60_000 });
       expect(await cli.exited).toBe(0);
       expect(cli.counts).toEqual([LANE_COUNT]);
 
       const records = await policyRecords(page);
-      assertOfferingPolicy(records);
+      assertOfferingPolicy(records, browserName);
       assertLaneSizeLimits(records);
       for (const record of records) {
         for (const answer of record.remoteDescriptions) {
@@ -197,13 +227,15 @@ test.describe("browser → CLI", () => {
 });
 
 test.describe("CLI → browser", () => {
-  test("CLI offers recvonly VP8-only video; browser answers inactive", async ({ page, cliBin, wsUrl }) => {
+  test("CLI offers recvonly VP8-only video; browser answers inactive", async ({ page, cliBin, wsUrl, browserName }) => {
     await installPolicyRecorder(page);
-    await receiveToDisk(page);
+    await installReceiverSink(page, browserName);
+    trackForDiagnostics(page, "receiver");
     const src = join(temporaryDirectory("sp2p-policy-send-"), "policy-c2b.bin");
     writeFileSync(src, contents);
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", src]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, "sender");
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);
@@ -228,7 +260,7 @@ test.describe("CLI → browser", () => {
         }
       }
 
-      await verifyDisk(page, contents.length, expectedHash);
+      await verifyReceiverSink(page, browserName, contents.length, expectedHash);
     } finally {
       child.kill();
     }

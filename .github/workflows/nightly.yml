@@ -80,6 +80,31 @@ jobs:
         if: always()
         run: sudo scripts/ci/netns.sh down
 
+  # WebKit's real DataChannel/ICE/OPFS behavior is closest to Safari's on
+  # macOS, so this always builds and runs on macos-15 (never ubuntu-latest),
+  # and Firefox/Chromium cells of the full matrix ride along here too since
+  # the runner is already paid for. WebKit starts nightly-only; browser-firefox
+  # (ci.yml) already gates PRs on Firefox plus the @pr-tagged engine-matrix
+  # cells. See docs/testing.md's "Engines" section for local validation,
+  # since this job can't be dispatched before this branch merges.
+  engines:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci
+      - run: cd web && npx playwright install --with-deps webkit firefox chromium
+      - run: cd web && npx playwright test --project=webkit
+      - run: cd web && npx playwright test --project=engines
+
   # N-2 previous-release compatibility: the protocol-compatibility job in
   # ci.yml only ever exercises N-1 (scripts/ci/previous-release.sh's default
   # --nth 1); this nightly leg additionally exercises N-2, so a peer two
@@ -126,10 +151,10 @@ jobs:
           SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
 
   # Runs regardless of which job(s) failed (fail-fast is off on the netem
-  # matrix, and compat-n2 is independent of it), and only on failure — a
-  # green night is silent.
+  # matrix, and compat-n2/engines are independent of it and each other), and
+  # only on failure — a green night is silent.
   report-failure:
-    needs: [netem-nightly, compat-n2]
+    needs: [netem-nightly, compat-n2, engines]
     # A leg that hits timeout-minutes is reported as cancelled, not failed.
     if: failure() || cancelled()
     runs-on: ubuntu-latest
@@ -144,6 +169,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           NETEM_RESULT: ${{ needs.netem-nightly.result }}
           COMPAT_N2_RESULT: ${{ needs.compat-n2.result }}
+          ENGINES_RESULT: ${{ needs.engines.result }}
         run: |
           set -euo pipefail
           gh label create nightly --color b60205 \
@@ -156,10 +182,11 @@ jobs:
           failed=""
           if [[ "$NETEM_RESULT" != "success" ]]; then failed+="- netem-nightly: $NETEM_RESULT\n"; fi
           if [[ "$COMPAT_N2_RESULT" != "success" ]]; then failed+="- compat-n2: $COMPAT_N2_RESULT\n"; fi
+          if [[ "$ENGINES_RESULT" != "success" ]]; then failed+="- engines: $ENGINES_RESULT\n"; fi
 
           note="Run: $RUN_URL (branch \`${GITHUB_REF_NAME}\`, commit \`${GITHUB_SHA:0:12}\`)."
           jobs=$(printf '%b' "$failed")
-          detail="See the job summary and artifacts on this run for details. netem: netem-nightly-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section)."
+          detail="See the job summary and artifacts on this run for details. netem: netem-nightly-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section). engines: the WebKit and full cross-engine matrix run on macos-15 (docs/testing.md's Engines section)."
           body=$(printf '%s\n\nFailed job(s):\n%s\n%s\n' "$note" "$jobs" "$detail")
 
           if [[ -n "$existing" && "$existing" != "null" ]]; then
