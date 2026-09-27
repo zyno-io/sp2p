@@ -296,11 +296,28 @@ test("CLI sender offer that arrives before the browser listens is still answered
   try {
     await page.addInitScript(() => {
       delete (window as any).showSaveFilePicker;
-      // Each HKDF derivation takes an extra second, so the CLI's offer
-      // (sent within about a second of key exchange) lands first.
+      // Hold the receiver's X25519 key agreement (the step before it starts
+      // listening for an offer) until the CLI's offer has reached the page.
+      let offerSeen!: () => void;
+      const offerArrived = new Promise<void>(resolve => { offerSeen = resolve; });
+      const NativeWebSocket = window.WebSocket;
+      window.WebSocket = class extends NativeWebSocket {
+        constructor(...args: ConstructorParameters<typeof WebSocket>) {
+          super(...args);
+          this.addEventListener("message", event => {
+            // Release on a later task, after the app's own handler has seen
+            // this frame; microtasks between listeners would let Chromium
+            // finish key agreement before the app processes the offer.
+            if (typeof event.data === "string" && event.data.includes('"type":"offer"')) setTimeout(offerSeen, 50);
+          });
+        }
+      } as typeof WebSocket;
       const derive = crypto.subtle.deriveBits.bind(crypto.subtle);
       crypto.subtle.deriveBits = (async (...args: Parameters<SubtleCrypto["deriveBits"]>) => {
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        const algorithm = args[0] as { name?: string };
+        if (algorithm?.name === "X25519") {
+          await Promise.race([offerArrived, new Promise(resolve => setTimeout(resolve, 10_000))]);
+        }
         return derive(...args);
       }) as SubtleCrypto["deriveBits"];
     });

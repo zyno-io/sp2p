@@ -24,6 +24,7 @@ export class SignalClient {
   private ws: WebSocket;
   private handlers: Map<string, MessageHandler[]> = new Map();
   private held: Envelope[] = [];
+  private flushQueued = false;
   private _closed = false;
 
   constructor(ws: WebSocket) {
@@ -73,19 +74,24 @@ export class SignalClient {
     const handlers = this.handlers.get(type) || [];
     handlers.push(handler);
     this.handlers.set(type, handlers);
-    if (this.held.some(env => env.type === type)) {
-      const ready = this.held.filter(env => env.type === type);
-      this.held = this.held.filter(env => env.type !== type);
-      // Deliver after the caller finishes registering its other handlers.
-      queueMicrotask(() => { for (const env of ready) this.dispatch(env); });
+    if (!this.flushQueued && this.held.some(env => env.type === type)) {
+      // Deliver after the caller finishes registering its other handlers,
+      // in arrival order (an offer before the candidates that follow it).
+      this.flushQueued = true;
+      queueMicrotask(() => {
+        this.flushQueued = false;
+        const pending = this.held;
+        this.held = [];
+        for (const env of pending) this.dispatch(env); // still-unhandled ones are held again
+      });
     }
   }
 
-  // Drop held negotiation messages from a finished attempt. Safe before
-  // sending relay-retry: the peer only starts its next attempt after
-  // receiving it.
-  discardHeld(): void {
-    this.held = [];
+  // Drop held negotiation messages, optionally only of the given types.
+  // Safe before sending relay-retry: the peer only starts its next attempt
+  // after receiving it.
+  discardHeld(types?: string[]): void {
+    this.held = types ? this.held.filter(env => !types.includes(env.type)) : [];
   }
 
   // Remove all handlers for a specific message type.
@@ -146,6 +152,8 @@ export class SignalClient {
     // Snapshot handler arrays so handlers can safely remove themselves during dispatch.
     const handlers = [...(this.handlers.get(env.type) || [])];
     if (!handlers.length && HELD_TYPES.has(env.type)) {
+      // Only the newest offer can belong to the current attempt.
+      if (env.type === "offer") this.held = this.held.filter(held => held.type !== "offer");
       if (this.held.length < MAX_HELD) this.held.push(env);
       return;
     }

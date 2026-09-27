@@ -87,6 +87,9 @@ export function establishWebRTC(
     for (const t of handlerTypes) {
       sigClient.off(t);
     }
+    // A sender can't have a current answer or candidate before sending its
+    // offer, so anything held is from an earlier attempt.
+    if (isSender) sigClient.discardHeld(["answer", "candidate"]);
 
     const rtcIceServers: RTCIceServer[] =
       rtcIceServersOverride ??

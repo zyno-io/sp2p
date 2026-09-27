@@ -9,9 +9,7 @@ export default defineConfig({
   // A test that only passes after a retry is still telling us something is
   // wrong (see docs/testing.md's Engines section) — fail the run instead of
   // letting a retry quietly launder it. This is a global option (Playwright
-  // has no per-project equivalent); it also applies to the pre-existing
-  // netem project's retries: process.env.CI ? 1 : 0, which only changes that
-  // job's own reported status (it is not a required check).
+  // has no per-project equivalent), so no project retries in CI.
   failOnFlakyTests: !!process.env.CI,
   workers: 1, // serial — share a single server process
   use: {
@@ -65,8 +63,8 @@ export default defineConfig({
     {
       name: "netem",
       testMatch: /netem\.spec\.ts/,
+      // The spec must not override this: wan500 transfers need the longer limit.
       timeout: process.env.SP2P_NETEM_PROFILE === "wan500" ? 900_000 : 240_000,
-      retries: process.env.CI ? 1 : 0,
       use: {
         browserName: "chromium",
         // Full new-headless Chromium, not the headless-shell build: the
