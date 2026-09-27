@@ -62,15 +62,7 @@ class Lane {
   private authenticated = new Promise<EncryptedFrameIO | null>(resolve => { this.resolve = resolve; });
 
   constructor(configuration: RTCConfiguration, sender: boolean, keys: DerivedKeys, senderPub: Uint8Array, receiverPub: Uint8Array, budget: FrameBudget) {
-    // MUTATION (b) for relay CI validation: strip TURN servers from the
-    // lane's ICE config. Revert before merging.
-    const mutatedConfig: RTCConfiguration = {
-      ...configuration,
-      iceServers: (configuration.iceServers ?? []).filter(
-        s => !([s.urls].flat().some(u => typeof u === "string" && /^turns?:/.test(u))),
-      ),
-    };
-    this.pc = new RTCPeerConnection(mutatedConfig);
+    this.pc = new RTCPeerConnection(configuration);
     const attach = (dc: RTCDataChannel) => {
       if (this.closed || this.dc || dc.label !== "sp2p" || !dc.ordered || dc.maxRetransmits !== null || dc.maxPacketLifeTime !== null) {
         dc.close(); this.close(); return;
