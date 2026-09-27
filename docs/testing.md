@@ -25,6 +25,10 @@
   path to measure throughput and reproduce RTT-sensitive regressions. See
   [browser-wan-benchmark.md](browser-wan-benchmark.md) for setup and
   reproduction steps.
+- **Realistic-WAN (netem) suite** — `web/tests/netem.spec.ts`, run in CI (the
+  `netem` job) inside a real, shaped Linux network namespace instead of an
+  opt-in harness against a real remote host. See
+  [Realistic-WAN (netem) suite](#realistic-wan-netem-suite) below.
 
 ## Running locally
 
@@ -109,3 +113,187 @@ local Chromium or a `REMOTE_CDP` endpoint (never expose CDP unauthenticated).
 See [browser-wan-benchmark.md](browser-wan-benchmark.md) and
 [browser-high-rtt.md](browser-high-rtt.md) for concrete invocations and past
 results.
+
+## Realistic-WAN (netem) suite
+
+`web/tests/netem.spec.ts` runs all five transfer pairings (browser↔browser,
+browser→CLI, CLI→browser, CLI↔CLI auto, CLI↔CLI WebRTC) over a real, shaped
+Linux network namespace instead of a remote host, and proves: hash integrity,
+the 8-lane WebRTC policy, Chrome's enlarged UDP socket buffer (the "buffer
+hint" — see [browser-high-rtt.md](browser-high-rtt.md#socket-buffer-hint) and
+[parallel-webrtc.md](parallel-webrtc.md#socket-buffer-hint)), that WebRTC
+traffic is actually shaped while signaling is not, and no throughput
+collapse. It's skipped unless `SP2P_NETEM_PROFILE` is set, which only the
+`netem` CI job (`.github/workflows/ci.yml`) and the nightly job
+(`.github/workflows/nightly.yml`) set — running it unshaped would silently
+prove nothing, so it refuses to guess.
+
+**Status: shadow period.** The `netem` job runs on every PR and push to
+`main`, but is intentionally not in `build`'s `needs:` and not a required
+status check yet, until its floors are calibrated against enough real runs
+(see below).
+
+### Network setup
+
+- `scripts/ci/netns.sh {up|down|exec -- cmd...}` creates a `sp2p` Linux
+  network namespace containing only `lo` and a `dummy0` at `10.99.0.1/24`
+  (IPv6 disabled on `dummy0` only, so `::1` on `lo` still works) — no route to
+  the internet, so WebRTC ICE inside it only ever gathers host candidates.
+  `dummy0` exists so pion/Chromium have a non-loopback local address for host
+  candidates; because the peer's candidate is also a local address of this
+  same host, the kernel actually delivers that traffic over `lo` regardless
+  (a locally-owned destination is always routed via `lo`), which is why
+  shaping targets `lo`, not `dummy0`. **`up` also adds a default route via
+  `dummy0`** (`ip route add default dev dummy0`): Chromium's network
+  enumeration skips interfaces it considers unroutable, and without a default
+  route it gathered zero usable host candidates at all (every browser pairing
+  failed with "no TURN relay available" until this was added) — the route
+  only changes what Chromium considers viable, not where traffic actually
+  goes (still `lo`, per above). `exec` runs a command as the *calling*
+  (non-root) user — it escalates internally only for the `ip netns
+  exec`/`setpriv` step, then drops back to that uid/gpid before running the
+  command, forwarding `PATH`, `HOME`, and a small allowlist of other
+  variables (`GOCACHE`, `GOMODCACHE`, `PLAYWRIGHT_BROWSERS_PATH`,
+  `SP2P_NETEM_PROFILE`, the `SP2P_PW_*` overrides below, and the GitHub
+  Actions step variables) captured from the calling shell, since `sudo`
+  otherwise resets almost the whole environment.
+- `scripts/ci/netem.sh {apply <profile>|verify|stats}` lays down a `prio`
+  qdisc with two bands on `lo` inside the namespace: everything defaults to
+  band `1:2`, which carries a `netem` child qdisc with the profile's
+  delay/loss; signaling TCP traffic on the fixed test-server port (18090),
+  both directions and both address families, is filtered to band `1:1`
+  instead, which has no netem — that's the bypass the suite's `/health`
+  latency check proves. Profiles: `wan150` (75ms delay + 0.1% loss each way →
+  ~150ms RTT; used by the PR/push `netem` job), `wan150-cap` (`wan150` +
+  `rate 100mbit`; nightly), `wan500` (250ms delay, no loss → ~500ms RTT;
+  nightly). No profile adds jitter — reordering on a delay qdisc causes
+  spurious SCTP retransmits unrelated to the WAN conditions being simulated.
+  `verify` pings the namespace's own `dummy0` address from inside the
+  namespace (which round-trips over `lo`, picking up the delay in both
+  directions) and **hard-fails** unless the average is in the profile's band
+  (140–200 ms for `wan150`/`wan150-cap`, 480–560 ms for `wan500`), so a broken
+  or missing qdisc never lets the suite run unshaped.
+- The CI job also disables `lo`'s GSO/TSO/GRO (large segments distort
+  netem's per-packet loss/delay) and raises `net.core.rmem_max` /
+  `net.core.wmem_max` to 4 MiB **on the host**, before the namespace exists,
+  so Chrome's 1 MiB buffer-hint request isn't silently capped.
+- The test signaling server is never given a `-turn-servers` value containing
+  a bare (non-`turn:`/`turns:`) URL, so it advertises no STUN servers in
+  `Welcome` (`cmd/sp2p-server/main.go`, `internal/server/handler_signal.go`).
+  Clients that get no ICE servers from signaling fall back to public Google
+  STUN (`internal/flow/helpers.go`, `web/src/webrtc.ts`) — that fallback is
+  unchanged production behavior, not something this suite turns off — but
+  inside the namespace those lookups simply can't reach anything, so ICE
+  still only ever completes with host candidates. `--disable-features=
+  WebRtcHideLocalIpsWithMdns` keeps Chromium from hiding those host
+  candidates behind unresolvable `.local` names.
+- The netem project in `web/playwright.config.ts` uses `channel: "chromium"`
+  (the full, non-headless-shell Chromium build) because the buffer-hint and
+  ICE port-range behavior this suite checks isn't guaranteed to match the
+  headless-shell build.
+
+### Running locally (Linux only)
+
+```bash
+sudo modprobe sch_netem   # or: sudo apt-get install -y linux-modules-extra-$(uname -r)
+sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
+make build-cli build-server
+cd web && npm ci && npm run build && npx playwright install --with-deps chromium && cd ..
+sudo scripts/ci/netns.sh up
+sudo scripts/ci/netem.sh apply wan150
+sudo scripts/ci/netem.sh verify wan150
+cd web
+SP2P_NETEM_PROFILE=wan150 SP2P_PW_SKIP_WEB_BUILD=1 \
+  SP2P_PW_CLI_BIN="$PWD/../bin/sp2p" SP2P_PW_SERVER_BIN="$PWD/../bin/sp2p-server" \
+  ../scripts/ci/netns.sh exec -- npx playwright test --project=netem
+cd ..
+sudo scripts/ci/netem.sh stats   # optional: drops/packets while it's still up
+sudo scripts/ci/netns.sh down
+```
+
+`SP2P_PW_SKIP_WEB_BUILD`/`SP2P_PW_CLI_BIN`/`SP2P_PW_SERVER_BIN` tell
+`web/tests/global-setup.ts` to use the binaries/`web/dist` built above instead
+of rebuilding — the namespace has no route to the internet, so anything that
+could reach for the network has to happen before `netns.sh exec`, not inside
+it. Every other spec/project is unaffected (those env vars are unset).
+
+### Per-pairing results and floors
+
+Each pairing writes one numeric-only JSON file per repeat and attempt to
+`test-results/perf/` (MB/s,
+lane counts, max UDP receive-buffer size, candidate-pair RTT, netem
+drops/packets, signaling `/health` median latency) — never transfer codes,
+addresses, or SDP. `web/tests/perf-summary.mjs` turns those into a markdown
+table on `$GITHUB_STEP_SUMMARY` and, with `--gate`, fails if any pairing is
+missing or its median is below the floor for the current profile in
+`web/tests/perf-floors.json`. The PR/push job also asserts the floor inside
+each test. The nightly job sets `SP2P_NETEM_GATE_PER_TEST=0` so one slow
+repeat of `--repeat-each=3` doesn't fail the run, and gates on the medians
+instead. Traces, screenshots and the Playwright report are not collected for
+this suite, because they would capture transfer codes; only the numeric
+records are uploaded.
+
+**Performance floor calibration:** floors are set to roughly 35% of a real
+`wan150` `netem` job run's observed MB/s per pairing (rounded down slightly),
+per this table from the run that first went green end-to-end:
+
+| Pairing | Observed MB/s | Floor (35%) |
+| --- | ---: | ---: |
+| browser-browser | 2.09 | 0.7 |
+| browser-cli | 2.24 | 0.75 |
+| cli-browser | 2.24 | 0.75 |
+| cli-cli-webrtc | 2.12 | 0.7 |
+
+That run also confirmed the mechanics this suite exists to prove: all three
+browser-involving pairings negotiated 8 lanes and reported a UDP receive
+buffer of exactly 2097152 bytes (the doubled 1 MiB hint); `cli-cli-auto`
+picked TCP with 6 parallel connections (not WebRTC — recorded, not gated,
+see below); netem's drop ratio stayed near the configured 0.1% loss on every
+pairing (e.g. 212/194263 ≈ 0.11%); and the signaling `/health` median stayed
+under 3ms on every pairing versus the profile's ~150ms shaped RTT. Re-run
+this calibration if a legitimate protocol change shifts throughput
+meaningfully; don't let floors silently drift stale in the other direction
+either.
+
+`cli-cli-auto` intentionally has no floor: transport racing may legitimately
+pick either TCP or WebRTC depending on timing, and the two have different
+achievable throughput on this path, so gating it before there's data on both
+outcomes risks flakiness rather than catching a regression. Its record is
+still written (bytes, duration, MB/s, whichever transport/lane count the CLI
+reported) for visibility.
+
+### Known rough edges
+
+- **RTT and socket-buffer sampling happens *during* the transfer, not
+  after.** The app closes every WebRTC connection immediately once a
+  transfer completes (right after showing `.complete`), and a closed
+  `RTCPeerConnection`'s `getStats()` can come back with no candidate-pair
+  report at all. `startSampling()` in `netem.spec.ts` instead polls
+  `getStats()` and `udpSockets()` roughly once a second for the whole
+  transfer and keeps the maximum/accumulated readings, closing over that
+  race entirely.
+- **The buffer-hint check is a threshold, not an exact match.** A plain
+  headless Chromium opens its own background UDP sockets unrelated to
+  WebRTC — one was observed with a coincidental ~1 MiB receive buffer, on a
+  freshly launched browser that never even loaded the app. That ruled out
+  both "it's stale state from an earlier test" and "filter by `ss` state
+  (ESTAB vs UNCONN)" as fixes (the real, correctly-hinted WebRTC socket did
+  not reliably show as `ESTAB` either). `udpSockets()` therefore returns
+  every UDP socket for the browser's process tree, and callers compare the
+  *maximum* rb against the hinted threshold (2 MiB) rather than asserting
+  an exact byte count — true for both the positive checks (`>=` 2 MiB) and
+  the negative control (`<` 2 MiB, not "equals exactly 131072").
+- `web/tests/helpers.ts`'s `udpSockets()` and `netem.spec.ts`'s `tc -s qdisc
+  show` both assume an unprivileged read of `ss -uanmp` / `tc -s qdisc show`
+  works from inside the namespace as the non-root test-runner user — confirmed
+  on the `ubuntu-latest` runner image as of this writing; if a future image
+  restricts this, those reads will need to move to a small root-run helper
+  instead.
+- The `ss -m` "drops" (`d<N>`) skmem field is parsed best-effort and recorded
+  but not asserted on, since its exact availability/format across
+  kernel/iproute2 versions wasn't verified ahead of time.
+- `packetsDiscardedOnSend` (from `RTCPeerConnection.getStats()`) is recorded
+  per pairing but not gated. If a `wan500` (no-loss) nightly run shows it
+  climbing, that's the "netem on `lo` holds the sender's `SO_SNDBUF`" failure
+  mode: move the delay to an IFB ingress qdisc on `lo` instead of the egress
+  `prio`/`netem` chain used today, and update this section.
