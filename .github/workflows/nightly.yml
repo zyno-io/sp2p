@@ -11,7 +11,11 @@ permissions:
 jobs:
   netem-nightly:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 150
+    env:
+      SP2P_NETEM_PROFILE: ${{ matrix.profile }}
+      # Gate on medians across repeats (perf-summary.mjs), not on each repeat.
+      SP2P_NETEM_GATE_PER_TEST: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -51,13 +55,12 @@ jobs:
       - name: Apply netem shaping (${{ matrix.profile }})
         run: sudo scripts/ci/netem.sh apply ${{ matrix.profile }}
       - name: Preflight — hard-fail unless the shaped RTT is in band
-        run: sudo scripts/ci/netem.sh verify
+        run: sudo scripts/ci/netem.sh verify ${{ matrix.profile }}
       - name: Run the netem suite inside the namespace (repeat-each=3)
         run: |
           cd web
           "$GITHUB_WORKSPACE/scripts/ci/netns.sh" exec -- npx playwright test --project=netem --repeat-each=3
         env:
-          SP2P_NETEM_PROFILE: ${{ matrix.profile }}
           SP2P_PW_SKIP_WEB_BUILD: "1"
           SP2P_PW_CLI_BIN: ${{ github.workspace }}/bin/sp2p
           SP2P_PW_SERVER_BIN: ${{ github.workspace }}/bin/sp2p-server
@@ -73,12 +76,6 @@ jobs:
           name: netem-nightly-perf-${{ matrix.profile }}
           path: test-results/perf/**
           if-no-files-found: ignore
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: netem-nightly-playwright-report-${{ matrix.profile }}
-          path: web/test-results/**
-          if-no-files-found: ignore
       - name: Tear down the network namespace
         if: always()
         run: sudo scripts/ci/netns.sh down
@@ -87,7 +84,8 @@ jobs:
   # only on failure — a green night is silent.
   report-failure:
     needs: netem-nightly
-    if: failure()
+    # A leg that hits timeout-minutes is reported as cancelled, not failed.
+    if: failure() || cancelled()
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -108,7 +106,7 @@ jobs:
             --search "in:title \"$title\"" --json number --jq '.[0].number')
 
           note="Run: $RUN_URL (branch \`${GITHUB_REF_NAME}\`, commit \`${GITHUB_SHA:0:12}\`)."
-          detail="See the job summary and the netem-nightly-perf-* / netem-nightly-playwright-report-* artifacts on this run for per-pairing numbers, netem drops, and traces. See docs/testing.md for the netem suite design and how to reproduce it locally on Linux."
+          detail="See the job summary and the netem-nightly-perf-* artifacts on this run for per-pairing numbers and netem drops. See docs/testing.md for the netem suite design and how to reproduce it locally on Linux."
           body=$(printf '%s\n\n%s\n' "$note" "$detail")
 
           if [[ -n "$existing" && "$existing" != "null" ]]; then

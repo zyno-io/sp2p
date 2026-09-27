@@ -170,7 +170,8 @@ status check yet, until its floors are calibrated against enough real runs
   spurious SCTP retransmits unrelated to the WAN conditions being simulated.
   `verify` pings the namespace's own `dummy0` address from inside the
   namespace (which round-trips over `lo`, picking up the delay in both
-  directions) and **hard-fails** unless the average is 140–200ms, so a broken
+  directions) and **hard-fails** unless the average is in the profile's band
+  (140–200 ms for `wan150`/`wan150-cap`, 480–560 ms for `wan500`), so a broken
   or missing qdisc never lets the suite run unshaped.
 - The CI job also disables `lo`'s GSO/TSO/GRO (large segments distort
   netem's per-packet loss/delay) and raises `net.core.rmem_max` /
@@ -200,7 +201,7 @@ make build-cli build-server
 cd web && npm ci && npm run build && npx playwright install --with-deps chromium && cd ..
 sudo scripts/ci/netns.sh up
 sudo scripts/ci/netem.sh apply wan150
-sudo scripts/ci/netem.sh verify
+sudo scripts/ci/netem.sh verify wan150
 cd web
 SP2P_NETEM_PROFILE=wan150 SP2P_PW_SKIP_WEB_BUILD=1 \
   SP2P_PW_CLI_BIN="$PWD/../bin/sp2p" SP2P_PW_SERVER_BIN="$PWD/../bin/sp2p-server" \
@@ -218,15 +219,19 @@ it. Every other spec/project is unaffected (those env vars are unset).
 
 ### Per-pairing results and floors
 
-Each pairing writes one numeric-only JSON file to `test-results/perf/` (MB/s,
+Each pairing writes one numeric-only JSON file per repeat and attempt to
+`test-results/perf/` (MB/s,
 lane counts, max UDP receive-buffer size, candidate-pair RTT, netem
 drops/packets, signaling `/health` median latency) — never transfer codes,
 addresses, or SDP. `web/tests/perf-summary.mjs` turns those into a markdown
 table on `$GITHUB_STEP_SUMMARY` and, with `--gate`, fails if any pairing is
-below its floor in `web/tests/perf-floors.json` (used by the nightly job on
-the median of `--repeat-each=3`; the PR/push job runs it without `--gate` and
-relies on the per-test `expect` inside `netem.spec.ts` instead, which asserts
-the same floors as it goes).
+missing or its median is below the floor for the current profile in
+`web/tests/perf-floors.json`. The PR/push job also asserts the floor inside
+each test. The nightly job sets `SP2P_NETEM_GATE_PER_TEST=0` so one slow
+repeat of `--repeat-each=3` doesn't fail the run, and gates on the medians
+instead. Traces, screenshots and the Playwright report are not collected for
+this suite, because they would capture transfer codes; only the numeric
+records are uploaded.
 
 **Performance floor calibration:** floors are set to roughly 35% of a real
 `wan150` `netem` job run's observed MB/s per pairing (rounded down slightly),

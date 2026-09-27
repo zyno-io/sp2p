@@ -55,7 +55,8 @@ function formatLanes(lanes) {
 function main() {
   const { gate, dir } = parseArgs(process.argv.slice(2));
   const records = loadRecords(dir);
-  const floors = loadFloors();
+  const profile = records.find(record => record.profile)?.profile ?? process.env.SP2P_NETEM_PROFILE;
+  const floors = loadFloors()[profile] ?? {};
 
   const byPairing = new Map();
   for (const record of records) {
@@ -112,7 +113,7 @@ function main() {
 
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
-    appendFileSync(summaryPath, `## netem performance summary (${process.env.SP2P_NETEM_PROFILE ?? "profile unknown"})\n\n${table}\n`);
+    appendFileSync(summaryPath, `## netem performance summary (${profile ?? "profile unknown"})\n\n${table}\n`);
   }
   // Always echo to stdout too, so a local/non-CI run (or a CI log) shows it
   // even when nothing appended to $GITHUB_STEP_SUMMARY.

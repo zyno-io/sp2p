@@ -109,7 +109,7 @@ cmd_exec() {
   local -a preserved_env=(PATH="$PATH" HOME="$HOME")
   local var
   for var in PLAYWRIGHT_BROWSERS_PATH GOCACHE GOPATH GOMODCACHE GOFLAGS \
-             npm_config_cache CI SP2P_NETEM_PROFILE SP2P_PW_CLI_BIN \
+             npm_config_cache CI SP2P_NETEM_PROFILE SP2P_NETEM_GATE_PER_TEST SP2P_PW_CLI_BIN \
              SP2P_PW_SERVER_BIN SP2P_PW_SKIP_WEB_BUILD GITHUB_STEP_SUMMARY \
              GITHUB_ENV GITHUB_OUTPUT GITHUB_WORKSPACE RUNNER_TEMP TMPDIR; do
     if [[ -n "${!var:-}" ]]; then

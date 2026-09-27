@@ -23,7 +23,7 @@ SIGNAL_PORT="${SP2P_SIGNAL_PORT:-18090}"
 GATEWAY=10.99.0.1
 
 usage() {
-  echo "usage: $0 {apply <profile>|verify|stats}" >&2
+  echo "usage: $0 {apply <profile>|verify <profile>|stats}" >&2
   echo "profiles: wan150, wan150-cap, wan500" >&2
   exit 1
 }
@@ -85,6 +85,12 @@ cmd_apply() {
 
 cmd_verify() {
   require_root
+  local profile="${1:-}" low high
+  case "$profile" in
+    wan150|wan150-cap) low=140; high=200 ;;
+    wan500) low=480; high=560 ;;
+    *) usage ;;
+  esac
   # Preflight: hard-fail unless the shaped RTT is in the expected band, so a
   # broken qdisc (or none at all) never silently runs the suite unshaped.
   # Pinging our own dummy0 address from inside the namespace round-trips
@@ -103,12 +109,12 @@ cmd_verify() {
     exit 1
   fi
   echo "netem.sh preflight: average RTT to $GATEWAY = ${avg} ms"
-  if ! awk -v avg="$avg" 'BEGIN { exit !(avg >= 140 && avg <= 200) }'; then
-    echo "netem.sh preflight FAILED: RTT ${avg}ms is outside the required 140-200ms band" \
+  if ! awk -v avg="$avg" -v low="$low" -v high="$high" 'BEGIN { exit !(avg >= low && avg <= high) }'; then
+    echo "netem.sh preflight FAILED: RTT ${avg}ms is outside the required ${low}-${high}ms band for $profile" \
          "— refusing to run the suite unshaped or mis-shaped" >&2
     exit 1
   fi
-  echo "netem.sh preflight OK (${avg}ms in [140,200]ms)"
+  echo "netem.sh preflight OK (${avg}ms in [${low},${high}]ms for $profile)"
 }
 
 cmd_stats() {
@@ -118,7 +124,7 @@ cmd_stats() {
 
 case "${1:-}" in
   apply) shift; cmd_apply "$@" ;;
-  verify) cmd_verify ;;
+  verify) shift; cmd_verify "$@" ;;
   stats) cmd_stats ;;
   *) usage ;;
 esac

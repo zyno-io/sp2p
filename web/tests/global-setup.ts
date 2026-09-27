@@ -1,5 +1,5 @@
 import { execSync, spawn, ChildProcess } from "child_process";
-import { existsSync, writeFileSync, mkdtempSync } from "fs";
+import { existsSync, writeFileSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import net from "net";
@@ -30,6 +30,9 @@ function waitForPort(port: number, timeout = 10_000): Promise<void> {
 }
 
 export default async function globalSetup() {
+  // Stale records from an earlier local run would hide a MISSING pairing.
+  if (process.env.SP2P_NETEM_PROFILE) rmSync(join(__dirname, "..", "..", "test-results", "perf"), { recursive: true, force: true });
+
   const tmpDir = mkdtempSync(join(tmpdir(), "sp2p-pw-"));
 
   // The netem suite runs inside a network namespace with no route to the

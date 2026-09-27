@@ -24,7 +24,7 @@ export default defineConfig({
     {
       name: "netem",
       testMatch: /netem\.spec\.ts/,
-      timeout: 240_000,
+      timeout: process.env.SP2P_NETEM_PROFILE === "wan500" ? 900_000 : 240_000,
       retries: process.env.CI ? 1 : 0,
       use: {
         browserName: "chromium",
@@ -39,8 +39,10 @@ export default defineConfig({
           // unusable .local names.
           args: ["--disable-features=WebRtcHideLocalIpsWithMdns"],
         },
-        trace: "retain-on-failure",
-        screenshot: "only-on-failure",
+        // Traces, screenshots and DOM snapshots would capture transfer codes
+        // (share URLs and signaling frames) in a public artifact.
+        trace: "off",
+        screenshot: "off",
       },
     },
   ],

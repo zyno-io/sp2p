@@ -200,6 +200,8 @@ jobs:
   netem:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      SP2P_NETEM_PROFILE: wan150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -235,33 +237,26 @@ jobs:
       - name: Apply netem shaping (wan150)
         run: sudo scripts/ci/netem.sh apply wan150
       - name: Preflight — hard-fail unless the shaped RTT is 140-200ms
-        run: sudo scripts/ci/netem.sh verify
+        run: sudo scripts/ci/netem.sh verify wan150
       - name: Run the netem suite inside the namespace
         run: |
           cd web
           "$GITHUB_WORKSPACE/scripts/ci/netns.sh" exec -- npx playwright test --project=netem
         env:
-          SP2P_NETEM_PROFILE: wan150
           SP2P_PW_SKIP_WEB_BUILD: "1"
           SP2P_PW_CLI_BIN: ${{ github.workspace }}/bin/sp2p
           SP2P_PW_SERVER_BIN: ${{ github.workspace }}/bin/sp2p-server
       - name: netem qdisc stats (post-run, for the job log)
         if: always()
         run: sudo scripts/ci/netem.sh stats || true
-      - name: Performance summary
+      - name: Performance summary (fails on missing pairings)
         if: always()
-        run: node web/tests/perf-summary.mjs
+        run: node web/tests/perf-summary.mjs --gate
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: netem-perf
           path: test-results/perf/**
-          if-no-files-found: ignore
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
-        with:
-          name: netem-playwright-report
-          path: web/test-results/**
           if-no-files-found: ignore
       - name: Tear down the network namespace
         if: always()

@@ -40,7 +40,13 @@ const SHAPED_RTT_FLOOR_SEC = 0.12; // profiles add >=150ms RTT; well clear of na
 const SIGNALING_HEALTH_MEDIAN_MS_CEILING = 20;
 
 const PERF_DIR = join(__dirname, "..", "..", "test-results", "perf");
-const FLOORS: Record<string, number> = JSON.parse(readFileSync(join(__dirname, "perf-floors.json"), "utf8"));
+const PROFILE = process.env.SP2P_NETEM_PROFILE ?? "";
+const FLOORS: Record<string, number> =
+  (JSON.parse(readFileSync(join(__dirname, "perf-floors.json"), "utf8")) as Record<string, Record<string, number>>)[PROFILE] ?? {};
+// wan500 roughly triples per-lane recovery time; allow for it.
+const TRANSFER_TIMEOUT_MS = PROFILE === "wan500" ? 600_000 : 180_000;
+// Nightly repeats gate on medians in perf-summary.mjs instead of per repeat.
+const GATE_PER_TEST = process.env.SP2P_NETEM_GATE_PER_TEST !== "0";
 
 function mbps(bytes: number, durationMs: number): number {
   return bytes / 1e6 / (durationMs / 1000);
@@ -49,9 +55,11 @@ function mbps(bytes: number, durationMs: number): number {
 function writePerfRecord(pairing: string, record: Record<string, unknown>): void {
   mkdirSync(PERF_DIR, { recursive: true });
   const full = { pairing, profile: process.env.SP2P_NETEM_PROFILE, ...record };
-  writeFileSync(join(PERF_DIR, `${pairing}.json`), JSON.stringify(full, null, 2) + "\n");
+  const info = test.info();
+  // One file per repeat and attempt, so --repeat-each runs don't overwrite each other.
+  writeFileSync(join(PERF_DIR, `${pairing}.r${info.repeatEachIndex}.a${info.retry}.json`), JSON.stringify(full, null, 2) + "\n");
   const floor = FLOORS[pairing];
-  if (floor !== undefined && typeof record.mbps === "number") {
+  if (GATE_PER_TEST && floor !== undefined && typeof record.mbps === "number") {
     expect(record.mbps, `${pairing}: ${record.mbps} MB/s below floor ${floor} MB/s`).toBeGreaterThanOrEqual(floor);
   }
 }
@@ -242,8 +250,8 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
       await receiver.goto(`/r#${code}`);
       const sampling = startSampling([sender, receiver], browser);
       await receiver.locator(".confirm-btn").click();
-      await expect(sender.locator(".complete")).toBeVisible({ timeout: 180_000 });
-      await expect(receiver.locator(".complete")).toBeVisible({ timeout: 180_000 });
+      await expect(sender.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
+      await expect(receiver.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
       const durationMs = Date.now() - start;
       const samples = await sampling.stop();
       const after = netemQdiscStats();
@@ -286,7 +294,7 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
     const cli = watchCLI(child);
     const sampling = startSampling([page], pageBrowser(page));
     try {
-      await expect(page.locator(".complete")).toBeVisible({ timeout: 180_000 });
+      await expect(page.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
       expect(await cli.exited).toBe(0);
       const durationMs = Date.now() - start;
       const samples = await sampling.stop();
@@ -338,7 +346,7 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
       await page.goto(`/r#${code}`);
       const sampling = startSampling([page], pageBrowser(page));
       await page.locator(".confirm-btn").click();
-      await expect(page.locator(".complete")).toBeVisible({ timeout: 180_000 });
+      await expect(page.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
       expect(await cli.exited).toBe(0);
       const durationMs = Date.now() - start;
       const samples = await sampling.stop();
@@ -480,8 +488,8 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
       await receiver.goto(`/r#${code}`);
       const sampling = startSampling([sender, receiver], browser);
       await receiver.locator(".confirm-btn").click();
-      await expect(sender.locator(".complete")).toBeVisible({ timeout: 120_000 });
-      await expect(receiver.locator(".complete")).toBeVisible({ timeout: 120_000 });
+      await expect(sender.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
+      await expect(receiver.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
       const { rbMax, sockets: socketCount } = await sampling.stop();
       await verifyDisk(receiver, controlContents.length, controlHash);
 
