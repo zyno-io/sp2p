@@ -205,16 +205,18 @@ function parseSkmem(record: string): Record<string, number> {
 // Returns the UDP sockets owned by any pid in `pids` (see
 // browserProcessPids), by running `ss -uanmp` (must run inside the netns —
 // this is only ever called from the spec process itself, which does). Only
-// numeric socket-memory fields, connection state, and pids are read; no
-// addresses or ports are captured.
+// numeric socket-memory fields and pids are read; no addresses or ports are
+// captured.
 //
-// Only ESTAB(lished) sockets count: a fresh headless Chromium — even one
-// that never touches our app — opens its own background UDP sockets (e.g.
-// QUIC/DNS probes) that stay UNCONN forever inside this no-internet
-// namespace, and at least one of those was observed with a coincidental
-// ~1 MiB receive buffer, unrelated to the WebRTC buffer hint this suite
-// checks. A real WebRTC DataChannel's socket is connect()-ed once ICE
-// consent succeeds, so it shows ESTAB.
+// A fresh headless Chromium — even one that never touches our app — opens
+// its own background UDP sockets (observed with a coincidental ~1 MiB
+// receive buffer, unrelated to the WebRTC buffer hint this suite checks).
+// Filtering by connection state does NOT reliably separate them from a real
+// WebRTC DataChannel's socket (tried ESTAB-only: it excluded the real,
+// correctly-hinted 2 MiB socket too), so this intentionally returns every
+// UDP socket for the given pids and leaves distinguishing "is this hinted"
+// to a threshold comparison against the *maximum* observed rb, which the
+// stray ~1 MiB socket is too small to satisfy on its own.
 export function udpSockets(pids: ReadonlySet<number>): UdpSocketInfo[] {
   const raw = execSync("ss -H -uanmp", { encoding: "utf8" });
   // ss wraps long lines with leading whitespace on a continuation line
@@ -228,8 +230,6 @@ export function udpSockets(pids: ReadonlySet<number>): UdpSocketInfo[] {
 
   const sockets: UdpSocketInfo[] = [];
   for (const record of records) {
-    const state = record.trimStart().split(/\s+/, 1)[0];
-    if (state !== "ESTAB") continue;
     const pidMatch = /pid=(\d+)/.exec(record);
     if (!pidMatch) continue;
     const pid = Number(pidMatch[1]);
