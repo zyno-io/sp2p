@@ -296,7 +296,14 @@ async function startTurn(env: RelayEnv, quota: number): Promise<TurnHandle> {
         new Promise<boolean>(resolve => child.once("exit", () => resolve(true))),
         new Promise<boolean>(resolve => setTimeout(() => resolve(false), 5000)),
       ]);
-      if (!exitedCleanly) child.kill("SIGKILL");
+      if (!exitedCleanly) {
+        child.kill("SIGKILL");
+        // Wait for the actual exit event after SIGKILL too, so the OS has
+        // released the UDP port (3478) before the next describe block's
+        // startTurn() tries to bind it again -- otherwise that bind can
+        // race an address-already-in-use failure.
+        await new Promise<void>(resolve => child.once("exit", () => resolve()));
+      }
       rmSync(dir, { recursive: true, force: true });
     },
   };
@@ -399,14 +406,23 @@ async function launchBrowserSide(
   playwright: Playwright, relayEnv: RelayEnv, engine: EngineName, role: "sender" | "receiver", label: string,
 ): Promise<BrowserSide> {
   const browser = engine === "chromium" ? await playwright.chromium.launch(CHROMIUM_LAUNCH) : await playwright.firefox.launch(FIREFOX_LAUNCH);
-  const page = await browser.newPage({ baseURL: relayEnv.url });
-  // Registered before any navigation, always allow — the standard pairings
-  // and the quota test all expect consent to be granted.
-  const dialogs = registerDialog(page, true);
-  if (role === "receiver") await installReceiverSink(page, engine);
-  trackForDiagnostics(page, `${label}-${role}`);
-  const counts = observeConnections(page);
-  return { browser, page, dialogs, counts };
+  // Self-contained cleanup: if anything below throws, this function must
+  // not leak the browser it just launched, regardless of whether the
+  // caller ever gets a chance to register it for its own cleanup (it
+  // can't, since launchBrowserSide never returns to hand the browser back).
+  try {
+    const page = await browser.newPage({ baseURL: relayEnv.url });
+    // Registered before any navigation, always allow — the standard pairings
+    // and the quota test all expect consent to be granted.
+    const dialogs = registerDialog(page, true);
+    if (role === "receiver") await installReceiverSink(page, engine);
+    trackForDiagnostics(page, `${label}-${role}`);
+    const counts = observeConnections(page);
+    return { browser, page, dialogs, counts };
+  } catch (error) {
+    await browser.close().catch(() => {});
+    throw error;
+  }
 }
 
 // ── Shared pairing runner ─────────────────────────────────────────────────
@@ -571,7 +587,7 @@ test.afterEach(async ({}, testInfo) => {
 test.describe("relay: sender/receiver pairings", () => {
   let turn: TurnHandle;
   test.beforeAll(async ({ relayEnv }) => { turn = await startTurn(relayEnv, 0); });
-  test.afterAll(async () => { await turn.stop(); });
+  test.afterAll(async () => { await turn?.stop(); });
 
   test("chromium to chromium", { tag: "@pr" }, async ({ playwright, relayEnv }) => {
     await runRelayPairing({
@@ -670,60 +686,62 @@ test.describe("relay: sender/receiver pairings", () => {
 
     const senderBrowser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
     const receiverBrowser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
-    const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
-    const receiverPage = await receiverBrowser.newPage({ baseURL: relayEnv.url });
-    registerDialog(senderPage, true);
-    registerDialog(receiverPage, true);
-
-    // Abandon hook: identify an "extra lane" RTCPeerConnection (as opposed
-    // to the primary) by its ICE server config containing a "turn:" URL AND
-    // not being the FIRST such connection constructed on this page. This is
-    // robust against attempt-1 (STUN-only, web/src/main.ts's
-    // establishP2PWithRetry) also constructing a (TURN-less) connection
-    // before the real (TURN-bearing) primary from attempt 2 — see
-    // web/src/webrtc.ts's establishWebRTC, which only ever receives TURN
-    // servers on the relay-retry attempt. The very first extra-lane offer
-    // is exactly the first setRemoteDescription call on such a connection.
-    await receiverPage.addInitScript(() => {
-      const Native = window.RTCPeerConnection;
-      const allPCs: RTCPeerConnection[] = [];
-      let primarySeen: RTCPeerConnection | null = null;
-      const extraLanePCs = new Set<RTCPeerConnection>();
-      let triggered = false;
-      function hasTurnServer(config?: RTCConfiguration): boolean {
-        for (const server of config?.iceServers ?? []) {
-          const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
-          if (urls.some(u => typeof u === "string" && u.startsWith("turn:"))) return true;
-        }
-        return false;
-      }
-      class AbandoningPeerConnection extends Native {
-        constructor(config?: RTCConfiguration) {
-          super(config);
-          allPCs.push(this);
-          if (hasTurnServer(config)) {
-            if (!primarySeen) primarySeen = this;
-            else extraLanePCs.add(this);
-          }
-        }
-        setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
-          const isFirstExtraLaneOffer = extraLanePCs.has(this) && !triggered;
-          const result = super.setRemoteDescription(description);
-          if (isFirstExtraLaneOffer) {
-            triggered = true;
-            for (const pc of allPCs) pc.close();
-          }
-          return result;
-        }
-      }
-      (window as any).RTCPeerConnection = AbandoningPeerConnection;
-    });
-
-    await installReceiverSink(receiverPage, "chromium");
-    trackForDiagnostics(senderPage, "abandon-sender");
-    trackForDiagnostics(receiverPage, "abandon-receiver");
-
+    // Everything from here on is inside try/finally: if any setup call
+    // below throws, both browsers must still be closed rather than leaked.
     try {
+      const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
+      const receiverPage = await receiverBrowser.newPage({ baseURL: relayEnv.url });
+      registerDialog(senderPage, true);
+      registerDialog(receiverPage, true);
+
+      // Abandon hook: identify an "extra lane" RTCPeerConnection (as opposed
+      // to the primary) by its ICE server config containing a "turn:" URL AND
+      // not being the FIRST such connection constructed on this page. This is
+      // robust against attempt-1 (STUN-only, web/src/main.ts's
+      // establishP2PWithRetry) also constructing a (TURN-less) connection
+      // before the real (TURN-bearing) primary from attempt 2 — see
+      // web/src/webrtc.ts's establishWebRTC, which only ever receives TURN
+      // servers on the relay-retry attempt. The very first extra-lane offer
+      // is exactly the first setRemoteDescription call on such a connection.
+      await receiverPage.addInitScript(() => {
+        const Native = window.RTCPeerConnection;
+        const allPCs: RTCPeerConnection[] = [];
+        let primarySeen: RTCPeerConnection | null = null;
+        const extraLanePCs = new Set<RTCPeerConnection>();
+        let triggered = false;
+        function hasTurnServer(config?: RTCConfiguration): boolean {
+          for (const server of config?.iceServers ?? []) {
+            const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+            if (urls.some(u => typeof u === "string" && u.startsWith("turn:"))) return true;
+          }
+          return false;
+        }
+        class AbandoningPeerConnection extends Native {
+          constructor(config?: RTCConfiguration) {
+            super(config);
+            allPCs.push(this);
+            if (hasTurnServer(config)) {
+              if (!primarySeen) primarySeen = this;
+              else extraLanePCs.add(this);
+            }
+          }
+          setRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+            const isFirstExtraLaneOffer = extraLanePCs.has(this) && !triggered;
+            const result = super.setRemoteDescription(description);
+            if (isFirstExtraLaneOffer) {
+              triggered = true;
+              for (const pc of allPCs) pc.close();
+            }
+            return result;
+          }
+        }
+        (window as any).RTCPeerConnection = AbandoningPeerConnection;
+      });
+
+      await installReceiverSink(receiverPage, "chromium");
+      trackForDiagnostics(senderPage, "abandon-sender");
+      trackForDiagnostics(receiverPage, "abandon-receiver");
+
       const code = await chooseFile(senderPage, contents, "relay-abandon.bin");
       await receiverPage.goto(`/r#${code}`);
       await receiverPage.locator(".confirm-btn").click();
@@ -753,8 +771,7 @@ test.describe("relay: sender/receiver pairings", () => {
         durationMs: Date.now() - start,
       });
     } finally {
-      await senderBrowser.close();
-      await receiverBrowser.close();
+      await Promise.allSettled([senderBrowser.close(), receiverBrowser.close()]);
     }
   });
 });
@@ -764,7 +781,7 @@ test.describe("relay: sender/receiver pairings", () => {
 test.describe("relay: quota", () => {
   let turn: TurnHandle;
   test.beforeAll(async ({ relayEnv }) => { turn = await startTurn(relayEnv, 8); });
-  test.afterAll(async () => { await turn.stop(); });
+  test.afterAll(async () => { await turn?.stop(); });
 
   test("quota degrades gracefully", async ({ playwright, relayEnv }) => {
     const before = turn.snapshot();
@@ -772,17 +789,19 @@ test.describe("relay: quota", () => {
 
     const senderBrowser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
     const receiverBrowser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
-    const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
-    const receiverPage = await receiverBrowser.newPage({ baseURL: relayEnv.url });
-    registerDialog(senderPage, true);
-    registerDialog(receiverPage, true);
-    await installReceiverSink(receiverPage, "chromium");
-    trackForDiagnostics(senderPage, "quota8-sender");
-    trackForDiagnostics(receiverPage, "quota8-receiver");
-    const senderCounts = observeConnections(senderPage);
-    const receiverCounts = observeConnections(receiverPage);
-
+    // Everything from here on is inside try/finally: if any setup call
+    // below throws, both browsers must still be closed rather than leaked.
     try {
+      const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
+      const receiverPage = await receiverBrowser.newPage({ baseURL: relayEnv.url });
+      registerDialog(senderPage, true);
+      registerDialog(receiverPage, true);
+      await installReceiverSink(receiverPage, "chromium");
+      trackForDiagnostics(senderPage, "quota8-sender");
+      trackForDiagnostics(receiverPage, "quota8-receiver");
+      const senderCounts = observeConnections(senderPage);
+      const receiverCounts = observeConnections(receiverPage);
+
       const code = await chooseFile(senderPage, contents, "relay-quota.bin");
       await receiverPage.goto(`/r#${code}`);
       await receiverPage.locator(".confirm-btn").click();
@@ -817,8 +836,7 @@ test.describe("relay: quota", () => {
         durationMs: Date.now() - start,
       });
     } finally {
-      await senderBrowser.close();
-      await receiverBrowser.close();
+      await Promise.allSettled([senderBrowser.close(), receiverBrowser.close()]);
     }
   });
 });
@@ -828,33 +846,35 @@ test.describe("relay: quota", () => {
 test.describe("relay: consent", () => {
   let turn: TurnHandle;
   test.beforeAll(async ({ relayEnv }) => { turn = await startTurn(relayEnv, 0); });
-  test.afterAll(async () => { await turn.stop(); });
+  test.afterAll(async () => { await turn?.stop(); });
 
   test("both browsers decline consent", async ({ playwright, relayEnv }) => {
     const before = turn.snapshot();
 
     const senderBrowser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
     const receiverBrowser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
-    const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
-    const receiverPage = await receiverBrowser.newPage({ baseURL: relayEnv.url });
-    const senderDialogs = registerDialog(senderPage, false);
-    const receiverDialogs = registerDialog(receiverPage, false);
-    // web/src/main.ts calls showSaveFilePicker() synchronously inside the
-    // confirm button's click handler, before the receiver even connects to
-    // signaling ("Invoke the picker in the click handler itself, before
-    // transient activation expires during ICE/key exchange"). Without this
-    // shim, the real (unshimmed) browser API hangs forever in headless
-    // Chromium -- there is no display for a native picker to resolve
-    // against -- which blocks everything downstream on both pages (the
-    // sender waits for the receiver to join, which never happens). Every
-    // other test in this suite calls this for its browser receiver(s);
-    // this one is declined before any actual file moves, but still needs
-    // the shim purely so the confirm click's awaited promise resolves.
-    await installReceiverSink(receiverPage, "chromium");
-    trackForDiagnostics(senderPage, "consent-both-decline-sender");
-    trackForDiagnostics(receiverPage, "consent-both-decline-receiver");
-
+    // Everything from here on is inside try/finally: if any setup call
+    // below throws, both browsers must still be closed rather than leaked.
     try {
+      const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
+      const receiverPage = await receiverBrowser.newPage({ baseURL: relayEnv.url });
+      const senderDialogs = registerDialog(senderPage, false);
+      const receiverDialogs = registerDialog(receiverPage, false);
+      // web/src/main.ts calls showSaveFilePicker() synchronously inside the
+      // confirm button's click handler, before the receiver even connects to
+      // signaling ("Invoke the picker in the click handler itself, before
+      // transient activation expires during ICE/key exchange"). Without this
+      // shim, the real (unshimmed) browser API hangs forever in headless
+      // Chromium -- there is no display for a native picker to resolve
+      // against -- which blocks everything downstream on both pages (the
+      // sender waits for the receiver to join, which never happens). Every
+      // other test in this suite calls this for its browser receiver(s);
+      // this one is declined before any actual file moves, but still needs
+      // the shim purely so the confirm click's awaited promise resolves.
+      await installReceiverSink(receiverPage, "chromium");
+      trackForDiagnostics(senderPage, "consent-both-decline-sender");
+      trackForDiagnostics(receiverPage, "consent-both-decline-receiver");
+
       const code = await chooseFile(senderPage, contents, "relay-consent-both.bin");
       await receiverPage.goto(`/r#${code}`);
       await receiverPage.locator(".confirm-btn").click();
@@ -877,8 +897,7 @@ test.describe("relay: consent", () => {
         lanes: 0, turn: { created: 0, peakLive: 0, quotaRejected: 0 }, releaseMs: 0, durationMs: 0,
       });
     } finally {
-      await senderBrowser.close();
-      await receiverBrowser.close();
+      await Promise.allSettled([senderBrowser.close(), receiverBrowser.close()]);
     }
   });
 
@@ -886,25 +905,28 @@ test.describe("relay: consent", () => {
     const before = turn.snapshot();
 
     const senderBrowser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
-    const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
-    // The dialog handler is registered before navigation, as always. Its
-    // decision is a constant .dismiss() regardless of the CLI's timing:
-    // web/src/main.ts's confirmRelay() (inside establishP2PWithRetry) is
-    // called unconditionally on THIS side's own P2P attempt-1 failure — it
-    // never checks the peer's prior response before prompting, so there is
-    // no dialog-decision race to gate on a "hasCliDenied" flag here. The
-    // ordering this test actually needs — confirming the CLI's own denial
-    // landed before asserting the browser's outcome — is enforced below by
-    // explicitly awaiting answerRelayPrompt and the CLI's exit/result
-    // first, not by conditioning the dialog handler itself.
-    const senderDialogs = registerDialog(senderPage, false);
-    trackForDiagnostics(senderPage, "consent-cli-deny-sender");
-
-    const xdg = temporaryDirectory("sp2p-relay-xdg-");
-    const destDir = temporaryDirectory("sp2p-relay-recv-");
+    // Everything from here on is inside try/finally: if any setup call
+    // below throws, the browser and any spawned CLI must still be closed
+    // rather than leaked.
     let child: ChildProcess | undefined;
-
     try {
+      const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
+      // The dialog handler is registered before navigation, as always. Its
+      // decision is a constant .dismiss() regardless of the CLI's timing:
+      // web/src/main.ts's confirmRelay() (inside establishP2PWithRetry) is
+      // called unconditionally on THIS side's own P2P attempt-1 failure — it
+      // never checks the peer's prior response before prompting, so there is
+      // no dialog-decision race to gate on a "hasCliDenied" flag here. The
+      // ordering this test actually needs — confirming the CLI's own denial
+      // landed before asserting the browser's outcome — is enforced below by
+      // explicitly awaiting answerRelayPrompt and the CLI's exit/result
+      // first, not by conditioning the dialog handler itself.
+      const senderDialogs = registerDialog(senderPage, false);
+      trackForDiagnostics(senderPage, "consent-cli-deny-sender");
+
+      const xdg = temporaryDirectory("sp2p-relay-xdg-");
+      const destDir = temporaryDirectory("sp2p-relay-recv-");
+
       const code = await chooseFile(senderPage, contents, "relay-consent-cli.bin");
       child = spawn(relayEnv.cliBin, [
         "receive", "-format", "json", "-v", "-allow-relay=false", "-server", relayEnv.wsUrl,
@@ -918,14 +940,22 @@ test.describe("relay: consent", () => {
       // independent decline (which notifies the peer as soon as it
       // happens, without waiting to learn the peer's own answer first --
       // see the DECLINED-vs-"Receiver denied" asymmetric-messaging note in
-      // the main describe block above) are a genuine, unavoidable race.
-      // Either this CLI's own answered "deny" resolves first (code
-      // "relay_denied", CLI_DENIED -- what an interactive user would see),
-      // or the peer's decline is observed first via signaling (code
-      // "operation_failed", "Peer denied relay connection", from
-      // internal/flow/helpers.go's <-deniedCh case). Both are a correct
-      // "consent was denied, nothing relayed" outcome; assert the shared
-      // shape rather than hardcoding one specific race winner.
+      // the main describe block above) are a genuine, unavoidable race with
+      // THREE possible outcomes, not two -- all correct, none hardcoded:
+      //  1. this CLI's own answered "deny" resolves first (code
+      //     "relay_denied", CLI_DENIED -- what an interactive user would see);
+      //  2. the peer's relay-denied signal is observed first
+      //     (internal/flow/helpers.go's <-deniedCh case, code
+      //     "operation_failed", "Peer denied relay connection"); or
+      //  3. the peer's signaling connection is *also* torn down (e.g. the
+      //     browser's own decline path closing its page/signaling shortly
+      //     after sending relay-denied) and <-peerLeftCh wins the same
+      //     select instead (helpers.go has this exact "Peer disconnected"
+      //     message at more than one such select, e.g. ~line 108 and ~152)
+      //     -- machine.go's finish() falls through to errorCode
+      //     "relay_not_allowed" here (relayResponse never got set to
+      //     "deny" on this path either, same as case 2, but
+      //     snapshot.RelayRequired is true by this point).
       await answerRelayPrompt(cli, "deny");
       expect(await cli.exited).toBe(1);
       const cliResult = cli.results[0];
@@ -933,6 +963,7 @@ test.describe("relay: consent", () => {
       expect([
         { code: "relay_denied", message: CLI_DENIED },
         { code: "operation_failed", message: "Peer denied relay connection" },
+        { code: "relay_not_allowed", message: "Peer disconnected" },
       ]).toContainEqual(cliResult?.error);
 
       await expect(senderPage.locator(".error-message")).toBeVisible({ timeout: 60_000 });

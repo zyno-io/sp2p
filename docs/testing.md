@@ -745,7 +745,8 @@ Chromium's `bundlePolicy: "max-bundle"` (`web/src/webrtc.ts`'s
 `BUFFER_HINT`/`addBufferHint`, set for every non-Firefox connection) is why
 this holds at exactly one allocation per *connection*: max-bundle keeps a
 connection's data channel and its buffer-hint video section on one ICE
-transport instead of two. Removing it (mutation (a) below) is expected to
+transport instead of two. Removing it (mutation (a); see
+[Mutation checks](#mutation-checks) below) is expected to
 double the per-connection count for Chromium-*offering* connections
 specifically — a Chromium *answerer* isn't affected, since it only starts
 gathering once it accepts the offer's BUNDLE group. The exact figure above
@@ -837,6 +838,23 @@ midpoint number: the real outcome is a hard floor, not a graceful linear
 taper, given this specific (single sender, strictly-ordered) negotiation
 order.
 
+**This hard floor is specific to this CI setup, not a general production
+claim.** It depends on `relay-firewall.sh` allowing only genuine
+relay↔relay pairs (see the firewall fix above) — that is what makes a
+receiver lane with no relay candidate of its own completely unable to
+connect, rather than just less likely to. In a real deployment (no such
+firewall), a receiver lane that lost the quota race can still reach the
+sender's successfully-allocated relay candidate directly, via its own
+host or server-reflexive candidate — a genuinely viable ICE pair without
+a firewall forcing both ends through TURN. So production degradation
+under a shared quota would likely be *partial* (some reduced count above
+1), not this hard floor; this suite doesn't attempt to reproduce that
+distinction, since doing so would need a topology where relay↔relay
+isn't the only viable path, which defeats the rest of this suite's
+central guarantee. The test's own assertions (`1 <= lanes < 8`,
+`created == 8`, `quotaRejected > 0`) don't depend on which of these two
+shapes actually occurs and are correct either way.
+
 ### Consent controls
 
 The relay path requires explicit user consent on both peers independently:
@@ -898,10 +916,25 @@ closes every connection on the page (primary and every extra lane) the
 instant the first extra-lane offer is applied, before that lane ever starts
 its own ICE gathering. This reaches the primary `negotiateParallelWebRTC`'s
 `!success` cleanup path (not the ordinary success path's per-lane
-cleanup), which is the one place mutation (c) below (skipping
+cleanup), which is the one place mutation (c) (see
+[Mutation checks](#mutation-checks) below, skipping
 `lanes[id]?.close()`) can be observed to matter — every other test in this
 suite fully commits every lane it creates, so removing that line wouldn't
 change their outcome at all.
+
+### Mutation checks
+
+Confirms the suite's assertions actually depend on what they claim to,
+not just on the transfer completing. (a) and (b) were run for real on
+this branch and reverted immediately afterward (`git revert`, confirmed
+clean via `git diff` against the pre-mutation commit); (c) was not run —
+say so rather than claiming an unverified result.
+
+| # | Change | File | Result |
+| --- | --- | --- | --- |
+| (a) | Delete `bundlePolicy: "max-bundle" as const` from the peer connection config | `web/src/webrtc.ts`'s `establishWebRTC` | `chromium-chromium` and `chromium-cli` (Chromium *offering*) failed with `created: 24` (double the expected 16, matching the derived doubled-transport count); `cli-chromium` and `cli-cli` passed unchanged — confirms the formula's offer/answer asymmetry. Run [36351594540](https://github.com/zyno-io/sp2p/actions/runs/36351594540). |
+| (b) | Strip TURN servers from `pc.getConfiguration()` before constructing each extra lane's `RTCPeerConnection` | `web/src/webrtc-parallel.ts`'s `Lane` constructor | `chromium-chromium`, `cli-chromium`, and `chromium-cli` all collapsed to 1 connection (`.step-p2p` shows no lane count) and failed; `cli-cli` (no browser) passed unchanged. Run [36351869449](https://github.com/zyno-io/sp2p/actions/runs/36351869449). |
+| (c) | Delete `lanes[id]?.close()` from `negotiateParallelWebRTC`'s `finally` block | `web/src/webrtc-parallel.ts` | **Not run.** Every test that completes normally already closes every lane via the ordinary success path (see the Leak check section above), so only the nightly-only "receiver abandons lane setup" test's `!success` cleanup path can observe this mutation. Left undone rather than claimed without evidence — a real validation run is future work if this section is revisited. |
 
 ### Running locally (Linux only)
 
@@ -1002,25 +1035,29 @@ the underlying race isn't specific to the larger `relay-full` job).
   `-allocation-lifetime` flag (harmless, unused by default, and now known
   to need real per-engine verification before ever being turned on for
   this suite) but `relay.spec.ts` no longer passes it.
-- **CLI↔CLI: one allocation intermittently misses the 10s leak window —
-  open, not fixed.** `pollSessionRelease` found `live: 1` (not 0) after
-  the full 10s poll on two of three `relay-full` runs, always with the
-  identical shape, but the same test passed cleanly in a separate,
-  smaller `@pr`-only run. Likely mechanism: `internal/conn/webrtc.go`
-  closes a Go WebRTC connection via `go conn.Close()` (a goroutine, not
-  awaited), and a short-lived CLI process that exits immediately after
-  printing its `result` event isn't guaranteed to still be alive when
-  that goroutine gets around to sending the TURN `Refresh(lifetime=0)`
-  deallocation. For CLI↔CLI specifically, *both* peers' allocations are
-  exposed to this race (a browser-involved pairing only exposes the CLI
-  side, and the browser itself stays open well past its own leak-window
-  poll), which is a plausible reason it shows up here first. Left
-  deliberately unfixed rather than reaching for another guess after the
-  allocation-lifetime attempt's real-world Firefox regression above: the
-  right fix is either confirming the CLI's own shutdown path should wait
-  for `Close()`'s cleanup before exiting (a product change, out of scope
-  here) or a per-engine-verified, more targeted server-side backstop —
-  neither of which this PR should rush.
+- **CLI↔CLI: one allocation intermittently missed the 10s leak window —
+  a real CLI bug, now fixed (`internal/conn/webrtc.go`, commit
+  `2b4dffc`).** `pollSessionRelease` found `live: 1` (not 0) after the
+  full 10s poll on some `relay-full` runs. This was not a test-detection
+  timing margin: a Go receiver's session-watcher goroutine and its own
+  deferred cleanup both call `WebRTCConn.Close` on the same connection
+  (`internal/transfer/receiver.go`'s cancel-watcher path and
+  `Session.closeTransport`), and pion's `PeerConnection.Close` returns
+  `nil` immediately to a second, concurrent caller while the first is
+  still mid-close (`peerconnection.go`) — including its TURN
+  `Refresh(lifetime=0)` deallocation, sent fire-and-forget. So the second
+  caller's `Close()` could return, and the CLI process could exit, before
+  that deallocation was actually sent, leaving the allocation held on the
+  server for its full default lifetime (10 minutes) instead of being
+  released at transfer end. `WebRTCConn.Close` now runs the underlying
+  `pc.Close()` exactly once, behind a `sync.Once`, so every caller —
+  including whichever one the CLI's own shutdown path waits on — blocks
+  until that single close, and its deallocation, has actually happened.
+  Validated on real CI with the fix isolated: repeating just the
+  `cli to cli` relay test many times over via a throwaway commit, all
+  releasing within the 10s window (reverted immediately after; the full,
+  unscoped `relay` job was green again afterward). See the PR for the
+  exact run links.
 
 ### Known gaps
 

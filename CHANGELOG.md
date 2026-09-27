@@ -6,6 +6,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Fixed
+
+- CLI transfers over a TURN relay no longer leave one relay allocation held for up to 10 minutes after finishing.
+
 ### Added
 
 - CI now proves a real relay-only WebRTC transfer end to end — 8 parallel lanes, exact TURN allocation accounting, no leaked allocations, and graceful degradation under a per-session TURN quota — using a CI-only TURN relay server and a firewalled network namespace that blocks direct connectivity. See [testing](docs/testing.md#turn-relay-relay-only-suite).
