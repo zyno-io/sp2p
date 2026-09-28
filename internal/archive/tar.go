@@ -523,13 +523,27 @@ func pathDepth(name string) int {
 }
 
 func validateTarPath(name string) error {
-	if filepath.IsAbs(name) {
+	// filepath.IsAbs alone is not enough on Windows: it requires a volume
+	// name, so a POSIX-style rooted path like "/etc/passwd" reports false
+	// there and would otherwise slip through unvalidated on a Windows
+	// receiver. Reject any rooted form (a leading "/" once slash-normalized,
+	// which also catches a leading "\" and a UNC "\\server\share\..." path)
+	// and any path carrying a Windows volume name (e.g. "C:foo"), the latter
+	// a no-op on POSIX where filepath.VolumeName always returns "".
+	slash := filepath.ToSlash(name)
+	if filepath.IsAbs(name) || filepath.VolumeName(name) != "" || strings.HasPrefix(slash, "/") {
 		return fmt.Errorf("absolute path: %s", name)
 	}
-	for _, part := range strings.Split(filepath.ToSlash(name), "/") {
+	for _, part := range strings.Split(slash, "/") {
 		if part == ".." {
 			return fmt.Errorf("path traversal: %s", name)
 		}
+	}
+	// On Windows this also rejects reserved device names (NUL, CON, COM1...),
+	// which would silently discard or redirect file data, and any colon
+	// (alternate data streams). On POSIX it only adds rejecting "".
+	if !filepath.IsLocal(name) {
+		return fmt.Errorf("unsafe path: %s", name)
 	}
 	return nil
 }

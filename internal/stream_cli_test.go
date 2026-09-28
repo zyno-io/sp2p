@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -181,6 +182,9 @@ func TestStreamCLI(t *testing.T) {
 		{"unix-to-unix", "tcp", "unix", "unix"},
 	} {
 		t.Run("tunnel-"+scenario.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && (scenario.target == "unix" || scenario.listener == "unix") {
+				t.Skip("Unix socket endpoints are unsupported on native Windows (see tunnel.ParseEndpoint)")
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 			defer cancel()
 			targetAddr := "127.0.0.1:0"

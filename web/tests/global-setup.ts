@@ -1,11 +1,15 @@
-import { execSync, spawn, ChildProcess } from "child_process";
+import { execSync, execFileSync, spawn, ChildProcess } from "child_process";
 import { existsSync, writeFileSync, mkdtempSync, rmSync } from "fs";
-import { tmpdir } from "os";
+import { tmpdir, platform } from "os";
 import { join } from "path";
 import net from "net";
 
 const ROOT = join(__dirname, "../..");
 const PORT = 18090;
+// Windows needs the .exe suffix for exec.Command/spawn to find the binary
+// (libuv/os/exec only append PATHEXT extensions to an extension-less path);
+// on every other platform this is "".
+const EXE = platform() === "win32" ? ".exe" : "";
 
 function waitForPort(port: number, timeout = 10_000): Promise<void> {
   const start = Date.now();
@@ -70,13 +74,14 @@ export default async function globalSetup() {
     console.log(`Using prebuilt Go binaries: ${cliBin}, ${serverBin}`);
   } else {
     console.log("Building Go binaries...");
-    serverBin = join(tmpDir, "sp2p-server");
-    cliBin = join(tmpDir, "sp2p");
-    execSync(`go build -o ${serverBin} ./cmd/sp2p-server`, {
+    serverBin = join(tmpDir, `sp2p-server${EXE}`);
+    cliBin = join(tmpDir, `sp2p${EXE}`);
+    // execFileSync (no shell) avoids Windows cmd.exe quoting entirely.
+    execFileSync("go", ["build", "-o", serverBin, "./cmd/sp2p-server"], {
       cwd: ROOT,
       stdio: "pipe",
     });
-    execSync(`go build -o ${cliBin} ./cmd/sp2p`, {
+    execFileSync("go", ["build", "-o", cliBin, "./cmd/sp2p"], {
       cwd: ROOT,
       stdio: "pipe",
     });
@@ -93,10 +98,14 @@ export default async function globalSetup() {
     env: { ...process.env },
   });
 
-  server.stderr?.on("data", (data: Buffer) => {
-    // Uncomment for debugging:
-    // process.stderr.write(`[server] ${data}`);
-  });
+  // Buffered (never streamed live) so a bind failure — e.g. a port landing in
+  // a Windows reserved dynamic-port-range exclusion — surfaces a real error
+  // instead of a bare "port not available" timeout below. The server has no
+  // sessions yet at startup, so nothing here can be a transfer code.
+  let serverStderr = "";
+  server.stderr?.on("data", (data: Buffer) => { serverStderr += data.toString(); });
+  let serverExited = false;
+  server.once("exit", () => { serverExited = true; });
 
   // Store references for teardown.
   const stateFile = join(tmpDir, "state.json");
@@ -120,6 +129,13 @@ export default async function globalSetup() {
   }));
   process.env.SP2P_PW_STATE = knownPath;
 
-  await waitForPort(PORT);
+  try {
+    await waitForPort(PORT);
+  } catch (error) {
+    const detail = serverExited
+      ? `server process exited before port ${PORT} opened`
+      : `server process still running; no port ${PORT} listener yet`;
+    throw new Error(`${(error as Error).message} (${detail})\nserver stderr:\n${serverStderr}`);
+  }
   console.log("Server ready.");
 }

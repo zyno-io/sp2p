@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -153,7 +154,10 @@ func TestMachineReporterEmitsSessionAndTerminalResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows has no POSIX permission bits (os.Stat reports 0666/0444 based
+	// only on the read-only attribute); the file's real protection there
+	// comes from the per-user ACL on its containing directory instead.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("status file permissions = %o, want 600", info.Mode().Perm())
 	}
 }
@@ -192,7 +196,8 @@ func TestMachineReporterAcceptsRelayResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// See the status-file permission check above: no POSIX bits on Windows.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("response file permissions = %o, want 600", info.Mode().Perm())
 	}
 	if err := os.WriteFile(responseFile, []byte("allow\n"), 0o600); err != nil {

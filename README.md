@@ -287,7 +287,7 @@ Good to know:
 
 - **One connection per code.** The listener accepts exactly one connection, then closes. To reconnect, create a new code.
 - **The target is fixed by the serving side.** The connecting peer cannot pick a different host, port, or path, and SP2P dials the target only after the peer is authenticated and asks for the stream.
-- **TCP listeners need at least a port.** An omitted host binds loopback, which is the recommended choice anyway. A `--to` Unix path must be an existing socket; a `--listen` Unix path must not exist yet. SP2P removes only the socket it created.
+- **TCP listeners need at least a port.** An omitted host binds loopback, which is the recommended choice anyway. A `--to` Unix path must be an existing socket; a `--listen` Unix path must not exist yet. SP2P removes only the socket it created. `unix://` endpoints are unsupported on native Windows (use `tcp://`, or run under WSL).
 - **Half-close is preserved.** One side can finish sending and keep receiving where the local endpoint supports it. Cancelling closes the stream and the local endpoints.
 - **Stdio is not `send -`.** `sp2p send -` transfers one finite, verified file in one direction. Tunnel stdio is bidirectional and unframed. In stdio mode stdout carries payload, so JSON events must go to stderr: `--format json --event-output stderr`.
 - **CLI only.** The browser cannot run rsync or open local sockets, and these sessions have no browser link.

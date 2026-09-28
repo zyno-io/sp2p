@@ -331,6 +331,83 @@ jobs:
         if: always()
         run: sudo scripts/ci/netns.sh down
 
+  # Shadow period: intentionally not in build.needs and not a required check
+  # yet, same as netem/relay above. See docs/testing.md's Windows section for
+  # the design and how to read its results. No throughput/performance floors
+  # here — per-packet CPU cost on Windows/VM runners is environmental, not a
+  # product regression signal (see docs/browser-high-rtt.md).
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # No -race below: the race detector needs cgo, which CGO_ENABLED=0
+      # (this repo's static-binary convention) rules out.
+      CGO_ENABLED: "0"
+    steps:
+      # Must run before checkout: TestBootstrapTemplatesMatchGenerator
+      # compares scripts/bootstrap-*.sh byte-for-byte against a generated
+      # copy, and the git index is 100% LF — a CRLF checkout breaks that.
+      - name: Disable git's CRLF conversion
+        run: git config --global core.autocrlf false
+      - name: Disable Windows Defender real-time scanning (best-effort; speeds up build/test I/O)
+        continue-on-error: true
+        run: |
+          try {
+            Write-Host "DisableRealtimeMonitoring before: $((Get-MpPreference).DisableRealtimeMonitoring)"
+            Set-MpPreference -DisableRealtimeMonitoring $true
+            Write-Host "DisableRealtimeMonitoring after: $((Get-MpPreference).DisableRealtimeMonitoring)"
+          } catch {
+            Write-Warning "Could not toggle Defender real-time monitoring: $_"
+          }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - name: Build web assets
+        id: web
+        # web.go's //go:embed web/dist/* requires this before any Go build/vet/test
+        # below. Not `make build-web`: `make` isn't guaranteed on this runner image.
+        run: npm --prefix web run build
+      - name: go vet (only place CI vets *_windows.go)
+        run: go vet ./...
+      - name: go test ./...
+        run: go test ./... -count=1 -timeout=20m
+      - name: Locate Edge
+        id: edge
+        if: ${{ !cancelled() && steps.web.outcome == 'success' }}
+        # Edge is preinstalled on windows-latest; `playwright install msedge`
+        # must NOT be run — under CI=true it skips Playwright's own
+        # already-installed guard and reinstalls Edge via MSI over the image's
+        # copy. Fail fast with a clear message if it's ever missing instead.
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          )
+          $edge = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $edge) {
+            Write-Error "msedge.exe not found at any of: $($candidates -join ', ')"
+            exit 1
+          }
+          Write-Host "Found Edge $((Get-Item $edge).VersionInfo.ProductVersion) at $edge"
+      - name: Edge/CLI interop specs (--project=msedge)
+        if: ${{ !cancelled() && steps.web.outcome == 'success' && steps.edge.outcome == 'success' }}
+        working-directory: web
+        # No SP2P_PW_*_BIN overrides: global-setup's Windows .exe build path
+        # must actually run in CI, not just locally.
+        run: npx playwright test --project=msedge
+      - name: Windows networking diagnostics
+        if: failure()
+        run: |
+          netsh interface ipv4 show excludedportrange protocol=tcp
+          Get-NetFirewallProfile
+
   build:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -194,6 +195,9 @@ func TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// Stop the reader on every exit, so a write error fails the test
+		// instead of leaving the read loop spinning until the timeout.
+		defer close(stop)
 		for i := 0; i < 500; i++ {
 			data, err := json.Marshal(payload{Seq: i, Pad: strings.Repeat("x", i%200)})
 			if err != nil {
@@ -205,7 +209,6 @@ func TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites(t *testing.T) {
 				return
 			}
 		}
-		close(stop)
 	}()
 
 	readErrs := 0
@@ -234,7 +237,9 @@ func TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Stat: %v", err)
 			}
-			if info.Mode().Perm() != 0o600 {
+			// Windows has no POSIX permission bits — see the equivalent guard
+			// in internal/cli/machine_test.go.
+			if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 				t.Fatalf("expected mode 0600, got %v", info.Mode().Perm())
 			}
 			return

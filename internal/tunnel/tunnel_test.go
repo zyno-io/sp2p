@@ -8,6 +8,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -21,7 +23,10 @@ func TestParseEndpoint(t *testing.T) {
 	}{
 		{"tcp://127.0.0.1:5432", false, Endpoint{"tcp", "127.0.0.1:5432"}, false},
 		{"tcp://:15432", true, Endpoint{"tcp", "127.0.0.1:15432"}, false},
-		{"unix:///tmp/sp2p.sock", false, Endpoint{"unix", "/tmp/sp2p.sock"}, false},
+		// Unix endpoints are rejected outright on native Windows (see
+		// ParseEndpoint) — every other row below already expects an error
+		// on every platform, so only this one needs a GOOS branch.
+		{"unix:///tmp/sp2p.sock", false, Endpoint{"unix", "/tmp/sp2p.sock"}, runtime.GOOS == "windows"},
 		{"tcp://example:1/path", false, Endpoint{}, true},
 		{"unix://host/tmp/sock", false, Endpoint{}, true},
 		{"unix://relative", false, Endpoint{}, true},
@@ -36,6 +41,21 @@ func TestParseEndpoint(t *testing.T) {
 				t.Fatalf("ParseEndpoint() = %#v, want %#v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestParseEndpointRejectsUnixOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows-only: Unix endpoints are rejected only on native Windows")
+	}
+	// Assert the specific message, not just any error: "/tmp/sp2p.sock" was
+	// already rejected pre-fix on Windows too (filepath.IsAbs requires a
+	// volume name there), just with an unrelated, confusing "must be an
+	// absolute unix:///path" error — this pins the real fix, not that
+	// coincidental prior failure.
+	_, err := ParseEndpoint("unix:///tmp/sp2p.sock", false)
+	if err == nil || !strings.Contains(err.Error(), "unsupported on native Windows") {
+		t.Fatalf("ParseEndpoint error = %v, want an \"unsupported on native Windows\" error", err)
 	}
 }
 

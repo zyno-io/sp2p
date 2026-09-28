@@ -430,6 +430,10 @@ Unix path must be an existing service socket, and a
 .B \-\-listen
 Unix path must not already exist.
 SP2P creates that listener privately and removes only the socket it created.
+.B unix://
+endpoints are unsupported on native Windows; use
+.B tcp://
+or run under WSL.
 .IP \(bu 2
 Directional EOF is preserved where the endpoint supports half-close, so one
 side can stop sending and continue receiving.
