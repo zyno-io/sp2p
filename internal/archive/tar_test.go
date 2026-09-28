@@ -107,7 +107,9 @@ func TestValidateTarPath(t *testing.T) {
 		{`\\srv\share\x`, true, true},
 		// Reserved device names and alternate data streams on Windows.
 		{"NUL", true, true},
-		{"dir/con.txt", true, true},
+		{"dir/con", true, true},
+		// Windows no longer reserves device names with an extension.
+		{"dir/con.txt", false, false},
 		{"COM1", true, true},
 		{"file.txt:stream", true, true},
 		{"", true, false},
