@@ -6,6 +6,15 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Fixed
+
+- A received tar archive entry with an absolute POSIX-style path (e.g. `/etc/passwd`) was silently accepted on a Windows receiver instead of being rejected, because `filepath.IsAbs` requires a Windows volume name to consider a path absolute. Not an exploitable path traversal (the destination-prefix check still held), but Windows now rejects these entries like every other platform.
+- Unix tunnel endpoints (`unix://...`) now fail with a clear "unsupported on native Windows; use TCP or WSL" error on Windows instead of an unrelated, confusing "must be an absolute unix:///path" parse error.
+
+### Added
+
+- CI now runs the Go test suite natively on Windows and CLI↔Microsoft Edge browser interop against a Windows-built CLI, so Windows-specific bugs surface in CI. See [testing](docs/testing.md#windows-native-cli-and-edge).
+
 ## [0.6.2] - 2026-09-28
 
 ### Fixed

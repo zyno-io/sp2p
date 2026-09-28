@@ -139,6 +139,13 @@ func TestOpenRsyncUsesFixedRSHHelper(t *testing.T) {
 }
 
 func TestDaemonConfigIsFixedAndPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// validateConfigPath rejects any path containing a backslash (rsyncd.conf
+		// backslash-continuation ambiguity), which is every Windows absolute
+		// path — consistent with InspectBinary already refusing rsync entirely
+		// on Windows; this test exercises internals unreachable there.
+		t.Skip("Windows rsync is explicitly unsupported")
+	}
 	directory := t.TempDir()
 	path, cleanup, err := daemonConfig(context.Background(), directory, ServeOptions{Writable: true, AllowDelete: false, TempDir: t.TempDir()})
 	if err != nil {
@@ -179,6 +186,12 @@ func TestReadOnlyDaemonConfigRefusesSourceRemoval(t *testing.T) {
 }
 
 func TestDaemonConfigRejectsControlPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// NTFS rejects control characters (including "\n") in a filename
+		// outright, so os.Mkdir below fails before the intended assertion
+		// (daemonConfig rejecting the path) is ever reached.
+		t.Skip("Windows rsync is explicitly unsupported")
+	}
 	parent := t.TempDir()
 	for _, name := range []string{"line\nfeed", "trailing-space "} {
 		path := filepath.Join(parent, name)
@@ -472,6 +485,9 @@ func TestServeDoesNotTraverseSelectedSymlink(t *testing.T) {
 }
 
 func TestValidateDirectoryCanonicalizesRootAndPermitsFileLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows rsync is explicitly unsupported")
+	}
 	root := t.TempDir()
 	rootLink := filepath.Join(t.TempDir(), "root-link")
 	if err := os.Symlink(root, rootLink); err != nil {

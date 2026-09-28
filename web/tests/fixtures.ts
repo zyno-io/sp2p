@@ -6,10 +6,12 @@ interface ServerState {
   pid: number;
   tmpDir: string;
   cliBin: string;
-  // Optional: older/other state files may not have this field. When
-  // present (see global-setup.ts), it's the prebuilt/built sp2p-server
-  // binary path — prefer it over deriving one from tmpDir.
-  serverBin?: string;
+  // The prebuilt/built sp2p-server binary path (see global-setup.ts), which
+  // already carries the platform-correct ".exe" suffix on Windows. Always
+  // present — global-setup.ts writes it unconditionally — and required so a
+  // consumer never falls back to reconstructing a tmpDir-relative path that
+  // would drop that suffix.
+  serverBin: string;
   port: number;
 }
 

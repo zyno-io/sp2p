@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -89,17 +90,27 @@ func TestTarAndUntarSkipsSockets(t *testing.T) {
 
 func TestValidateTarPath(t *testing.T) {
 	tests := []struct {
-		path    string
-		wantErr bool
+		path        string
+		wantErr     bool
+		windowsOnly bool // meaningful only under Windows' volume/separator rules
 	}{
-		{"file.txt", false},
-		{"dir/file.txt", false},
-		{"/absolute/path", true},
-		{"../escape", true},
-		{"dir/../escape", true},
+		{"file.txt", false, false},
+		{"dir/file.txt", false, false},
+		{"/absolute/path", true, false},
+		{"../escape", true, false},
+		{"dir/../escape", true, false},
+		// A Windows receiver: filepath.IsAbs requires a volume name, so
+		// these forms only reach the volume/rooted-form checks added
+		// alongside this test — see validateTarPath.
+		{`C:x`, true, true},
+		{`\x`, true, true},
+		{`\\srv\share\x`, true, true},
 	}
 
 	for _, tt := range tests {
+		if tt.windowsOnly && runtime.GOOS != "windows" {
+			continue
+		}
 		err := validateTarPath(tt.path)
 		if (err != nil) != tt.wantErr {
 			t.Errorf("validateTarPath(%q): got err=%v, wantErr=%v", tt.path, err, tt.wantErr)

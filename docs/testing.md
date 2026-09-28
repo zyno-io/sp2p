@@ -14,10 +14,12 @@
   and the cross-engine sender/receiver matrix (`engine-matrix.spec.ts` — see
   [Engines](#engines-firefox-and-webkit) below). `web/tests/helpers.ts` holds
   fixtures/helpers shared across more than one spec file (an isolated
-  signaling server, a CLI JSON event watcher, the WebRTC lane observer, an
-  OPFS-backed save-file sink, and an OPFS-free incremental-hashing save-file
-  sink for cross-engine use) — reuse it before duplicating a helper into a
-  new spec.
+  signaling server, a CLI JSON event watcher, the WebRTC lane observer, a
+  real-OPFS save-file sink for Chromium-family engines (`receiveToDisk`/
+  `verifyDisk`), and a picker-free in-memory hashing sink for every other
+  engine (`installReceiverSink`/`verifyReceiverSink` — see
+  [Engines](#engines-firefox-and-webkit) below)) — reuse it before
+  duplicating a helper into a new spec.
 - **Protocol compatibility** — `internal/compatibility_test.go`
   (`TestE2E_ProtocolCompatibility`) and `web/tests/compatibility.spec.ts`
   build real fixtures from past releases and run them against the current
@@ -61,9 +63,13 @@ project whose `testMatch` includes that spec, so a spec named on the command
 line without `--project` also runs under `firefox` and `webkit` if it's one
 of the three cross-engine specs (needs `npx playwright install firefox
 webkit` first — see [Engines](#engines-firefox-and-webkit) below for which
-specs those are and why). A bare `npx playwright test` with no arguments at
-all runs the full suite across every project, including the 15-cell,
-64&nbsp;MiB `engines` project — expect it to take several minutes.
+specs those are and why), and additionally under `msedge` on win32 (see
+[Windows](#windows-native-cli-and-edge) below) — `msedge`'s project is
+omitted from `web/playwright.config.ts`'s `projects` array entirely on every
+other platform, so this only changes behavior on a Windows dev machine. A
+bare `npx playwright test` with no arguments at all runs the full suite
+across every project, including the 15-cell, 64&nbsp;MiB `engines` project —
+expect it to take several minutes.
 
 ## Protocol compatibility and previous-release resolution
 
@@ -213,7 +219,9 @@ spec set minus the two below), `firefox` and `webkit` (the cross-engine
 interop specs only), and `engines` (`engine-matrix.spec.ts` only). `npm test`
 and `ci.yml`'s `browser-interop` job pin `--project=chromium` explicitly, so
 existing behavior is unchanged; `web/playwright.cross-browser.config.ts` (an
-older, narrower two-project config) has been folded in and removed.
+older, narrower two-project config) has been folded in and removed. A fourth
+cross-engine project, `msedge`, exists only on win32 — see
+[Windows](#windows-native-cli-and-edge) below.
 
 **Why only three specs run cross-engine.** `firefox`/`webkit` `testMatch`
 only `interop.spec.ts`, `parallel-interop.spec.ts`, and `webrtc-policy.spec.ts`
@@ -234,23 +242,30 @@ engine (including WebKit, which gets identical assertions to Chromium) keeps
 the original assertions. The CLI→browser direction has no branch at all,
 because a Firefox *answerer* behaves like every other engine.
 
-**The OPFS-free hashing sink.** `web/tests/helpers.ts`'s `receiveToDisk`
+**The cross-engine receive sink.** `web/tests/helpers.ts`'s `receiveToDisk`
 fakes `showSaveFilePicker` with a real OPFS file handle; a local spike
 (`navigator.storage.getDirectory()` → `getFileHandle` → `createWritable()`
 → `write()`/`close()` → read back) found this reliable on Firefox but
 throwing `NotReadableError`-class failures ("operation failed for an
 unknown transient reason") on Playwright's bundled WebKit build. Rather than
-skip most of `webrtc-policy.spec.ts`/`parallel-interop.spec.ts` on WebKit,
-both specs now use the new `hashingPicker`/`verifyHashingSink` instead: the
-fake `showSaveFilePicker` returns a handle whose `createWritable()` streams
-every written chunk into the incremental SHA-256 from `web/src/sha256.ts`
-(loaded on the page via the existing `crypto-test.js` bundle — see
-`crypto-vectors.spec.ts` for the same load pattern) and records
-`{size, hash}` on `window.__hashingSink` at `close()`. No OPFS, no
-`arrayBuffer()` read-back of the whole file — it works identically on every
-engine. `engine-matrix.spec.ts` uses the same sink for its receivers.
-`receiveToDisk`/`verifyDisk` are unchanged and still used by
-`compatibility.spec.ts` and `netem.spec.ts`, which only ever run on
+skip most of `webrtc-policy.spec.ts`/`parallel-interop.spec.ts` on WebKit —
+and rather than force Firefox/WebKit down the disk-streaming path a real
+user on those engines never takes (neither implements `showSaveFilePicker`
+for real: Firefox 155, WebKit 26.6, as tested here) —
+`installReceiverSink`/`verifyReceiverSink` install no picker at all for
+Firefox/WebKit, letting `"showSaveFilePicker" in window` read its real
+(`false`) value. Instead they hook `URL.createObjectURL` — which `main.ts`'s
+`downloadBlob` (the real in-memory-sink path those engines actually take)
+calls on the Blob it already built in memory — and hash that same buffer
+with a one-shot `crypto.subtle.digest("SHA-256", ...)`, rather than reading
+anything back a second time or depending on Playwright's download handling.
+Chromium-family engines (including `msedge` — see
+[Windows](#windows-native-cli-and-edge) below, since `browserName` stays
+`"chromium"` for Edge) still take the real-OPFS `receiveToDisk`/`verifyDisk`
+path. `engine-matrix.spec.ts` uses the same `installReceiverSink`/
+`verifyReceiverSink` pair for every one of its receivers.
+`compatibility.spec.ts` and `netem.spec.ts` call `receiveToDisk`/
+`verifyDisk` directly (unchanged), since both only ever run on
 Chromium-family engines.
 
 **The shared config's `baseURL` fix.** `playwright.config.ts`'s top-level
@@ -1066,3 +1081,178 @@ the underlying race isn't specific to the larger `relay-full` job).
   `testturnd` all run on the same CI runner, so one relay allocation per
   lane is always sufficient — this suite doesn't (and can't, on a single
   host) exercise a topology where a lane might need two relay hops.
+
+## Windows (native CLI and Edge)
+
+`ci.yml`'s `windows` job runs the Go test suite natively on `windows-latest`
+and drives CLI↔Edge browser interop there, so a real Windows bug (path
+handling, process/file semantics, terminal I/O) surfaces in CI instead of
+only ever being found by a user. **No throughput/performance floor is
+gated on Windows.** Per-packet CPU cost inside a VM is environmental, not a
+product signal — see [browser-high-rtt.md](browser-high-rtt.md) — and this
+job's netem/relay-style siblings already own throughput calibration on
+Linux; Windows only ever needed correctness coverage.
+
+**Status: shadow period**, same as netem/relay/`browser-firefox` above:
+`ci.yml`'s `windows` job runs on every PR and push to `main` but is not in
+`build`'s `needs:` and not a required status check yet.
+
+### What runs
+
+- `go vet ./...` and `go test ./... -count=1` (no `-race`: the race
+  detector needs cgo, and this repo builds `CGO_ENABLED=0`). This is the
+  only CI job that compiles and vets `*_windows.go` files at all — every
+  other job runs on Linux or macOS.
+- `npx playwright test --project=msedge`: the same three cross-engine
+  specs Firefox/WebKit run (`interop.spec.ts`, `parallel-interop.spec.ts`,
+  `webrtc-policy.spec.ts`) against Microsoft Edge, channel `msedge`. Edge is
+  Chromium under the hood, so `browserName` stays `"chromium"` for it —
+  every existing Chromium-vs-Firefox branch (`assertOfferingPolicy` in
+  `webrtc-policy.spec.ts`, `installReceiverSink`'s OPFS path — see
+  [Engines](#engines-firefox-and-webkit) above) already applies to Edge with
+  no new branches. The `msedge` project (`web/playwright.config.ts`) exists
+  only when `process.platform === "win32"`, so it's invisible to every other
+  platform and to a bare `npx playwright test` on a non-Windows dev machine.
+
+### `.exe` handling
+
+Windows needs an explicit `.exe` suffix on a binary path before `exec`/
+`spawn` can find it: `go build -o sp2p` on Windows still writes a file named
+literally `sp2p` (Go's own `-o` handling only appends `.exe` when `-o` is
+omitted or a directory), and neither Go's `os/exec` nor Node's `child_process`
+tries appending `PATHEXT` extensions to a path that already has an extension
+— an extension-less one gets `ErrNotFound`/`ENOENT`.
+
+- `internal/e2e_test.go`'s `buildBinary` — the single `go build -o` helper
+  every Go test that execs a built `sp2p` binary shares (`e2e_test.go`,
+  `stream_cli_test.go`, `compatibility_test.go`, `downgrade_test.go`,
+  `receive_selection_test.go`, `legacy_archive_test.go`) — appends `.exe`
+  when `runtime.GOOS == "windows"`.
+- `web/tests/global-setup.ts` does the same for both the CLI and server
+  binaries it builds (via `execFileSync`, not a shell, so Windows `cmd.exe`
+  quoting never comes up), and always writes the resulting (already
+  correctly suffixed) paths into `state.json`/`.pw-state.json` as
+  `cliBin`/`serverBin`. `fixtures.ts`'s `cliBin` fixture and
+  `helpers.ts`'s isolated-server fixture now read those stored paths
+  directly rather than reconstructing one — `helpers.ts` used to fall back
+  to a hand-built `join(state.tmpDir, "sp2p-server")` path when
+  `state.serverBin` was unset, which would have silently targeted the
+  wrong (unsuffixed) binary name on Windows; that fallback is gone there,
+  and `serverBin` is now a required field on `fixtures.ts`'s `ServerState`
+  type. `web/tests/relay.spec.ts` still has the equivalent fallback
+  (`state.serverBin ?? join(state.tmpDir, "sp2p-server")`) — left as-is,
+  since that spec only ever runs inside `ci.yml`'s Linux network-namespace
+  `relay` job, never on Windows.
+
+### CRLF
+
+`ci.yml`'s `windows` job runs `git config --global core.autocrlf false`
+**before** `actions/checkout`. The repository's Go source and shell script
+files are all committed as LF; `TestBootstrapTemplatesMatchGenerator`
+(`internal/bootstrap_checksum_test.go`) compares a generated copy of
+`scripts/bootstrap-*.sh` byte-for-byte against the checked-out one, so a
+CRLF-converting checkout would fail it for a reason that has nothing to do
+with the behavior the test actually exists to check.
+
+### What's skipped on Windows, and why
+
+| Test(s) | Reason |
+| --- | --- |
+| `internal/rsync`: `TestOpenRsyncUsesFixedRSHHelper`, every `testBridgeHelper`-based rsync-bridge case, `TestDaemonConfigIsFixedAndPrivate`, `TestDaemonConfigRejectsControlPath`, `TestValidateDirectoryCanonicalizesRootAndPermitsFileLinks` | rsync integration is explicitly Windows-unsupported (`rsync.InspectBinary` refuses up front, `"use WSL on Windows"`); the config/directory-validation cases exercise `validateConfigPath`, which rejects any path containing `\` — every Windows absolute path — and `TestDaemonConfigRejectsControlPath` needs to create a directory whose name contains `\n`, which NTFS itself rejects before the intended assertion is ever reached. |
+| `internal` (`stream_cli_test.go`) `TestStreamCLI/tunnel-tcp-to-unix`, `/tunnel-unix-to-tcp`, `/tunnel-unix-to-unix` | `unix://` endpoints are rejected outright by `tunnel.ParseEndpoint` on native Windows — see below. |
+| `internal/cli`'s response/status-file permission assertions, `internal/testturn`'s stats-file permission assertion | Only the specific `info.Mode().Perm() != 0o600` assertion is skipped (not the surrounding test): Windows has no POSIX permission bits, so `os.Stat` reports a fixed 0666/0444 there regardless of what the code requested: real protection on Windows comes from the file's inherited ACL, not a mode bit. |
+| `internal/stream_cli_unix_test.go`, `internal/tunnel/listen_unix_test.go`, `internal/cli/stdio_unix_test.go`, `internal/rsync`'s `_unix.go`/`_unix_test.go` files | Pre-existing POSIX-only build-tag files (signals, Unix domain sockets, POSIX file modes) — Windows never compiles or runs them; nothing new needed for this phase. |
+| `netem`, `relay`, `browser-firefox`'s `engines`/webkit-only cells, `macos-rsync` | Linux-network-namespace or macOS-only by design (see their own sections above); orthogonal to this job. |
+
+**Two real product gaps this phase found and fixed, not just guarded:**
+
+- **`internal/archive/tar.go`'s `validateTarPath` accepted an absolute path
+  on Windows.** `filepath.IsAbs` requires a Windows volume name to consider
+  a path absolute, so a POSIX-style rooted entry name like `/etc/passwd`
+  inside a received tar archive reported `false` there and slipped past the
+  check un-rejected (the destination-prefix check afterward still prevented
+  an actual escape, so this was not an exploitable traversal — but a
+  Windows receiver silently accepted archive entries every other platform's
+  receiver correctly rejects). Fixed to also reject any path carrying a
+  Windows volume name (`filepath.VolumeName`, a no-op on POSIX) or any
+  slash-normalized form starting with `/` — which also catches a leading
+  `\` and a UNC `\\server\share\...` path.
+- **Unix tunnel endpoints (`unix://...`) mostly failed with the wrong
+  error on native Windows, and the rare form that didn't still had no real
+  protection there.** `tunnel.ParseEndpoint`'s `filepath.IsAbs` check meant
+  most `unix:///path` URLs already failed to parse on Windows (no volume
+  name), but only with a confusing "must be an absolute unix:///path"
+  error and no indication the real problem is platform support — and a UNC
+  form (`unix:////server/share/path`) *did* parse successfully, with no
+  Windows equivalent of the `chmod 0600` socket-protection guarantee
+  `tunnel.Listen` otherwise provides. `ParseEndpoint` now rejects every
+  `unix://` endpoint explicitly on Windows with `"Unix socket endpoints are
+  unsupported on native Windows; use TCP or WSL"`. Documented in the
+  README, `man/sp2p.1`, and `web/llm.md`.
+
+### CI wiring
+
+`ci.yml`'s `windows` job (`windows-latest`, `timeout-minutes: 45`): disables
+git's CRLF conversion before checkout, best-effort disables Windows Defender
+real-time scanning (`Set-MpPreference -DisableRealtimeMonitoring $true`,
+wrapped so a failure there — e.g. a runner image that already has it off,
+or lacks permission — doesn't fail the job), checks out, sets up Go
+(`go-version-file: go.mod`) and Node 25, `npm --prefix web ci`, builds web
+assets (`npm --prefix web run build` — needed before any Go step, since
+`web.go`'s `//go:embed web/dist/*` won't compile without it; not `make
+build-web`, since `make` isn't guaranteed on this runner image), `go vet
+./...`, `go test ./... -count=1 -timeout=20m`, confirms `msedge.exe` exists
+at its default install location (Edge is preinstalled on `windows-latest`;
+running `npx playwright install msedge` must **not** happen — under `CI=true`
+it skips Playwright's own already-installed guard and reinstalls Edge via
+MSI over the image's copy) and prints its version, then
+`npx playwright test --project=msedge` from `web/`. On failure, a final step
+dumps `netsh interface ipv4 show excludedportrange protocol=tcp` and
+`Get-NetFirewallProfile` for diagnosis (no artifact upload). The
+Edge-locate and Playwright steps run even if the Go test step failed
+(`if: ${{ !cancelled() && steps.web.outcome == 'success' }}`), so a Go-side
+failure doesn't hide Edge-side results from the same run — both halves are
+independent evidence.
+
+No `SP2P_TEST_TIME_SCALE` knob exists in this repo (nothing to reuse), and
+this phase doesn't introduce one: every wait in the suite already carries at
+least 10x headroom over real observed durations (the whole `internal`
+package runs in well under a minute on Linux; per-transfer limits are
+45–120s; Playwright allows 60s per 64&nbsp;MiB), so a slow-but-passing
+Windows run is not expected to need one. If a Windows run instead *hangs*,
+that's a real bug to fix (or, failing that, to skip with a specific,
+evidenced reason) — a time-scale knob would only mask it.
+
+### Running locally (PowerShell)
+
+```powershell
+git config --global core.autocrlf false   # only matters if you haven't already
+go vet ./...
+go test ./... -count=1
+cd web
+npm ci
+npm run build
+npx playwright test --project=msedge
+```
+
+### Known gaps
+
+- **No `-race`.** The race detector needs cgo; this repo's Windows binaries
+  (like all its binaries) build `CGO_ENABLED=0`.
+- **rsync and Unix tunnel endpoints are unsupported on native Windows** —
+  by explicit product decision (`rsync.InspectBinary`,
+  `tunnel.ParseEndpoint`), not merely untested. WSL is the documented
+  workaround.
+- **Firefox, WebKit, the `netem`/`relay` network-namespace suites, and the
+  full `engines` matrix don't run on Windows** — Firefox/WebKit have no
+  Windows-specific job of their own (see [Engines](#engines-firefox-and-webkit)
+  above), and netem/relay need a real Linux network namespace.
+- **No Windows ARM64 coverage** — `windows-latest` is x86-64 only.
+- **Symlink-dependent tests** (`internal/rsync`'s
+  `TestServeDoesNotTraverseSelectedSymlink` and similar) are not
+  Windows-skipped preemptively: creating a filesystem symlink on Windows
+  needs either an elevated process or Developer Mode, and whether the
+  `windows-latest` runner's default account has that is unconfirmed as of
+  this writing. If CI shows these failing specifically on symlink creation
+  (not on the security property the test is checking), that's the point to
+  add an evidenced skip — not before.

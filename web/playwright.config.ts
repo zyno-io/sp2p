@@ -1,5 +1,18 @@
 import { defineConfig } from "@playwright/test";
 
+// Edge (channel: "msedge") is Chromium under the hood, so it takes the same
+// browserName-based branches chromium already does in helpers.ts/specs (see
+// docs/testing.md's Windows section) — no new per-engine branches needed.
+// Scoped to win32 only: Edge on macOS/Linux would just duplicate the
+// chromium project's coverage, and a bare `npx playwright test <spec>` with
+// no --project on a non-Windows dev machine should stay unaffected, matching
+// how firefox/webkit are always enumerated but msedge is Windows-specific.
+const msedgeProjects = process.platform === "win32" ? [{
+  name: "msedge",
+  use: { browserName: "chromium" as const, channel: "msedge" },
+  testMatch: [/interop\.spec\.ts/, /parallel-interop\.spec\.ts/, /webrtc-policy\.spec\.ts/],
+}] : [];
+
 export default defineConfig({
   testDir: "./tests",
   timeout: 60_000,
@@ -103,6 +116,7 @@ export default defineConfig({
         video: "off",
       },
     },
+    ...msedgeProjects,
   ],
   globalSetup: "./tests/global-setup.ts",
   globalTeardown: "./tests/global-teardown.ts",

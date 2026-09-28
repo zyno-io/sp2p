@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -56,6 +57,18 @@ func ParseEndpoint(raw string, listener bool) (Endpoint, error) {
 		}
 		return Endpoint{Network: "tcp", Address: net.JoinHostPort(host, port)}, nil
 	case "unix":
+		if runtime.GOOS == "windows" {
+			// Most unix:///path forms can't be expressed as an absolute path
+			// on Windows (filepath.IsAbs requires a volume name, so the very
+			// next check below would otherwise reject them with a confusing
+			// "must be an absolute unix:///path" error instead of the real
+			// reason), and the Listen socket-protection guarantee
+			// (chmod 0600) has no Windows equivalent regardless. Reject
+			// every unix:// endpoint explicitly here, including forms that
+			// would otherwise still parse as absolute (e.g. a UNC
+			// unix:////server/share/path).
+			return Endpoint{}, errors.New("Unix socket endpoints are unsupported on native Windows; use TCP or WSL")
+		}
 		if u.Host != "" || u.Path == "" || !filepath.IsAbs(u.Path) {
 			return Endpoint{}, errors.New("Unix endpoint must be an absolute unix:///path")
 		}

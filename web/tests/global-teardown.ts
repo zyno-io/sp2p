@@ -4,20 +4,35 @@ import { join } from "path";
 export default async function globalTeardown() {
   const knownPath = join(__dirname, "..", ".pw-state.json");
 
+  let state: { pid?: number; tmpDir?: string } = {};
   try {
-    const state = JSON.parse(readFileSync(knownPath, "utf-8"));
-    if (state.pid) {
-      try {
-        process.kill(state.pid, "SIGTERM");
-      } catch {
-        // Already dead.
-      }
+    state = JSON.parse(readFileSync(knownPath, "utf-8"));
+  } catch {
+    return; // Nothing recorded (or already torn down) — best-effort cleanup.
+  }
+
+  if (state.pid) {
+    try {
+      // Node has no real SIGTERM on Windows: any signal here forcibly
+      // terminates the process, same as SIGKILL. Fine for teardown.
+      process.kill(state.pid, "SIGTERM");
+    } catch {
+      // Already dead.
     }
-    if (state.tmpDir) {
-      rmSync(state.tmpDir, { recursive: true, force: true });
+  }
+  if (state.tmpDir) {
+    try {
+      // maxRetries/retryDelay: on Windows, deleting a just-killed process's
+      // own exe (or a file it still had open) can transiently fail with
+      // EBUSY/EPERM until the OS finishes releasing the handle.
+      rmSync(state.tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    } catch {
+      // Best-effort: an ephemeral CI runner reclaims this either way.
     }
+  }
+  try {
     unlinkSync(knownPath);
   } catch {
-    // Best-effort cleanup.
+    // Already removed, or never written.
   }
 }

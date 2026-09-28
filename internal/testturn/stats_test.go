@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -234,7 +235,9 @@ func TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Stat: %v", err)
 			}
-			if info.Mode().Perm() != 0o600 {
+			// Windows has no POSIX permission bits — see the equivalent guard
+			// in internal/cli/machine_test.go.
+			if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 				t.Fatalf("expected mode 0600, got %v", info.Mode().Perm())
 			}
 			return

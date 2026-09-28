@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -28,7 +29,11 @@ var codePattern = regexp.MustCompile(`[23456789a-hj-np-z]{8}-[0-9A-Za-z]+`)
 // buildBinary builds the sp2p CLI binary and returns its path.
 func buildBinary(t *testing.T) string {
 	t.Helper()
-	binPath := filepath.Join(t.TempDir(), "sp2p")
+	name := "sp2p"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	binPath := filepath.Join(t.TempDir(), name)
 	cmd := exec.Command("go", "build", "-o", binPath, "./cmd/sp2p")
 	cmd.Dir = projectRoot(t)
 	out, err := cmd.CombinedOutput()

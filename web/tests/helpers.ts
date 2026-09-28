@@ -31,12 +31,11 @@ export const isolatedServerTest = base.extend<{}, { isolatedServer: string }>({
     const port = (listener.address() as net.AddressInfo).port;
     await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
     const url = `http://127.0.0.1:${port}`;
-    // Prefer a prebuilt binary (SP2P_PW_SERVER_BIN case, recorded by
-    // global-setup.ts as state.serverBin) over the tmpDir path global-setup
-    // builds into by default — using the tmpDir path unconditionally broke
-    // when the server binary was actually prebuilt elsewhere.
-    const serverBin = state.serverBin ?? join(state.tmpDir, "sp2p-server");
-    const server = spawn(serverBin, ["-addr", `127.0.0.1:${port}`, "-base-url", url], { stdio: "ignore" });
+    // global-setup.ts always writes state.serverBin (built or prebuilt,
+    // with the platform-correct ".exe" suffix on Windows) — use it directly
+    // rather than rebuilding a tmpDir-relative path, which would drop that
+    // suffix and silently target a POSIX-only binary name.
+    const server = spawn(state.serverBin, ["-addr", `127.0.0.1:${port}`, "-base-url", url], { stdio: "ignore" });
     const exited = new Promise<void>(resolve => { server.once("exit", () => resolve()); server.once("error", () => resolve()); });
     try {
       await expect.poll(async () => {
@@ -62,7 +61,10 @@ export function temporaryDirectory(prefix: string): string {
 
 // Call from a test.afterEach to remove every directory allocated so far.
 export function cleanupTemporaryDirectories(): void {
-  for (const dir of temporaryDirectories.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // maxRetries/retryDelay: on Windows, a just-killed CLI process can hold a
+  // file in this directory open for a brief moment after exit, which would
+  // otherwise fail this synchronous removal with EBUSY/EPERM.
+  for (const dir of temporaryDirectories.splice(0)) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
 // ── Failure diagnostics (console + step/status text; never codes/URLs) ─────

@@ -189,7 +189,7 @@ Wait for `Ready: tcp://127.0.0.1:15432` in human mode or a `ready` event before 
 
 ### Unix to Unix
 
-The `--to` Unix path must identify an existing service socket. The `--listen` Unix path must not already exist; SP2P creates that private listener and removes only the socket it created.
+The `--to` Unix path must identify an existing service socket. The `--listen` Unix path must not already exist; SP2P creates that private listener and removes only the socket it created. `unix://` endpoints are unsupported on native Windows (use `tcp://`, or run under WSL).
 
 ```bash
 sp2p tunnel serve --server "{{SP2P_SERVER_URL}}" --to unix:///run/example/service.sock
