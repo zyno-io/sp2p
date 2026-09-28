@@ -394,13 +394,18 @@ func TestServer_RelayedBytes_BothDirections(t *testing.T) {
 		t.Fatalf("A received %q, want %q", recvA[:n], payloadBtoA)
 	}
 
-	snap := srv.Snapshot()
-	u := snap.Users[userKey("peer-session")]
 	// A wrote to B (toPeers, from A's relay socket) and B's relay socket
 	// received it (fromPeers) -- and symmetrically for B->A -- all under the
 	// one shared session user, so both aggregate fields must reflect both
-	// messages.
+	// messages. The server counts after its write returns, so the peer can
+	// read a message before it is counted.
 	wantTotal := uint64(len(payloadAtoB) + len(payloadBtoA))
+	waitFor(t, 5*time.Second, "relayed bytes counted", func() bool {
+		u := srv.Snapshot().Users[userKey("peer-session")]
+		return u.RelayedBytesToPeers >= wantTotal && u.RelayedBytesFromPeers >= wantTotal
+	})
+	snap := srv.Snapshot()
+	u := snap.Users[userKey("peer-session")]
 	if u.RelayedBytesToPeers < wantTotal {
 		t.Fatalf("RelayedBytesToPeers = %d, want >= %d", u.RelayedBytesToPeers, wantTotal)
 	}
