@@ -1162,6 +1162,7 @@ with the behavior the test actually exists to check.
 | `internal` (`stream_cli_test.go`) `TestStreamCLI/tunnel-tcp-to-unix`, `/tunnel-unix-to-tcp`, `/tunnel-unix-to-unix` | `unix://` endpoints are rejected outright by `tunnel.ParseEndpoint` on native Windows — see below. |
 | `internal/cli`'s response/status-file permission assertions, `internal/testturn`'s stats-file permission assertion | Only the specific `info.Mode().Perm() != 0o600` assertion is skipped (not the surrounding test): Windows has no POSIX permission bits, so `os.Stat` reports a fixed 0666/0444 there regardless of what the code requested: real protection on Windows comes from the file's inherited ACL, not a mode bit. |
 | `internal/stream_cli_unix_test.go`, `internal/tunnel/listen_unix_test.go`, `internal/cli/stdio_unix_test.go`, `internal/rsync`'s `_unix.go`/`_unix_test.go` files | Pre-existing POSIX-only build-tag files (signals, Unix domain sockets, POSIX file modes) — Windows never compiles or runs them; nothing new needed for this phase. |
+| `internal/testturn`'s `TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites` | Confirmed on real CI, not predicted: this adversarial, deliberately unthrottled loop (500 create-temp+rename writes racing a tight `os.ReadFile` poll loop, by design — see the test) hung for the entire 20-minute `go test` timeout on `windows-latest`, with Windows Defender real-time scanning still on despite the job's `Set-MpPreference -DisableRealtimeMonitoring $true` step (confirmed silently ineffective — reads back as still enabled both before and after on this hosted runner, likely Tamper Protection). `writeFileAtomic` is private to this package and used only by `testturnd`, a CI-only Linux TURN test server never built or run on Windows (see [TURN relay](#turn-relay-relay-only-suite) above), so this exercises no real Windows code path — see [First CI run](#first-ci-run) below. |
 | `netem`, `relay`, `browser-firefox`'s `engines`/webkit-only cells, `macos-rsync` | Linux-network-namespace or macOS-only by design (see their own sections above); orthogonal to this job. |
 
 **Two real product gaps this phase found and fixed, not just guarded:**
@@ -1234,6 +1235,29 @@ npm ci
 npm run build
 npx playwright test --project=msedge
 ```
+
+### First CI run
+
+The `windows` job's first real run
+([36392203084](https://github.com/zyno-io/sp2p/actions/runs/36392203084))
+found exactly one problem, and it was environmental rather than a product
+bug: `TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites` (see the
+skip table above) consumed the entire 20-minute `go test` timeout, which
+failed the job (25m06s wall time) even though every other Go package
+passed. `Set-MpPreference -DisableRealtimeMonitoring $true` did not
+actually disable Defender real-time scanning on the hosted runner — the
+job's own before/after log lines both read `True` — which is the most
+likely cause of a create-temp+rename write loop colliding this badly with
+a concurrent read loop. The msedge/CLI interop half of the same run, wholly
+unaffected by the Go-side hang (its `if:` condition only depends on the web
+build succeeding), passed all 16 tests in 2.9 minutes on the first attempt,
+with no engine-specific findings.
+
+CRLF handling was also confirmed correct on this run:
+`TestBootstrapTemplatesMatchGenerator`, which compares a generated copy of
+`scripts/bootstrap-*.sh` byte-for-byte against the checked-out one, passed
+as part of the `internal` package (`ok  ...  47.313s`) — `core.autocrlf
+false` before checkout is doing its job.
 
 ### Known gaps
 
