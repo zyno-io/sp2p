@@ -6,13 +6,15 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-28
+
 ### Fixed
 
 - CLI transfers over a TURN relay no longer leave a relay allocation held for up to 10 minutes after finishing. The CLI could exit before a connection had released its allocation; closing now waits for the release.
 
 ### Added
 
-- CI now proves a real relay-only WebRTC transfer end to end — 8 parallel lanes, exact TURN allocation accounting, leaked-allocation detection, and graceful degradation under a per-session TURN quota — using a CI-only TURN relay server and a firewalled network namespace that blocks direct connectivity. See [testing](docs/testing.md#turn-relay-relay-only-suite).
+- CI now proves a real relay-only WebRTC transfer end to end — 8 parallel lanes, exact TURN allocation accounting, leaked-allocation detection, and graceful degradation under a per-session TURN quota — using a CI-only TURN relay server and a firewalled network namespace that blocks direct connectivity. See [testing](https://github.com/zyno-io/sp2p/blob/v0.6.2/docs/testing.md#turn-relay-relay-only-suite).
 
 ## [0.6.1] - 2026-09-27
 
