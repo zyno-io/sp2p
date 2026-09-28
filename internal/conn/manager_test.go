@@ -3,6 +3,7 @@
 package conn
 
 import (
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -106,6 +107,16 @@ func TestNetConnAdapterImplementsP2PConn(t *testing.T) {
 	go func() {
 		c, _ := ln.Accept()
 		if c != nil {
+			// Drain the client's "ping" before writing/closing: closing a
+			// TCP socket with unread data still in its receive buffer is an
+			// abortive close (RST instead of FIN), which Windows' stack
+			// surfaces to the peer's Read as a hard error even after the
+			// "pong" payload was already delivered — Linux/macOS tolerate
+			// it, Windows does not (confirmed on real CI: "wsarecv: An
+			// established connection was aborted by the software in your
+			// host machine"). Reading it fully avoids the race everywhere.
+			buf := make([]byte, 4)
+			io.ReadFull(c, buf)
 			c.Write([]byte("pong"))
 			c.Close()
 		}
