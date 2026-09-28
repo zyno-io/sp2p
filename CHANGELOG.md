@@ -9,6 +9,8 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 ### Fixed
 
 - A received tar archive entry with an absolute POSIX-style path (e.g. `/etc/passwd`) was silently accepted on a Windows receiver instead of being rejected, because `filepath.IsAbs` requires a Windows volume name to consider a path absolute. Not an exploitable path traversal (the destination-prefix check still held), but Windows now rejects these entries like every other platform.
+- On Windows, `--status-file` could be left stale: replacing the status file failed while another process had it open for reading, and the final result snapshot is written only once. The replacement now retries briefly while a reader holds the file.
+- A received tar archive entry named after a Windows reserved device (such as `NUL` or `CON`) or containing a colon is now rejected, so Windows receivers can't silently discard or redirect file data.
 - Unix tunnel endpoints (`unix://...`) now fail with a clear "unsupported on native Windows; use TCP or WSL" error on Windows instead of an unrelated, confusing "must be an absolute unix:///path" parse error.
 
 ### Added

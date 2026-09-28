@@ -179,19 +179,6 @@ func userIDForGoroutine(g, users int) string {
 }
 
 func TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// Confirmed on real CI (ci.yml's windows job): this adversarial,
-		// deliberately unthrottled loop (500 create-temp+rename writes
-		// racing a tight os.ReadFile poll loop) hung for the entire 20m
-		// `go test` timeout, with Windows Defender real-time scanning still
-		// on — Set-MpPreference -DisableRealtimeMonitoring silently didn't
-		// take effect on the hosted runner (read back as still enabled).
-		// writeFileAtomic is private to this package and used only by
-		// testturnd, a CI-only Linux TURN test server that never runs (or
-		// is even built) on Windows — see docs/testing.md's TURN relay and
-		// Windows sections — so this exercises no real Windows code path.
-		t.Skip("hangs under mandatory Windows Defender scanning on hosted CI; testturnd never runs on Windows")
-	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "stats.json")
 
@@ -208,6 +195,9 @@ func TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// Stop the reader on every exit, so a write error fails the test
+		// instead of leaving the read loop spinning until the timeout.
+		defer close(stop)
 		for i := 0; i < 500; i++ {
 			data, err := json.Marshal(payload{Seq: i, Pad: strings.Repeat("x", i%200)})
 			if err != nil {
@@ -219,7 +209,6 @@ func TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites(t *testing.T) {
 				return
 			}
 		}
-		close(stop)
 	}()
 
 	readErrs := 0

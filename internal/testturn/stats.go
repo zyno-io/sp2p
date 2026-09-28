@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"github.com/zyno-io/sp2p/internal/fileutil"
 )
 
 // SnapshotVersion is bumped whenever the Snapshot JSON shape changes in a
@@ -407,7 +409,7 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp stats file: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := fileutil.ReplaceFile(tmpPath, path); err != nil {
 		return fmt.Errorf("rename stats file: %w", err)
 	}
 	return nil

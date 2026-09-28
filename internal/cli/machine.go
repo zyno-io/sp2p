@@ -16,6 +16,7 @@ import (
 
 	"github.com/zyno-io/sp2p/internal/conn"
 	"github.com/zyno-io/sp2p/internal/crypto"
+	"github.com/zyno-io/sp2p/internal/fileutil"
 	"github.com/zyno-io/sp2p/internal/flow"
 	"github.com/zyno-io/sp2p/internal/transfer"
 )
@@ -597,7 +598,7 @@ func (r *machineReporter) writeSnapshotLocked() {
 		r.reportStatusFileErrorLocked(fmt.Errorf("close status snapshot: %w", err))
 		return
 	}
-	if err := os.Rename(tmpPath, r.statusFile); err != nil {
+	if err := fileutil.ReplaceFile(tmpPath, r.statusFile); err != nil {
 		r.reportStatusFileErrorLocked(fmt.Errorf("replace status snapshot: %w", err))
 		return
 	}

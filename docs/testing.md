@@ -1162,7 +1162,6 @@ with the behavior the test actually exists to check.
 | `internal` (`stream_cli_test.go`) `TestStreamCLI/tunnel-tcp-to-unix`, `/tunnel-unix-to-tcp`, `/tunnel-unix-to-unix` | `unix://` endpoints are rejected outright by `tunnel.ParseEndpoint` on native Windows — see below. |
 | `internal/cli`'s response/status-file permission assertions, `internal/testturn`'s stats-file permission assertion | Only the specific `info.Mode().Perm() != 0o600` assertion is skipped (not the surrounding test): Windows has no POSIX permission bits, so `os.Stat` reports a fixed 0666/0444 there regardless of what the code requested: real protection on Windows comes from the file's inherited ACL, not a mode bit. |
 | `internal/stream_cli_unix_test.go`, `internal/tunnel/listen_unix_test.go`, `internal/cli/stdio_unix_test.go`, `internal/rsync`'s `_unix.go`/`_unix_test.go` files | Pre-existing POSIX-only build-tag files (signals, Unix domain sockets, POSIX file modes) — Windows never compiles or runs them; nothing new needed for this phase. |
-| `internal/testturn`'s `TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites` | Confirmed on real CI, not predicted: this adversarial, deliberately unthrottled loop (500 create-temp+rename writes racing a tight `os.ReadFile` poll loop, by design — see the test) hung for the entire 20-minute `go test` timeout on `windows-latest`, with Windows Defender real-time scanning still on despite the job's `Set-MpPreference -DisableRealtimeMonitoring $true` step (confirmed silently ineffective — reads back as still enabled both before and after on this hosted runner, likely Tamper Protection). `writeFileAtomic` is private to this package and used only by `testturnd`, a CI-only Linux TURN test server never built or run on Windows (see [TURN relay](#turn-relay-relay-only-suite) above), so this exercises no real Windows code path — see [First CI runs](#first-ci-runs) below. |
 | `netem`, `relay`, `browser-firefox`'s `engines`/webkit-only cells, `macos-rsync` | Linux-network-namespace or macOS-only by design (see their own sections above); orthogonal to this job. |
 
 **Two real product gaps this phase found and fixed, not just guarded:**
@@ -1240,15 +1239,19 @@ npx playwright test --project=msedge
 
 The `windows` job's first real run
 ([36392203084](https://github.com/zyno-io/sp2p/actions/runs/36392203084))
-found exactly one problem, and it was environmental rather than a product
-bug: `TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites` (see the
-skip table above) consumed the entire 20-minute `go test` timeout, which
-failed the job (25m06s wall time) even though every other Go package
-passed. `Set-MpPreference -DisableRealtimeMonitoring $true` did not
-actually disable Defender real-time scanning on the hosted runner — the
-job's own before/after log lines both read `True` — which is the most
-likely cause of a create-temp+rename write loop colliding this badly with
-a concurrent read loop. The msedge/CLI interop half of the same run, wholly
+found a real Windows product bug:
+`TestWriteFileAtomic_ConcurrentReadersNeverSeePartialWrites` hung for the
+entire 20-minute `go test` timeout (25m06s job). Defender was not the
+cause (the log's `True` is `DisableRealtimeMonitoring`, so scanning was
+already off). Windows refuses to replace a file that another process has
+open without delete sharing, which is how Go opens files, so the
+create-temp-then-rename write failed while the test's reader had the file
+open. The writer exited on that error without stopping the reader, which
+then spun until the timeout. The CLI's `--status-file` uses the same
+pattern for other processes to poll, so a poller could leave it stale.
+`fileutil.ReplaceFile` now retries the rename briefly on Windows while a
+reader holds the file, both writers use it, and the test stops its reader
+on every exit so a write error fails fast. The msedge/CLI interop half of the same run, wholly
 unaffected by the Go-side hang (its `if:` condition only depends on the web
 build succeeding), passed all 16 tests in 2.9 minutes on the first attempt,
 with no engine-specific findings.
@@ -1291,10 +1294,8 @@ helps every platform's test hygiene, not a Windows-specific branch.
   above), and netem/relay need a real Linux network namespace.
 - **No Windows ARM64 coverage** — `windows-latest` is x86-64 only.
 - **Symlink-dependent tests** (`internal/rsync`'s
-  `TestServeDoesNotTraverseSelectedSymlink` and similar) are not
-  Windows-skipped preemptively: creating a filesystem symlink on Windows
-  needs either an elevated process or Developer Mode, and whether the
-  `windows-latest` runner's default account has that is unconfirmed as of
-  this writing. If CI shows these failing specifically on symlink creation
-  (not on the security property the test is checking), that's the point to
-  add an evidenced skip — not before.
+  `TestServeDoesNotTraverseSelectedSymlink` and
+  `TestValidateDirectoryRejectsUnsafeCanonicalAlias`) create symlinks
+  successfully on `windows-latest`, but they don't exercise the property
+  they test there: `ValidateDirectory` rejects every path containing `\`,
+  and rsync is unsupported on native Windows anyway.

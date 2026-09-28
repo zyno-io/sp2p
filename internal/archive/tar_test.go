@@ -105,6 +105,12 @@ func TestValidateTarPath(t *testing.T) {
 		{`C:x`, true, true},
 		{`\x`, true, true},
 		{`\\srv\share\x`, true, true},
+		// Reserved device names and alternate data streams on Windows.
+		{"NUL", true, true},
+		{"dir/con.txt", true, true},
+		{"COM1", true, true},
+		{"file.txt:stream", true, true},
+		{"", true, false},
 	}
 
 	for _, tt := range tests {

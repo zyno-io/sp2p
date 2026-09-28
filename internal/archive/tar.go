@@ -539,5 +539,11 @@ func validateTarPath(name string) error {
 			return fmt.Errorf("path traversal: %s", name)
 		}
 	}
+	// On Windows this also rejects reserved device names (NUL, CON, COM1...),
+	// which would silently discard or redirect file data, and any colon
+	// (alternate data streams). On POSIX it only adds rejecting "".
+	if !filepath.IsLocal(name) {
+		return fmt.Errorf("unsafe path: %s", name)
+	}
 	return nil
 }

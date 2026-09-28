@@ -353,9 +353,9 @@ jobs:
         continue-on-error: true
         run: |
           try {
-            Write-Host "Defender real-time monitoring before: $((Get-MpPreference).DisableRealtimeMonitoring)"
+            Write-Host "DisableRealtimeMonitoring before: $((Get-MpPreference).DisableRealtimeMonitoring)"
             Set-MpPreference -DisableRealtimeMonitoring $true
-            Write-Host "Defender real-time monitoring after: $((Get-MpPreference).DisableRealtimeMonitoring)"
+            Write-Host "DisableRealtimeMonitoring after: $((Get-MpPreference).DisableRealtimeMonitoring)"
           } catch {
             Write-Warning "Could not toggle Defender real-time monitoring: $_"
           }
