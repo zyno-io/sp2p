@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Reads test-results/perf/*.json (one file per netem.spec.ts pairing, or
-// several per pairing under nightly's --repeat-each), prints a markdown
+// several per pairing under Extended checks' --repeat-each), prints a markdown
 // table to $GITHUB_STEP_SUMMARY (or stdout if unset), and with --gate exits
 // non-zero if any pairing's median MB/s is below its floor in
 // web/tests/perf-floors.json. See docs/testing.md.

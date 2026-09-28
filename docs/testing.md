@@ -41,6 +41,32 @@
   TURN server, with exact allocation accounting and no leaked allocations.
   See [TURN relay (relay-only) suite](#turn-relay-relay-only-suite) below.
 
+## Extended checks
+
+`.github/workflows/extended.yml` ("Extended checks") runs the slower suites
+that don't gate every PR: the `netem-extended` performance matrix (`wan150-cap`
+and `wan500`), `engines` (WebKit plus the full, untagged `--project=engines`
+matrix, on `macos-15`), `compat-n2` (N-2 previous-release compatibility), and
+`relay-full` (the complete TURN relay suite, including Firefox pairings, the
+quota case, and the consent negative controls). It runs:
+
+- on every push to `main`, so a failure points at the single merge that
+  caused it;
+- weekly (Mondays 07:00 UTC), to catch browser and runner drift between
+  merges;
+- on manual dispatch (`gh workflow run extended.yml --ref <branch>`), useful
+  for validating a branch before merge, or `--ref <tag>` to produce a run on
+  a tagged commit after `main` has moved on.
+
+`report-failure` opens or updates a GitHub issue (label `extended-checks`,
+title "Extended checks failed") when any job fails or is cancelled, except on
+a manual dispatch, which only reports in the run itself.
+
+**Release gate:** `release.yml`'s `extended-checks` job refuses to publish a
+release unless Extended checks passed on the tagged commit. If a run is
+already in progress on that commit, it waits (up to ~2 hours) instead of
+failing immediately.
+
 ## Running locally
 
 ```bash
@@ -130,7 +156,10 @@ version fails the test rather than assuming a default.
 **Release checklist:** every plain `vX.Y.Z` release needs an entry in
 `testdata/release-capabilities.json`, added before the tag is pushed. Once
 tagged it becomes "the previous release" for CI, and the lookup fails closed
-for unlisted versions.
+for unlisted versions. Releases also require a green Extended checks run on
+the tagged commit: `release.yml`'s `extended-checks` job waits for one already
+in progress (up to ~2 hours) or refuses to publish without it — see
+[Extended checks](#extended-checks) above.
 
 ### Browser previous-release matrix
 
@@ -182,7 +211,7 @@ the version string is baked into the binaries via `-ldflags`, so the SHA
 alone isn't a safe cache key). `ci.yml`'s `protocol-compatibility` job uses
 it to build `.compat-prev` (resolved via `previous-release.sh`'s default
 `--nth 1`, i.e. N-1) and feeds both the Go test and this Playwright spec from
-it. `nightly.yml`'s `compat-n2` job builds a second fixture the same way at
+it. `extended.yml`'s `compat-n2` job builds a second fixture the same way at
 `--nth 2` (N-2), so a peer two releases back also keeps getting exercised,
 not just whichever release happens to be "the previous one" at any given
 moment.
@@ -191,7 +220,7 @@ moment.
 `expectedLaneCounts` branch above that expects no lane negotiation exists so
 the spec stays correct *if* `SP2P_TEST_PREVIOUS_VERSION` is ever pointed at a
 protocol-2 release (verified locally against a real v0.4.0 fixture — 7/7
-pass), but neither `ci.yml` nor `nightly.yml` can currently produce that:
+pass), but neither `ci.yml` nor `extended.yml` can currently produce that:
 `previous-release.sh`'s `--nth 1`/`--nth 2` both resolve to protocol-3
 releases today, and `TestE2E_ProtocolCompatibility` (which runs before this
 spec in both jobs) isn't protocol-2-aware for the `SP2P_TEST_PREVIOUS_*` env
@@ -292,15 +321,15 @@ a `finally`, never through the project's own `browser`/`page` fixtures, so
 the `engines` project declares no `browserName` — it exists only to scope
 enumeration. Chromium↔Firefox and CLI↔Firefox (both directions each, 4
 cells) are tagged `@pr`; the rest — anything touching WebKit, plus
-CLI↔Chromium — is nightly-only.
+CLI↔Chromium — is extended-checks only (after merge / weekly / pre-release).
 
 **CI wiring.** `ci.yml`'s new `browser-firefox` job (`ubuntu-latest`, not
 yet a required check) runs `--project=firefox` plus
-`--project=engines --grep @pr`. `nightly.yml`'s new `engines` job
+`--project=engines --grep @pr`. `extended.yml`'s `engines` job
 (`macos-15` — closer to Safari's WebKit than a Linux runner) runs
 `--project=webkit` plus the full, untagged `--project=engines` (all 15
 cells); it was added to `report-failure`'s `needs` and failure-summary
-logic alongside `netem-nightly` and `compat-n2`. Browsers in the matrix
+logic alongside `netem-extended` and `compat-n2`. Browsers in the matrix
 expose plain host candidates (Chromium's `WebRtcHideLocalIpsWithMdns`
 disabled, Firefox's `media.peerconnection.ice.obfuscate_host_addresses`
 off): hosted macOS runners don't reliably resolve the `.local` names, which
@@ -339,18 +368,19 @@ the lane never has a chance to connect at all, regardless of how long it
 waits. This is specific to a multi-homed, same-subnet host, not expected on
 CI's single-NIC runners (`ubuntu-latest`, `macos-15`), so no retry was added
 for it — a retry would only be masking noise if the failure were timing-
-sensitive, and this one isn't. If the macos-15 nightly `engines` job shows
-the same lane shortfall for real, that's the point to investigate further:
+sensitive, and this one isn't. If the macos-15 `engines` job in Extended
+checks shows the same lane shortfall for real, that's the point to investigate further:
 it would mean either that runner is multi-homed too, or that this is a
 genuine Safari/WebKit-multi-lane interoperability issue independent of
 network topology (the transfer itself still completes over however many
 lanes did connect — this reduces parallelism, it doesn't break transfers).
 
 **New finding, not yet root-caused: `engine-matrix.spec.ts`'s browser↔browser
-cells mostly fail on the macos-15 nightly runner.** Dispatching `nightly.yml`
-on this branch (`gh workflow run nightly.yml --ref <branch>`) to validate
-its `engines` job before merge (it cannot be triggered by a PR) surfaced
-this: `--project=webkit` was clean, 15/15, but `--project=engines` had
+cells mostly fail on the macos-15 `engines`-job runner.** Dispatching what
+was then `nightly.yml` (now `extended.yml`) on this branch (`gh workflow run
+nightly.yml --ref <branch>` at the time) to validate its `engines` job
+before merge (it cannot be triggered by a PR) surfaced this:
+`--project=webkit` was clean, 15/15, but `--project=engines` had
 **8 of its 9 browser↔browser cells** time out waiting for `.complete` —
 every pairing except webkit→webkit, including **chromium→chromium**, the
 simplest possible cell and the first one that runs. All 6 CLI↔browser
@@ -365,7 +395,7 @@ every receiver page already closed by the time `afterEach` ran — and
 `flushDiagnostics` had a real bug (now fixed) that skipped the
 still-available buffered console/pageerror lines too, not just the live
 DOM snapshot that actually needs an open page. That fix landed here, but
-a nightly dispatch takes the better
+an Extended checks (then nightly) dispatch takes the better
 part of an hour end to end and this branch's cost/time budget didn't
 stretch to a second one — so the *fix* was validated (diagnostics correctly
 dump buffered console lines for a closed page, confirmed by inspection),
@@ -381,9 +411,9 @@ culprit is something about `launchEnginePage`'s `pw[engine].launch(...)` +
 Actions runners — not a specific engine's WebRTC implementation. This is
 reported here for follow-up rather than guessed at further; it does not
 block this PR's Firefox/`ubuntu-latest` rollout (`browser-firefox`, the
-required-eventually job), only the WebKit/`engines` nightly rollout, which
-was already explicitly staged as "nightly-only, promote later" for exactly
-this kind of reason.
+required-eventually job), only the WebKit/`engines` rollout under Extended
+checks, which was already explicitly staged as "extended-checks only,
+promote later" for exactly this kind of reason.
 
 **Local validation results** (this Mac, one run each unless noted):
 
@@ -415,9 +445,9 @@ hint" — see [browser-high-rtt.md](browser-high-rtt.md#socket-buffer-hint) and
 [parallel-webrtc.md](parallel-webrtc.md#socket-buffer-hint)), that WebRTC
 traffic is actually shaped while signaling is not, and no throughput
 collapse. It's skipped unless `SP2P_NETEM_PROFILE` is set, which only the
-`netem` CI job (`.github/workflows/ci.yml`) and the nightly job
-(`.github/workflows/nightly.yml`) set — running it unshaped would silently
-prove nothing, so it refuses to guess.
+`netem` CI job (`.github/workflows/ci.yml`) and the Extended checks
+workflow's `netem-extended` job (`.github/workflows/extended.yml`) set —
+running it unshaped would silently prove nothing, so it refuses to guess.
 
 **Status: shadow period.** The `netem` job runs on every PR and push to
 `main`, but is intentionally not in `build`'s `needs:` and not a required
@@ -456,8 +486,8 @@ status check yet, until its floors are calibrated against enough real runs
   instead, which has no netem — that's the bypass the suite's `/health`
   latency check proves. Profiles: `wan150` (75ms delay + 0.1% loss each way →
   ~150ms RTT; used by the PR/push `netem` job), `wan150-cap` (`wan150` +
-  `rate 100mbit`; nightly), `wan500` (250ms delay, no loss → ~500ms RTT;
-  nightly). No profile adds jitter — reordering on a delay qdisc causes
+  `rate 100mbit`; Extended checks), `wan500` (250ms delay, no loss → ~500ms RTT;
+  Extended checks). No profile adds jitter — reordering on a delay qdisc causes
   spurious SCTP retransmits unrelated to the WAN conditions being simulated.
   `verify` pings the namespace's own `dummy0` address from inside the
   namespace (which round-trips over `lo`, picking up the delay in both
@@ -518,9 +548,10 @@ addresses, or SDP. `web/tests/perf-summary.mjs` turns those into a markdown
 table on `$GITHUB_STEP_SUMMARY` and, with `--gate`, fails if any pairing is
 missing or its median is below the floor for the current profile in
 `web/tests/perf-floors.json`. The PR/push job also asserts the floor inside
-each test. The nightly job sets `SP2P_NETEM_GATE_PER_TEST=0` so one slow
-repeat of `--repeat-each=3` doesn't fail the run, and gates on the medians
-instead. Traces, screenshots and the Playwright report are not collected for
+each test. The Extended checks `netem-extended` job sets
+`SP2P_NETEM_GATE_PER_TEST=0` so one slow repeat of `--repeat-each=3` doesn't
+fail the run, and gates on the medians instead. Traces, screenshots and the
+Playwright report are not collected for
 this suite, because they would capture transfer codes; only the numeric
 records are uploaded.
 
@@ -584,7 +615,7 @@ reported) for visibility.
   but not asserted on, since its exact availability/format across
   kernel/iproute2 versions wasn't verified ahead of time.
 - `packetsDiscardedOnSend` (from `RTCPeerConnection.getStats()`) is recorded
-  per pairing but not gated. If a `wan500` (no-loss) nightly run shows it
+  per pairing but not gated. If a `wan500` (no-loss) Extended checks run shows it
   climbing, that's the "netem on `lo` holds the sender's `SO_SNDBUF`" failure
   mode: move the delay to an IFB ingress qdisc on `lo` instead of the egress
   `prio`/`netem` chain used today, and update this section.
@@ -600,16 +631,16 @@ above, but firewalls it instead of shaping it: `scripts/ci/relay-firewall.sh`
 blocks every direct UDP path so ICE inside the namespace can only ever
 succeed by relaying through a real (CI-only) TURN server,
 `internal/testturn`'s `testturnd`. Skipped unless `SP2P_RELAY_TEST` is set,
-which only `ci.yml`'s `relay` job and `nightly.yml`'s `relay-full` job set —
+which only `ci.yml`'s `relay` job and `extended.yml`'s `relay-full` job set —
 same rationale as the netem suite's `SP2P_NETEM_PROFILE` gate: running this
 unfirewalled would silently prove nothing.
 
 **Status: shadow period**, same as `netem`: `ci.yml`'s `relay` job runs on
 every PR and push to `main` (the `@pr`-tagged Chromium-only subset — 4
 tests) but is not in `build`'s `needs:` and not a required status check
-yet. `nightly.yml`'s `relay-full` job runs the complete suite (12 tests,
+yet. `extended.yml`'s `relay-full` job runs the complete suite (12 tests,
 including Firefox pairings, the quota case, and the consent negative
-controls) and is wired into `report-failure` alongside `netem-nightly`,
+controls) and is wired into `report-failure` alongside `netem-extended`,
 `compat-n2`, and `engines`.
 
 ### Topology and the relay-only firewall
@@ -806,8 +837,9 @@ honored — a real regression against the identical assumption
 Both peers of one sp2p session share a single TURN username (issued once
 by the signaling server on `relay-retry` — `internal/server/handler_signal.go`),
 so `testturnd -user-quota` caps live allocations *per session*, combined
-across both peers, not per peer. The nightly-only quota case
-(`-user-quota 8`, mirroring `deploy/turnserver.conf.example`'s production
+across both peers, not per peer. The quota case (extended-checks only —
+after merge / weekly / pre-release; `-user-quota 8`, mirroring
+`deploy/turnserver.conf.example`'s production
 `user-quota=32` sizing logic) transfers 64 MiB Chromium-to-Chromium and
 asserts, structurally rather than against a hardcoded number (the exact
 reduced count is recorded in `test-results/relay/quota8-chromium-chromium.*.json`
@@ -884,7 +916,7 @@ navigation (Playwright auto-dismisses an unhandled dialog, which would
 look exactly like a genuine decline) and answer every CLI's relay prompt
 explicitly via `answerRelayPrompt`.
 
-The nightly-only negative controls dismiss/deny consent instead:
+The negative controls (extended-checks only) dismiss/deny consent instead:
 
 - **Both browsers decline** — each independently throws
   `"P2P connection failed and relay was declined"` (own-side decline is
@@ -925,7 +957,7 @@ A completed transfer alone can't prove this: `web/src/webrtc-parallel.ts`'s
 its own `finally` block once setup succeeds, so a completed transfer's
 "lanes that were never selected" case is exercised by every ordinary
 pairing test already. What it *can't* exercise is a peer that abandons
-setup entirely partway through — the nightly-only "receiver abandons lane
+setup entirely partway through — the extended-checks-only "receiver abandons lane
 setup" test does: an injected `RTCPeerConnection` subclass on the receiver
 closes every connection on the page (primary and every extra lane) the
 instant the first extra-lane offer is applied, before that lane ever starts
@@ -949,7 +981,7 @@ say so rather than claiming an unverified result.
 | --- | --- | --- | --- |
 | (a) | Delete `bundlePolicy: "max-bundle" as const` from the peer connection config | `web/src/webrtc.ts`'s `establishWebRTC` | `chromium-chromium` and `chromium-cli` (Chromium *offering*) failed with `created: 24` (double the expected 16, matching the derived doubled-transport count); `cli-chromium` and `cli-cli` passed unchanged — confirms the formula's offer/answer asymmetry. Run [36351594540](https://github.com/zyno-io/sp2p/actions/runs/36351594540). |
 | (b) | Strip TURN servers from `pc.getConfiguration()` before constructing each extra lane's `RTCPeerConnection` | `web/src/webrtc-parallel.ts`'s `Lane` constructor | `chromium-chromium`, `cli-chromium`, and `chromium-cli` all collapsed to 1 connection (`.step-p2p` shows no lane count) and failed; `cli-cli` (no browser) passed unchanged. Run [36351869449](https://github.com/zyno-io/sp2p/actions/runs/36351869449). |
-| (c) | Delete `lanes[id]?.close()` from `negotiateParallelWebRTC`'s `finally` block | `web/src/webrtc-parallel.ts` | **Not run.** Every test that completes normally already closes every lane via the ordinary success path (see the Leak check section above), so only the nightly-only "receiver abandons lane setup" test's `!success` cleanup path can observe this mutation. Left undone rather than claimed without evidence — a real validation run is future work if this section is revisited. |
+| (c) | Delete `lanes[id]?.close()` from `negotiateParallelWebRTC`'s `finally` block | `web/src/webrtc-parallel.ts` | **Not run.** Every test that completes normally already closes every lane via the ordinary success path (see the Leak check section above), so only the extended-checks-only "receiver abandons lane setup" test's `!success` cleanup path can observe this mutation. Left undone rather than claimed without evidence — a real validation run is future work if this section is revisited. |
 
 ### Running locally (Linux only)
 
@@ -992,7 +1024,7 @@ check (`created == 9`, exactly the derived count) and the quota case
 (structurally passed, `lanes == 1`) — passing cleanly and precisely every
 single time. The fourth dispatch (after the fixes and the revert below)
 was fully clean, 12/12. Four real findings surfaced across the first
-three dispatches, all confined to nightly-only tests: two are fixed and
+three dispatches, all confined to extended-checks-only tests: two are fixed and
 confirmed (including by the clean fourth run); one fix was tried, caused
 a worse regression, and was reverted; one remains open, intermittent, and
 did not recur in the clean fourth run — consistent with it being a real
@@ -1072,7 +1104,7 @@ the underlying race isn't specific to the larger `relay-full` job).
 
 - **WebKit isn't covered.** The netns-based approach needs a real Linux
   network namespace; WebKit only gets meaningful coverage on `macos-15`
-  runners (see `nightly.yml`'s `engines` job), which has no netns support.
+  runners (see `extended.yml`'s `engines` job), which has no netns support.
 - **TURN over TCP/TLS isn't covered** — `testturnd` registers only a UDP
   `PacketConnConfig`, matching the one transport sp2p's signaling server
   ever configures (`-turn-servers` only ever carries `turn:...?transport=udp`

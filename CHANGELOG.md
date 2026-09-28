@@ -17,6 +17,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 - CI now runs the Go test suite natively on Windows and CLI↔Microsoft Edge browser interop against a Windows-built CLI, so Windows-specific bugs surface in CI. See [testing](docs/testing.md#windows-native-cli-and-edge).
 
+### Changed
+
+- Slower CI checks now run after each merge to main and weekly instead of nightly, and releases require them to pass on the tagged commit.
+
 ## [0.6.2] - 2026-09-28
 
 ### Fixed

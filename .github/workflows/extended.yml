@@ -1,15 +1,20 @@
-name: Nightly netem WAN benchmarks
+name: Extended checks
 
+# Slower checks that don't run on every PR. They run after each merge to
+# main, so a failure points at one change; release.yml requires a green run
+# on the tagged commit; and a weekly run catches browser and runner drift.
 on:
+  push:
+    branches: [main]
   schedule:
-    - cron: "0 7 * * *"
+    - cron: "0 7 * * 1"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  netem-nightly:
+  netem-extended:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -73,7 +78,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: netem-nightly-perf-${{ matrix.profile }}
+          name: netem-extended-perf-${{ matrix.profile }}
           path: test-results/perf/**
           if-no-files-found: ignore
       - name: Tear down the network namespace
@@ -83,10 +88,10 @@ jobs:
   # WebKit's real DataChannel/ICE/OPFS behavior is closest to Safari's on
   # macOS, so this always builds and runs on macos-15 (never ubuntu-latest),
   # and Firefox/Chromium cells of the full matrix ride along here too since
-  # the runner is already paid for. WebKit starts nightly-only; browser-firefox
-  # (ci.yml) already gates PRs on Firefox plus the @pr-tagged engine-matrix
-  # cells. See docs/testing.md's "Engines" section for local validation,
-  # since this job can't be dispatched before this branch merges.
+  # the runner is already paid for. WebKit starts extended-checks only (after
+  # merge / weekly / pre-release); browser-firefox (ci.yml) already gates PRs
+  # on Firefox plus the @pr-tagged engine-matrix
+  # cells. See docs/testing.md's "Engines" section for local validation.
   engines:
     runs-on: macos-15
     timeout-minutes: 60
@@ -107,7 +112,7 @@ jobs:
 
   # N-2 previous-release compatibility: the protocol-compatibility job in
   # ci.yml only ever exercises N-1 (scripts/ci/previous-release.sh's default
-  # --nth 1); this nightly leg additionally exercises N-2, so a peer two
+  # --nth 1); this Extended checks leg additionally exercises N-2, so a peer two
   # releases back doesn't silently regress between whenever it stops being
   # "the previous release" and whenever someone happens to test it by hand.
   compat-n2:
@@ -151,9 +156,9 @@ jobs:
           SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
 
   # Full relay-only TURN matrix (all pairings incl. Firefox, the per-user
-  # quota case, and the consent-decline negative controls) — the nightly
-  # counterpart to ci.yml's PR-gated `relay` job. See docs/testing.md's TURN
-  # relay section.
+  # quota case, and the consent-decline negative controls) — the Extended
+  # checks counterpart to ci.yml's PR-gated `relay` job. See docs/testing.md's
+  # TURN relay section.
   relay-full:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -203,7 +208,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: relay-turn-stats-nightly
+          name: relay-turn-stats-extended
           path: test-results/relay/**
           if-no-files-found: ignore
       - name: Tear down the network namespace
@@ -212,47 +217,48 @@ jobs:
 
   # Runs regardless of which job(s) failed (fail-fast is off on the netem
   # matrix, and compat-n2/engines/relay-full are independent of it and each
-  # other), and only on failure — a green night is silent.
+  # other), and only on failure — a passing run stays silent.
   report-failure:
-    needs: [netem-nightly, compat-n2, engines, relay-full]
+    needs: [netem-extended, compat-n2, engines, relay-full]
     # A leg that hits timeout-minutes is reported as cancelled, not failed.
-    if: failure() || cancelled()
+    # Manual dispatches (e.g. validating a branch) report in the run only.
+    if: (failure() || cancelled()) && github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       issues: write
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Open or update the nightly-failure issue
+      - name: Open or update the extended-checks failure issue
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          NETEM_RESULT: ${{ needs.netem-nightly.result }}
+          NETEM_RESULT: ${{ needs.netem-extended.result }}
           COMPAT_N2_RESULT: ${{ needs.compat-n2.result }}
           ENGINES_RESULT: ${{ needs.engines.result }}
           RELAY_RESULT: ${{ needs.relay-full.result }}
         run: |
           set -euo pipefail
-          gh label create nightly --color b60205 \
-            --description "Nightly compatibility/benchmark failures" --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          gh label create extended-checks --color b60205 \
+            --description "Extended checks failures" --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
 
-          title="Nightly checks failed"
-          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --label nightly --state open \
+          title="Extended checks failed"
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --label extended-checks --state open \
             --search "in:title \"$title\"" --json number --jq '.[0].number')
 
           failed=""
-          if [[ "$NETEM_RESULT" != "success" ]]; then failed+="- netem-nightly: $NETEM_RESULT\n"; fi
+          if [[ "$NETEM_RESULT" != "success" ]]; then failed+="- netem-extended: $NETEM_RESULT\n"; fi
           if [[ "$COMPAT_N2_RESULT" != "success" ]]; then failed+="- compat-n2: $COMPAT_N2_RESULT\n"; fi
           if [[ "$ENGINES_RESULT" != "success" ]]; then failed+="- engines: $ENGINES_RESULT\n"; fi
           if [[ "$RELAY_RESULT" != "success" ]]; then failed+="- relay-full: $RELAY_RESULT\n"; fi
 
           note="Run: $RUN_URL (branch \`${GITHUB_REF_NAME}\`, commit \`${GITHUB_SHA:0:12}\`)."
           jobs=$(printf '%b' "$failed")
-          detail="See the job summary and artifacts on this run for details. netem: netem-nightly-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section). engines: the WebKit and full cross-engine matrix run on macos-15 (docs/testing.md's Engines section). relay-full: relay-only TURN transfers, per-session allocation accounting, quota and consent controls (relay-turn-stats-nightly artifact; docs/testing.md's TURN relay section)."
+          detail="See the job summary and artifacts on this run for details. netem: netem-extended-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section). engines: the WebKit and full cross-engine matrix run on macos-15 (docs/testing.md's Engines section). relay-full: relay-only TURN transfers, per-session allocation accounting, quota and consent controls (relay-turn-stats-extended artifact; docs/testing.md's TURN relay section)."
           body=$(printf '%s\n\nFailed job(s):\n%s\n%s\n' "$note" "$jobs" "$detail")
 
           if [[ -n "$existing" && "$existing" != "null" ]]; then
             gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label nightly --body "$body"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --label extended-checks --body "$body"
           fi

@@ -147,13 +147,13 @@ for (const [oldCLI,oldBrowser,oldProtocol] of [[false,false,3],[true,false,2],[f
   });
 }
 
-// ── Previous-release compatibility (resolved at CI/nightly time) ───────────
+// ── Previous-release compatibility (resolved at CI/Extended-checks time) ───
 //
 // Driven entirely by env vars plus testdata/release-capabilities.json, never
 // a hardcoded version: SP2P_TEST_PREVIOUS_BINARY (CLI), SP2P_TEST_PREVIOUS_WEB_DIR
 // (a built web/dist), SP2P_TEST_PREVIOUS_VERSION (its plain vX.Y.Z version,
 // without the "v"). ci.yml's protocol-compatibility job points these at the
-// resolved N-1 release; nightly.yml's compat-n2 job points them at N-2 — this
+// resolved N-1 release; extended.yml's compat-n2 job points them at N-2 — this
 // file doesn't know or care which. Unset any of the three and every test
 // below skips cleanly.
 //

@@ -8,7 +8,55 @@ permissions:
   contents: read
 
 jobs:
+  # Releases ship only commits whose Extended checks (extended.yml: shaped
+  # network, relay, engine matrix, N-2 compatibility) passed. Extended checks
+  # run on every push to main; wait for one still in progress.
+  extended-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Require a successful Extended checks run on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 7200))
+          while :; do
+            if (( SECONDS >= deadline )); then
+              echo "::error::Timed out waiting for Extended checks on ${SHA:0:12}"
+              exit 1
+            fi
+            if ! runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow extended.yml --commit "$SHA" \
+              --json status,conclusion --limit 20); then
+              echo "::warning::Listing Extended checks runs failed; retrying"
+              sleep 60
+              continue
+            fi
+            # The tag is usually pushed seconds after main, before the
+            # push-triggered run exists; give it time to be created.
+            if [[ $(jq length <<<"$runs") -eq 0 ]] && (( SECONDS < 900 )); then
+              echo "No Extended checks run on ${SHA:0:12} yet; waiting"
+              sleep 30
+              continue
+            fi
+            if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+              echo "Extended checks passed on ${SHA:0:12}"
+              exit 0
+            fi
+            if ! jq -e 'any(.[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              echo "::error::No successful Extended checks run on ${SHA:0:12}. Re-run the failed Extended checks run for this commit, or run 'gh workflow run extended.yml --ref ${GITHUB_REF_NAME}'; then re-run this job (it waits for a run in progress)."
+              exit 1
+            fi
+            echo "Extended checks still running on ${SHA:0:12}; waiting"
+            sleep 60
+          done
+
   release:
+    needs: extended-checks
     runs-on: ubuntu-latest
     environment: release
     outputs:
