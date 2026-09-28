@@ -89,8 +89,9 @@ type WebRTCConn struct {
 	closed    chan struct{}
 	closeOnce sync.Once
 	// pion's PeerConnection.Close returns immediately to a second caller
-	// while the first is still closing, so the process could exit before
-	// TURN allocations were released. pcCloseOnce makes every Close wait.
+	// while the first is still closing, and doesn't wait for the ICE agent to
+	// release TURN allocations, so the process could exit first.
+	// pcCloseOnce runs one GracefulClose and makes every Close wait for it.
 	pcCloseOnce sync.Once
 	pcCloseErr  error
 	// debugTag is TEMPORARY instrumentation (see debugPCLifecycle above).
@@ -616,7 +617,10 @@ func (c *WebRTCConn) Close() error {
 	if dc := c.dataChannel(); dc != nil {
 		dc.Close()
 	}
-	c.pcCloseOnce.Do(func() { c.pcCloseErr = c.pc.Close() })
+	// GracefulClose also waits for pion's internal goroutines, including the
+	// ICE agent closing relay candidates (which sends the TURN deallocation).
+	// Callers inside pion callbacks must use their own goroutine (go c.Close()).
+	c.pcCloseOnce.Do(func() { c.pcCloseErr = c.pc.GracefulClose() })
 	debugPC(c.debugTag, "Close() returned err=%v", c.pcCloseErr)
 	return c.pcCloseErr
 }
