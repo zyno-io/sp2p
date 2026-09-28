@@ -68,10 +68,11 @@ type WebRTCConn struct {
 	flowCond  *sync.Cond
 	closed    chan struct{}
 	closeOnce sync.Once
-	// pion's PeerConnection.Close returns immediately to a second caller
-	// while the first is still closing, and doesn't wait for the ICE agent to
-	// release TURN allocations, so the process could exit first.
-	// pcCloseOnce runs one GracefulClose and makes every Close wait for it.
+	// pion's PeerConnection.Close returns immediately to any second caller
+	// (including pion's own close when the peer shuts down) while the first
+	// close, which sends the TURN deallocations, is still running, so the
+	// process could exit first. pcCloseOnce runs one GracefulClose, which
+	// waits for any close already in progress, and makes every Close wait.
 	pcCloseOnce   sync.Once
 	pcCloseErr    error
 	deadlineMu    sync.Mutex
@@ -221,7 +222,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 		// Sender creates the data channel and offer.
 		dc, err := pc.CreateDataChannel(dataChannelLabel, nil)
 		if err != nil {
-			pc.Close()
+			conn.Close()
 			reportFailed(cfg.OnStatus, "WebRTC", err)
 			return nil, fmt.Errorf("creating data channel: %w", err)
 		}
@@ -230,12 +231,12 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 
 		offer, err := pc.CreateOffer(nil)
 		if err != nil {
-			pc.Close()
+			conn.Close()
 			reportFailed(cfg.OnStatus, "WebRTC", err)
 			return nil, fmt.Errorf("creating offer: %w", err)
 		}
 		if err := pc.SetLocalDescription(offer); err != nil {
-			pc.Close()
+			conn.Close()
 			reportFailed(cfg.OnStatus, "WebRTC", err)
 			return nil, fmt.Errorf("setting local description: %w", err)
 		}
@@ -245,7 +246,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 		select {
 		case <-gatherDone:
 		case <-ctx.Done():
-			pc.Close()
+			conn.Close()
 			return nil, ctx.Err()
 		}
 
@@ -256,7 +257,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 			SDP:  localDesc.SDP,
 			Type: localDesc.Type.String(),
 		}); err != nil {
-			pc.Close()
+			conn.Close()
 			reportFailed(cfg.OnStatus, "WebRTC", err)
 			return nil, fmt.Errorf("sending offer: %w", err)
 		}
@@ -275,7 +276,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 	// Pass dcReady so the receiver can also exit when the data channel opens
 	// directly, in case the peer's "connected" signal fails to arrive.
 	if err := processSignaling(ctx, sigClient, pc, cfg.IsSender, dcReady, cfg.OnLog); err != nil {
-		pc.Close()
+		conn.Close()
 		reportFailed(cfg.OnStatus, "WebRTC", err)
 		return nil, err
 	}
@@ -284,7 +285,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 	select {
 	case <-dcReady:
 	case <-ctx.Done():
-		pc.Close()
+		conn.Close()
 		return nil, ctx.Err()
 	}
 
@@ -587,9 +588,9 @@ func (c *WebRTCConn) Close() error {
 	if dc := c.dataChannel(); dc != nil {
 		dc.Close()
 	}
-	// GracefulClose also waits for pion's internal goroutines, including the
-	// ICE agent closing relay candidates (which sends the TURN deallocation).
-	// Callers inside pion callbacks must use their own goroutine (go c.Close()).
+	// GracefulClose waits for a close already in progress (and pion's other
+	// internal goroutines). Callers inside pion callbacks must use their own
+	// goroutine (go c.Close()).
 	c.pcCloseOnce.Do(func() { c.pcCloseErr = c.pc.GracefulClose() })
 	return c.pcCloseErr
 }

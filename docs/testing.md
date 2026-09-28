@@ -1041,13 +1041,14 @@ the underlying race isn't specific to the larger `relay-full` job).
   full default allocation lifetime. Instrumented CI runs showed the cause:
   the leaked lane's pion/turn client never sent its `Refresh(lifetime=0)`
   deallocation, and the TURN server never received one. pion's
-  `PeerConnection.Close` returns before the ICE agent has finished closing
-  its relay candidates (which is where the deallocation is sent), and it
-  also returns immediately to a second concurrent caller. The CLI exits
-  right after closing its lanes, so the last lane's deallocation could be
-  lost. `WebRTCConn.Close` (`internal/conn/webrtc.go`) now runs one
-  `GracefulClose`, which waits for pion's internal goroutines, and makes
-  every concurrent caller wait for it. Callers inside pion callbacks
+  `PeerConnection.Close` returns immediately to any second caller while
+  the first close, which closes the relay candidates and sends the
+  deallocations, is still running. That includes pion's own close when the
+  peer shuts down first. The CLI exits right after closing its lanes, so
+  the last lane's deallocation could be lost. `WebRTCConn.Close`
+  (`internal/conn/webrtc.go`) now runs one `GracefulClose`, which waits for
+  a close already in progress, and makes every concurrent caller wait for
+  it; setup-error paths close through it too. Callers inside pion callbacks
   already close from their own goroutine, as `GracefulClose` requires.
   After the fix, two consecutive CI runs of `cli to cli` repeated 12 times
   each passed 24/24.
