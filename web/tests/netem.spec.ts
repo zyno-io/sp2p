@@ -463,10 +463,10 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
   // Negative control: proves the rb sampler actually distinguishes hinted
   // from unhinted connections, rather than always reporting a large number.
   test("negative control: disabling the buffer hint keeps rb at the unhinted size", async ({ playwright, launchOptions, baseURL }) => {
-    // One lane moves ~0.3 MB/s at 150 ms RTT with 0.1% loss, so 8 MiB stays
-    // open for many sampling ticks and still finishes well inside the timeout.
+    // Only the socket buffers matter here, not completion: without the hint
+    // a transfer at high RTT can stall (the collapse the hint prevents), so
+    // sample once connected and stop. 8 MiB keeps the connection busy.
     const controlContents = randomBytes(8 * 1024 * 1024);
-    const controlHash = createHash("sha256").update(controlContents).digest("hex");
     // A fresh browser process (there's no "browserType" fixture; the
     // netem project only ever uses chromium), so sockets from earlier
     // tests can't count.
@@ -487,10 +487,9 @@ test.describe.serial("netem: realistic WAN transfer pairings", () => {
       await receiver.goto(`/r#${code}`);
       const sampling = startSampling([sender, receiver], browser);
       await receiver.locator(".confirm-btn").click();
-      await expect(sender.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
-      await expect(receiver.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
+      await expect(sender.locator(".step-p2p")).toContainText("P2P connected via WebRTC", { timeout: 60_000 });
+      await new Promise(resolve => setTimeout(resolve, 5000)); // several sampling ticks
       const { rbMax, sockets: socketCount } = await sampling.stop();
-      await verifyDisk(receiver, controlContents.length, controlHash);
 
       expect(socketCount).toBeGreaterThan(0);
       // An exact match against the unhinted size (131072) is too strict: a
