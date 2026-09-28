@@ -131,9 +131,6 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("testturn: listen %s: %w", cfg.ListenAddr, err)
 	}
-	if refreshDebugEnabled() {
-		conn = &refreshDebugConn{PacketConn: conn}
-	}
 
 	t := newTracker(cfg.UserQuota)
 	s := &Server{cfg: cfg, conn: conn, tracker: t}

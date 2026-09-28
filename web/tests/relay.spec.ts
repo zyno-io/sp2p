@@ -249,7 +249,6 @@ test.skip(!process.env.SP2P_RELAY_TEST, "set SP2P_RELAY_TEST=1 inside the relay-
 interface TurnHandle {
   snapshot(): TurnSnapshot;
   stop(): Promise<void>;
-  stderr(): string;
 }
 
 // Deliberately NOT the shared temporaryDirectory() helper: that helper's
@@ -275,7 +274,7 @@ async function startTurn(env: RelayEnv, quota: number): Promise<TurnHandle> {
     // proportionally to a short granted lifetime the same way, and 8s
     // wasn't enough for it. Confirmed on real CI: reverted. See
     // docs/testing.md's "Known rough edges" section.
-  ], { env: { ...process.env, SP2P_TESTTURN_SECRET: env.secret, SP2P_DEBUG_TURN_REFRESH: "1" } });
+  ], { env: { ...process.env, SP2P_TESTTURN_SECRET: env.secret } });
   child.stderr?.on("data", chunk => { stderr.push(chunk.toString()); });
   let earlyExitCode: number | null = null;
   child.once("exit", code => { earlyExitCode = code; });
@@ -298,9 +297,6 @@ async function startTurn(env: RelayEnv, quota: number): Promise<TurnHandle> {
   return {
     snapshot(): TurnSnapshot {
       return JSON.parse(readFileSync(statsPath, "utf8"));
-    },
-    stderr(): string {
-      return stderr.join("");
     },
     async stop(): Promise<void> {
       child.kill("SIGTERM");
@@ -500,9 +496,6 @@ function dumpLeakDiagnostics(
           }
         }
         if (hits === 0) console.log(`[leak-debug]     port ${rec.clientPort} never appeared in any ss snapshot`);
-        const refreshes = turn.stderr().split("\n").filter(line => line.includes(`port=${rec.clientPort} `));
-        console.log(`[leak-debug]     server refresh log for port ${rec.clientPort}: ${refreshes.length ? "" : "(none)"}`);
-        for (const line of refreshes) console.log(`[leak-debug]       ${line.trim()}`);
       }
     }
   }
@@ -597,7 +590,7 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
         srcPath,
       ];
       const child = spawn(relayEnv.cliBin, args, {
-        env: { ...process.env, XDG_CONFIG_HOME: xdg, ...(opts.debugLeak ? { SP2P_DEBUG_PC_LIFECYCLE: "1", PION_LOG_DEBUG: "turnc" } : {}) },
+        env: { ...process.env, XDG_CONFIG_HOME: xdg, ...(opts.debugLeak ? { SP2P_DEBUG_PC_LIFECYCLE: "1" } : {}) },
       });
       childProcesses.push(child);
       senderPid = child.pid;
@@ -622,7 +615,7 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
         "-output", receiverDestDir, code,
       ];
       const child = spawn(relayEnv.cliBin, args, {
-        env: { ...process.env, XDG_CONFIG_HOME: xdg, ...(opts.debugLeak ? { SP2P_DEBUG_PC_LIFECYCLE: "1", PION_LOG_DEBUG: "turnc" } : {}) },
+        env: { ...process.env, XDG_CONFIG_HOME: xdg, ...(opts.debugLeak ? { SP2P_DEBUG_PC_LIFECYCLE: "1" } : {}) },
       });
       childProcesses.push(child);
       receiverPid = child.pid;
