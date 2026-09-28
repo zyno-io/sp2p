@@ -55,7 +55,8 @@ quota case, and the consent negative controls). It runs:
 - weekly (Mondays 07:00 UTC), to catch browser and runner drift between
   merges;
 - on manual dispatch (`gh workflow run extended.yml --ref <branch>`), useful
-  for validating a branch before merge.
+  for validating a branch before merge, or `--ref <tag>` to produce a run on
+  a tagged commit after `main` has moved on.
 
 `report-failure` opens or updates a GitHub issue (label `extended-checks`,
 title "Extended checks failed") when any job fails or is cancelled, except on
@@ -158,7 +159,7 @@ tagged it becomes "the previous release" for CI, and the lookup fails closed
 for unlisted versions. Releases also require a green Extended checks run on
 the tagged commit: `release.yml`'s `extended-checks` job waits for one already
 in progress (up to ~2 hours) or refuses to publish without it — see
-[Extended checks](#extended-checks) below.
+[Extended checks](#extended-checks) above.
 
 ### Browser previous-release matrix
 

@@ -91,8 +91,7 @@ jobs:
   # the runner is already paid for. WebKit starts extended-checks only (after
   # merge / weekly / pre-release); browser-firefox (ci.yml) already gates PRs
   # on Firefox plus the @pr-tagged engine-matrix
-  # cells. See docs/testing.md's "Engines" section for local validation,
-  # since this job can't be dispatched before this branch merges.
+  # cells. See docs/testing.md's "Engines" section for local validation.
   engines:
     runs-on: macos-15
     timeout-minutes: 60
