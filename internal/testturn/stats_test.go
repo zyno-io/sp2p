@@ -14,10 +14,10 @@ import (
 
 func TestTracker_CreatedDeleted(t *testing.T) {
 	tr := newTracker(0)
-	tr.recordCreated("user-a", 1)
-	tr.recordCreated("user-a", 1)
-	tr.recordCreated("user-b", 1)
-	tr.recordDeleted("user-a", 1)
+	tr.recordCreated("user-a")
+	tr.recordCreated("user-a")
+	tr.recordCreated("user-b")
+	tr.recordDeleted("user-a")
 
 	snap := tr.snapshot(0)
 	if snap.Created != 3 || snap.Deleted != 1 || snap.Live != 2 || snap.PeakLive != 3 {
@@ -39,7 +39,7 @@ func TestTracker_CreatedDeleted(t *testing.T) {
 func TestTracker_UsersKeyedByHash_NeverRawID(t *testing.T) {
 	tr := newTracker(0)
 	const secretSessionID = "super-secret-session-id-should-never-appear-on-disk"
-	tr.recordCreated(secretSessionID, 1)
+	tr.recordCreated(secretSessionID)
 
 	snap := tr.snapshot(0)
 	data, err := json.Marshal(snap)
@@ -61,8 +61,8 @@ func TestTracker_UsersKeyedByHash_NeverRawID(t *testing.T) {
 
 func TestTracker_DeleteWithoutCreate_NeverGoesNegative(t *testing.T) {
 	tr := newTracker(0)
-	tr.recordDeleted("ghost", 1)
-	tr.recordDeleted("ghost", 1)
+	tr.recordDeleted("ghost")
+	tr.recordDeleted("ghost")
 
 	snap := tr.snapshot(0)
 	if snap.Anomalies != 2 {
@@ -73,9 +73,9 @@ func TestTracker_DeleteWithoutCreate_NeverGoesNegative(t *testing.T) {
 	}
 
 	// Now create one, delete it twice: the second delete is the anomaly.
-	tr.recordCreated("real", 1)
-	tr.recordDeleted("real", 1)
-	tr.recordDeleted("real", 1)
+	tr.recordCreated("real")
+	tr.recordDeleted("real")
+	tr.recordDeleted("real")
 	snap = tr.snapshot(0)
 	if snap.Anomalies != 3 {
 		t.Fatalf("expected 3 anomalies total, got %d", snap.Anomalies)
@@ -92,7 +92,7 @@ func TestTracker_QuotaBoundary(t *testing.T) {
 		if !tr.allow("u") {
 			t.Fatalf("allocation %d should be within quota 3", i+1)
 		}
-		tr.recordCreated("u", 1)
+		tr.recordCreated("u")
 	}
 	if tr.allow("u") {
 		t.Fatal("4th allocation should be rejected at quota 3")
@@ -108,11 +108,11 @@ func TestTracker_QuotaBoundary(t *testing.T) {
 	}
 
 	// Freeing one slot allows exactly one more.
-	tr.recordDeleted("u", 1)
+	tr.recordDeleted("u")
 	if !tr.allow("u") {
 		t.Fatal("allocation should succeed again after freeing a slot")
 	}
-	tr.recordCreated("u", 1)
+	tr.recordCreated("u")
 	if tr.allow("u") {
 		t.Fatal("should be back at quota after re-filling the freed slot")
 	}
@@ -124,7 +124,7 @@ func TestTracker_ZeroQuotaNeverRejects(t *testing.T) {
 		if !tr.allow("u") {
 			t.Fatalf("quota 0 must never reject (iteration %d)", i)
 		}
-		tr.recordCreated("u", 1)
+		tr.recordCreated("u")
 	}
 }
 
@@ -148,8 +148,8 @@ func TestTracker_Concurrency(t *testing.T) {
 			defer wg.Done()
 			user := userIDForGoroutine(g, users)
 			for i := 0; i < perGoroutine; i++ {
-				tr.recordCreated(user, 1)
-				tr.recordDeleted(user, 1)
+				tr.recordCreated(user)
+				tr.recordDeleted(user)
 			}
 		}(g)
 	}
@@ -265,7 +265,7 @@ func TestStatsWriter_CoalescesAndFlushReflectsLatest(t *testing.T) {
 	defer w.close()
 
 	for i := 0; i < 100; i++ {
-		tr.recordCreated("u", 1)
+		tr.recordCreated("u")
 	}
 	w.flush()
 
@@ -282,63 +282,12 @@ func TestStatsWriter_CoalescesAndFlushReflectsLatest(t *testing.T) {
 	}
 }
 
-// TestTracker_AllocationRecords_LeakDebugging exercises the per-allocation
-// client-port/timestamp records (see AllocationRecord) added for CI leak
-// investigation: a still-live allocation must be identifiable by client
-// port, and a deleted one must show both a create and a delete time.
-func TestTracker_AllocationRecords_LeakDebugging(t *testing.T) {
-	tr := newTracker(0)
-	tr.recordCreated("session-1", 5000)
-	tr.recordCreated("session-1", 5001)
-	tr.recordDeleted("session-1", 5000)
-
-	snap := tr.snapshot(0)
-	u := snap.Users[userKey("session-1")]
-	if len(u.Allocations) != 2 {
-		t.Fatalf("expected 2 allocation records, got %d: %+v", len(u.Allocations), u.Allocations)
-	}
-	byPort := map[int]AllocationRecord{}
-	for _, rec := range u.Allocations {
-		byPort[rec.ClientPort] = rec
-	}
-	deleted, ok := byPort[5000]
-	if !ok {
-		t.Fatalf("missing record for port 5000: %+v", u.Allocations)
-	}
-	if deleted.CreatedAtMs == 0 || deleted.DeletedAtMs == 0 || deleted.DeletedAtMs < deleted.CreatedAtMs {
-		t.Fatalf("port 5000 (deleted) record looks wrong: %+v", deleted)
-	}
-	stillLive, ok := byPort[5001]
-	if !ok {
-		t.Fatalf("missing record for port 5001: %+v", u.Allocations)
-	}
-	if stillLive.CreatedAtMs == 0 || stillLive.DeletedAtMs != 0 {
-		t.Fatalf("port 5001 (still live) record looks wrong: %+v", stillLive)
-	}
-
-	// Records are sorted by creation order.
-	if u.Allocations[0].ClientPort != 5000 || u.Allocations[1].ClientPort != 5001 {
-		t.Fatalf("expected creation order [5000, 5001], got %+v", u.Allocations)
-	}
-
-	// A delete for an unknown port on a known user still counts the
-	// deletion but must not retroactively touch any other record.
-	tr.recordDeleted("session-1", 9999)
-	snap = tr.snapshot(0)
-	u = snap.Users[userKey("session-1")]
-	for _, rec := range u.Allocations {
-		if rec.ClientPort == 5001 && rec.DeletedAtMs != 0 {
-			t.Fatalf("an unrelated delete must not mark port 5001 deleted: %+v", rec)
-		}
-	}
-}
-
 func TestStatsWriter_DisabledWhenPathEmpty(t *testing.T) {
 	tr := newTracker(0)
 	w := newStatsWriter("", func() Snapshot { return tr.snapshot(0) })
 	tr.writer = w
 	w.start() // must not spawn a goroutine that blocks close()
-	tr.recordCreated("u", 1)
+	tr.recordCreated("u")
 	w.flush()
 	w.close()
 	// No panic, no hang, and nothing written -- there is no path to check.

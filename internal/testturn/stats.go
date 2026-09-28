@@ -11,10 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 // SnapshotVersion is bumped whenever the Snapshot JSON shape changes in a
@@ -32,22 +30,6 @@ type UserStats struct {
 	QuotaRejected         uint64 `json:"quotaRejected"`
 	RelayedBytesFromPeers uint64 `json:"relayedBytesFromPeers"`
 	RelayedBytesToPeers   uint64 `json:"relayedBytesToPeers"`
-	// Allocations is a leak-debugging aid: one record per allocation this
-	// user has ever made, in creation order. Numbers only -- the client UDP
-	// port (unique per lane/attempt on this single test host, never a
-	// secret) plus creation/deletion timestamps -- so a test can correlate
-	// a still-live allocation back to the specific local process/socket
-	// that owns it (e.g. via `ss -uanp` inside the netns) without needing
-	// any session identifier. DeletedAtMs is 0 while still live.
-	Allocations []AllocationRecord `json:"allocations,omitempty"`
-}
-
-// AllocationRecord is one allocation's client-side identity and lifecycle,
-// for leak debugging only (see UserStats.Allocations).
-type AllocationRecord struct {
-	ClientPort  int   `json:"clientPort"`
-	CreatedAtMs int64 `json:"createdAtMs"`
-	DeletedAtMs int64 `json:"deletedAtMs,omitempty"`
 }
 
 // Snapshot is the full stats.json document written by Server. TURN
@@ -129,10 +111,6 @@ type userState struct {
 	live, peakLive   int64
 	quotaRejected    uint64
 	bytes            relayBytes
-	// allocs is a leak-debugging aid keyed by client UDP port (see
-	// AllocationRecord) -- unique per lane/attempt on this single test
-	// host for the short lifetime of one test.
-	allocs map[int]*AllocationRecord
 }
 
 // tracker holds live TURN allocation accounting, guarded by mu. allow and
@@ -197,10 +175,9 @@ func (t *tracker) allow(userID string) bool {
 	return true
 }
 
-// recordCreated records a new allocation for userID, keyed by its client
-// UDP port (see AllocationRecord). Called from
+// recordCreated records a new allocation for userID. Called from
 // turn.EventHandler.OnAllocationCreated.
-func (t *tracker) recordCreated(userID string, clientPort int) {
+func (t *tracker) recordCreated(userID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	u := t.userLocked(userID)
@@ -209,10 +186,6 @@ func (t *tracker) recordCreated(userID string, clientPort int) {
 	if u.live > u.peakLive {
 		u.peakLive = u.live
 	}
-	if u.allocs == nil {
-		u.allocs = make(map[int]*AllocationRecord)
-	}
-	u.allocs[clientPort] = &AllocationRecord{ClientPort: clientPort, CreatedAtMs: time.Now().UnixMilli()}
 	t.created++
 	t.live++
 	if t.live > t.peakLive {
@@ -221,13 +194,12 @@ func (t *tracker) recordCreated(userID string, clientPort int) {
 	t.poke()
 }
 
-// recordDeleted records an allocation's removal for userID, keyed by the
-// same client UDP port passed to recordCreated. Called from
+// recordDeleted records an allocation's removal for userID. Called from
 // turn.EventHandler.OnAllocationDeleted. A delete with no matching create
 // (userID unknown, or already at zero live) is recorded as an anomaly and
 // never drives Live negative -- this should not happen given the single
 // read-loop invariant, but stats.json must stay trustworthy even if it did.
-func (t *tracker) recordDeleted(userID string, clientPort int) {
+func (t *tracker) recordDeleted(userID string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	u := t.users[userID]
@@ -238,9 +210,6 @@ func (t *tracker) recordDeleted(userID string, clientPort int) {
 	}
 	u.deleted++
 	u.live--
-	if rec, ok := u.allocs[clientPort]; ok && rec.DeletedAtMs == 0 {
-		rec.DeletedAtMs = time.Now().UnixMilli()
-	}
 	t.deleted++
 	t.live--
 	t.poke()
@@ -298,14 +267,6 @@ func (t *tracker) snapshot(pionLive int) Snapshot {
 	defer t.mu.Unlock()
 	users := make(map[string]UserStats, len(t.users))
 	for id, u := range t.users {
-		var allocs []AllocationRecord
-		if len(u.allocs) > 0 {
-			allocs = make([]AllocationRecord, 0, len(u.allocs))
-			for _, rec := range u.allocs {
-				allocs = append(allocs, *rec)
-			}
-			sort.Slice(allocs, func(i, j int) bool { return allocs[i].CreatedAtMs < allocs[j].CreatedAtMs })
-		}
 		users[userKey(id)] = UserStats{
 			Created:               u.created,
 			Deleted:               u.deleted,
@@ -314,7 +275,6 @@ func (t *tracker) snapshot(pionLive int) Snapshot {
 			QuotaRejected:         u.quotaRejected,
 			RelayedBytesFromPeers: u.bytes.fromPeers.Load(),
 			RelayedBytesToPeers:   u.bytes.toPeers.Load(),
-			Allocations:           allocs,
 		}
 	}
 	var fromPeers, toPeers uint64

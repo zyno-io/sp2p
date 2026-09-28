@@ -6,17 +6,10 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
 )
-
-// laneDebugCounter is TEMPORARY debug instrumentation (see debugPCLifecycle
-// in webrtc.go): a simple, process-local unique instance number so this
-// process's own lanes can be told apart in its debug log, since no lane ID
-// is otherwise threaded into NewLane. Remove alongside debugPCLifecycle.
-var laneDebugCounter atomic.Int64
 
 // WebRTCLane is an untrusted candidate until the caller authenticates it with
 // session- and lane-specific keys. Its SDP is exchanged over the authenticated
@@ -40,17 +33,9 @@ func (primary *WebRTCConn) NewLane(sender bool) (*WebRTCLane, error) {
 	}
 	c := &WebRTCConn{pc: pc, readBuf: make(chan []byte, 256), closed: make(chan struct{}), receiveBudget: primary.receiveBudget, browserPeer: primary.browserPeer}
 	c.flowCond = sync.NewCond(&c.flowMu)
-	c.debugTag = fmt.Sprintf("lane#%d sender=%v", laneDebugCounter.Add(1), sender)
-	debugPC(c.debugTag, "created")
-	pc.OnICECandidate(func(cand *webrtc.ICECandidate) {
-		if cand != nil && cand.Typ == webrtc.ICECandidateTypeHost {
-			debugPC(c.debugTag, "local host candidate port=%d", cand.Port)
-		}
-	})
 	lane := &WebRTCLane{Conn: c, ready: make(chan struct{})}
 	var once sync.Once
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
-		debugPC(c.debugTag, "state=%s", state.String())
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			go c.Close()
 		}
