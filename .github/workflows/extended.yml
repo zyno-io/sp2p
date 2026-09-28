@@ -88,8 +88,9 @@ jobs:
   # WebKit's real DataChannel/ICE/OPFS behavior is closest to Safari's on
   # macOS, so this always builds and runs on macos-15 (never ubuntu-latest),
   # and Firefox/Chromium cells of the full matrix ride along here too since
-  # the runner is already paid for. WebKit starts nightly-only; browser-firefox
-  # (ci.yml) already gates PRs on Firefox plus the @pr-tagged engine-matrix
+  # the runner is already paid for. WebKit starts extended-checks only (after
+  # merge / weekly / pre-release); browser-firefox (ci.yml) already gates PRs
+  # on Firefox plus the @pr-tagged engine-matrix
   # cells. See docs/testing.md's "Engines" section for local validation,
   # since this job can't be dispatched before this branch merges.
   engines:
@@ -112,7 +113,7 @@ jobs:
 
   # N-2 previous-release compatibility: the protocol-compatibility job in
   # ci.yml only ever exercises N-1 (scripts/ci/previous-release.sh's default
-  # --nth 1); this nightly leg additionally exercises N-2, so a peer two
+  # --nth 1); this Extended checks leg additionally exercises N-2, so a peer two
   # releases back doesn't silently regress between whenever it stops being
   # "the previous release" and whenever someone happens to test it by hand.
   compat-n2:
@@ -156,9 +157,9 @@ jobs:
           SP2P_TEST_PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
 
   # Full relay-only TURN matrix (all pairings incl. Firefox, the per-user
-  # quota case, and the consent-decline negative controls) — the nightly
-  # counterpart to ci.yml's PR-gated `relay` job. See docs/testing.md's TURN
-  # relay section.
+  # quota case, and the consent-decline negative controls) — the Extended
+  # checks counterpart to ci.yml's PR-gated `relay` job. See docs/testing.md's
+  # TURN relay section.
   relay-full:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -217,7 +218,7 @@ jobs:
 
   # Runs regardless of which job(s) failed (fail-fast is off on the netem
   # matrix, and compat-n2/engines/relay-full are independent of it and each
-  # other), and only on failure — a green night is silent.
+  # other), and only on failure — a passing run stays silent.
   report-failure:
     needs: [netem-extended, compat-n2, engines, relay-full]
     # A leg that hits timeout-minutes is reported as cancelled, not failed.

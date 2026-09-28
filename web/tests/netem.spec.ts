@@ -44,7 +44,7 @@ const FLOORS: Record<string, number> =
   (JSON.parse(readFileSync(join(__dirname, "perf-floors.json"), "utf8")) as Record<string, Record<string, number>>)[PROFILE] ?? {};
 // wan500 roughly triples per-lane recovery time; allow for it.
 const TRANSFER_TIMEOUT_MS = PROFILE === "wan500" ? 600_000 : 180_000;
-// Nightly repeats gate on medians in perf-summary.mjs instead of per repeat.
+// Extended checks' repeats gate on medians in perf-summary.mjs instead of per repeat.
 const GATE_PER_TEST = process.env.SP2P_NETEM_GATE_PER_TEST !== "0";
 
 function mbps(bytes: number, durationMs: number): number {

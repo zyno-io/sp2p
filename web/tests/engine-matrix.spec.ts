@@ -22,8 +22,9 @@
 // Chromium↔Firefox (both directions) and CLI↔Firefox (both directions) are
 // tagged @pr and gate PRs cheaply (ci.yml's browser-firefox job, `--project
 // engines --grep @pr`). Every other cell — anything touching WebKit, plus
-// CLI↔Chromium — is nightly-only (nightly.yml's engines job, macos-15)
-// until WebKit is promoted to gate PRs too.
+// CLI↔Chromium — is extended-checks only (extended.yml's engines job,
+// macos-15, running after each merge / weekly / pre-release) until WebKit
+// is promoted to gate PRs too.
 
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";

@@ -64,8 +64,8 @@ export default defineConfig({
       // No retries: the occasional lane shortfall below is environment-
       // specific (this multi-homed dev machine), not expected on CI's
       // single-NIC runners — see docs/testing.md's Engines section. If it
-      // shows up for real on the macos-15 nightly job, handle it there
-      // instead of absorbing it here.
+      // shows up for real on the macos-15 job in Extended checks, handle it
+      // there instead of absorbing it here.
     },
     // engine-matrix.spec.ts's tests never request the `browser`/`page`
     // fixtures — every engine involved is launched explicitly through the
