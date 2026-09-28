@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 
 - `cmd/sp2p/` and `cmd/sp2p-server/` contain CLI and signaling-server entrypoints.
-- `internal/` holds flat Go packages: `flow` orchestrates transfers, `conn` manages transports, and `crypto`, `transfer`, `archive`, and `server` implement core behavior.
+- `internal/` holds flat Go packages: `flow` orchestrates transfers, `conn` manages transports, and `crypto`, `transfer`, `archive`, and `server` implement core behavior. One deliberate exception: `internal/testturn/testturnd/` is a small CI-only TURN server binary nested under the only library (`internal/testturn`) it wraps, since it is built directly by CI workflows and never by the Makefile or `.goreleaser.yaml` — see `docs/testing.md`'s TURN relay section.
 - `web/src/` contains vanilla TypeScript; HTML/CSS assets live in `web/`. Generated `web/dist/` assets are embedded in the server.
 - Go tests accompany packages; integration tests live in `internal/`, Playwright tests in `web/tests/`, and documentation in `docs/` and `man/`.
 
@@ -34,5 +34,7 @@ Use short, descriptive imperative subjects; history includes optional prefixes s
 ## Security & Agent Instructions
 
 Never log transfer codes or commit credentials. Follow [SECURITY.md](SECURITY.md) for vulnerability reports. Preserve negotiated v2 compatibility and v3 authentication guarantees.
+
+Never run, dispatch, or re-run the Publish Packages workflow (`.github/workflows/publish-packages.yml`). Publishing to Homebrew, Scoop, AUR, Chocolatey, and WinGet is always a manual maintainer action. Agents may change that workflow in a pull request. When a release is cut, stop once its GitHub Release is published and tell the maintainer it is ready to publish.
 
 During code review, do not run tests unless you previously wrote code needing verification. Validate documentation non-visually; use a browser or visual inspection only when explicitly requested.

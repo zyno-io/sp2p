@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Manage the "sp2p" Linux network namespace used by the netem CI job (see
-# docs/testing.md). The namespace contains only `lo` and a `dummy0` at
+# Manage the "sp2p" Linux network namespace used by the netem and relay CI
+# jobs (see docs/testing.md). The namespace contains only `lo` and a `dummy0` at
 # 10.99.0.1/24 — no route to the internet, so WebRTC ICE inside it is
 # deterministic (host candidates only). `dummy0` exists so pion/Chromium have
 # a non-loopback local address to put in host candidates; because the peer's
@@ -110,8 +110,8 @@ cmd_exec() {
   local var
   for var in PLAYWRIGHT_BROWSERS_PATH GOCACHE GOPATH GOMODCACHE GOFLAGS \
              npm_config_cache CI SP2P_NETEM_PROFILE SP2P_NETEM_GATE_PER_TEST SP2P_PW_CLI_BIN \
-             SP2P_PW_SERVER_BIN SP2P_PW_SKIP_WEB_BUILD GITHUB_STEP_SUMMARY \
-             GITHUB_ENV GITHUB_OUTPUT GITHUB_WORKSPACE RUNNER_TEMP TMPDIR; do
+             SP2P_PW_SERVER_BIN SP2P_PW_SKIP_WEB_BUILD SP2P_RELAY_TEST SP2P_PW_TESTTURND_BIN \
+             GITHUB_STEP_SUMMARY GITHUB_ENV GITHUB_OUTPUT GITHUB_WORKSPACE RUNNER_TEMP TMPDIR; do
     if [[ -n "${!var:-}" ]]; then
       preserved_env+=("$var=${!var}")
     fi

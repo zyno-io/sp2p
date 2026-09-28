@@ -9,7 +9,7 @@
 // path), and a share-code chooser.
 
 import { execSync, spawn } from "node:child_process";
-import { writeFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { writeFileSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,7 +31,12 @@ export const isolatedServerTest = base.extend<{}, { isolatedServer: string }>({
     const port = (listener.address() as net.AddressInfo).port;
     await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
     const url = `http://127.0.0.1:${port}`;
-    const server = spawn(join(state.tmpDir, "sp2p-server"), ["-addr", `127.0.0.1:${port}`, "-base-url", url], { stdio: "ignore" });
+    // Prefer a prebuilt binary (SP2P_PW_SERVER_BIN case, recorded by
+    // global-setup.ts as state.serverBin) over the tmpDir path global-setup
+    // builds into by default — using the tmpDir path unconditionally broke
+    // when the server binary was actually prebuilt elsewhere.
+    const serverBin = state.serverBin ?? join(state.tmpDir, "sp2p-server");
+    const server = spawn(serverBin, ["-addr", `127.0.0.1:${port}`, "-base-url", url], { stdio: "ignore" });
     const exited = new Promise<void>(resolve => { server.once("exit", () => resolve()); server.once("error", () => resolve()); });
     try {
       await expect.poll(async () => {
@@ -126,10 +131,25 @@ export interface CLIWatch {
   // "connected" — lets a test that runs in transport "auto" record which
   // one the CLI actually picked instead of assuming it.
   transports: string[];
+  // Resolves to the "response_file" path from the first "relay_required"
+  // event (see internal/cli/machine.go's promptRelay) — a test awaits this
+  // via answerRelayPrompt below rather than assuming a prompt happens.
+  // Rejects if the process exits before a relay prompt ever occurs.
+  relayRequired: Promise<string>;
+  // Every response ("allow"/"deny") this CLIWatch has actually had written
+  // for it via answerRelayPrompt, in call order.
+  relayResponses: string[];
+  // Every "result" event seen (internal/cli/machine.go's machineReporter.finish)
+  // — outcome plus, on failure, {code, message} — for asserting the exact
+  // terminal outcome of a relay consent/denial flow.
+  results: { outcome: string; error?: { code: string; message: string } }[];
   // Sanitized event log for dump-on-failure diagnostics (see
   // trackCLIForDiagnostics/flushDiagnostics below): every parsed event's
   // "event" field plus non-sensitive fields — the "session" event's "code"
-  // field is dropped, never buffered here in the first place.
+  // field is dropped, never buffered here in the first place. "log" events
+  // (-v verbose output, which can include full SDP blobs) are never
+  // buffered here at all — they must never reach a CI log via
+  // flushDiagnostics.
   eventLog: string[];
   // Raw stderr chunks. -format json always keeps the human "sp2p receive
   // <code>" announcement (internal/cli/progress.go) off stderr — that's
@@ -139,18 +159,25 @@ export interface CLIWatch {
 }
 
 // Watches a CLI child process's JSON stdout for its session code, any
-// parallel_streams events (the lane count it negotiated), and the connection
-// method(s) it reports as connected.
+// parallel_streams events (the lane count it negotiated), the connection
+// method(s) it reports as connected, and (for relay tests) its relay-consent
+// prompt and terminal result.
 export function watchCLI(child: ChildProcess): CLIWatch {
   let pending = "";
   const counts: number[] = [];
   const transports: string[] = [];
+  const relayResponses: string[] = [];
+  const results: { outcome: string; error?: { code: string; message: string } }[] = [];
   const eventLog: string[] = [];
   const stderr: string[] = [];
   let resolveCode!: (code: string) => void;
   let rejectCode!: (error: Error) => void;
   const code = new Promise<string>((resolve, reject) => { resolveCode = resolve; rejectCode = reject; });
   void code.catch(() => {});
+  let resolveRelayRequired!: (path: string) => void;
+  let rejectRelayRequired!: (error: Error) => void;
+  const relayRequired = new Promise<string>((resolve, reject) => { resolveRelayRequired = resolve; rejectRelayRequired = reject; });
+  void relayRequired.catch(() => {});
   child.stdout?.on("data", bytes => {
     pending += bytes.toString();
     for (;;) {
@@ -163,16 +190,40 @@ export function watchCLI(child: ChildProcess): CLIWatch {
       if (event.event === "connection" && event.connection?.state === "connected") {
         transports.push(event.connection.method);
       }
+      if (event.event === "relay_required" && event.response_file) resolveRelayRequired(event.response_file);
+      if (event.event === "result") {
+        const result: { outcome: string; error?: { code: string; message: string } } = { outcome: event.outcome };
+        if (event.error) result.error = { code: event.error.code, message: event.error.message };
+        results.push(result);
+      }
+      if (event.event === "log") continue; // never buffer -v output (may include SDP)
       const { code: _omitted, ...safe } = event;
       eventLog.push(JSON.stringify(safe));
     }
   });
   child.stderr?.on("data", bytes => { stderr.push(bytes.toString()); });
   const exited = new Promise<number | null>((resolve, reject) => {
-    child.once("error", error => { reject(error); rejectCode(error); });
-    child.once("exit", status => { resolve(status); rejectCode(new Error("CLI exited before session creation")); });
+    child.once("error", error => { reject(error); rejectCode(error); rejectRelayRequired(error); });
+    child.once("exit", status => {
+      resolve(status);
+      rejectCode(new Error("CLI exited before session creation"));
+      rejectRelayRequired(new Error("CLI exited before a relay prompt occurred"));
+    });
   });
-  return { code, exited, counts, transports, eventLog, stderr };
+  return { code, exited, counts, transports, relayRequired, relayResponses, results, eventLog, stderr };
+}
+
+// Answers a CLI relay-consent prompt (see watchCLI's relayRequired above),
+// writing the response atomically: the CLI polls the response file every
+// 100ms (internal/cli/machine.go's promptRelay), so writing to a sibling
+// path first and renaming onto the real path ensures it never observes a
+// half-written response.
+export async function answerRelayPrompt(cli: CLIWatch, response: "allow" | "deny"): Promise<void> {
+  const path = await cli.relayRequired;
+  const answerPath = `${path}.answer`;
+  writeFileSync(answerPath, response, { mode: 0o600 });
+  renameSync(answerPath, path);
+  cli.relayResponses.push(response);
 }
 
 // ── CLI failure diagnostics (see trackForDiagnostics above) ────────────────

@@ -27,7 +27,10 @@ export default defineConfig({
       // engine-matrix.spec.ts likewise has its own "engines" project below
       // (it launches every engine itself via the `playwright` fixture, so it
       // does not belong to any single-browserName project's enumeration).
-      testIgnore: [/netem\.spec\.ts/, /engine-matrix\.spec\.ts/],
+      // relay.spec.ts likewise has its own "relay" project below (env-gated
+      // on SP2P_RELAY_TEST, needs the firewalled netns, and also launches
+      // every engine itself via the `playwright` fixture).
+      testIgnore: [/netem\.spec\.ts/, /engine-matrix\.spec\.ts/, /relay\.spec\.ts/],
     },
     // Firefox and WebKit only run the browser-facing interop specs that
     // generalize across engines — not Node-only specs (parallel.spec.ts,
@@ -82,6 +85,22 @@ export default defineConfig({
         // (share URLs and signaling frames) in a public artifact.
         trace: "off",
         screenshot: "off",
+      },
+    },
+    // relay.spec.ts's tests never request the `browser`/`page` fixtures —
+    // every engine involved is launched explicitly through the `playwright`
+    // fixture — so this project's own browserName is unused; it exists only
+    // to scope the project's test enumeration and timeout/trace settings.
+    {
+      name: "relay",
+      testMatch: /relay\.spec\.ts/,
+      timeout: 240_000,
+      use: {
+        // Traces/screenshots/video would capture transfer codes and TURN
+        // credentials in a public artifact — never collect them for this suite.
+        trace: "off",
+        screenshot: "off",
+        video: "off",
       },
     },
   ],

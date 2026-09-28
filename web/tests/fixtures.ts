@@ -6,6 +6,10 @@ interface ServerState {
   pid: number;
   tmpDir: string;
   cliBin: string;
+  // Optional: older/other state files may not have this field. When
+  // present (see global-setup.ts), it's the prebuilt/built sp2p-server
+  // binary path — prefer it over deriving one from tmpDir.
+  serverBin?: string;
   port: number;
 }
 

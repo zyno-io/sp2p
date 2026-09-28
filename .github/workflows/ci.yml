@@ -58,7 +58,7 @@ jobs:
       - name: Check legacy and mixed-version rsync transfers
         run: go test ./internal -run '^TestStreamCLI$/rsync' -count=1 -timeout=6m
       - run: go vet ./...
-      - run: go test -race ./internal/crypto ./internal/transfer ./internal/flow ./internal/conn ./internal/server ./internal/archive ./internal/fileutil ./internal/peer ./internal/stream ./internal/tunnel ./internal/rsync ./internal/cli
+      - run: go test -race ./internal/crypto ./internal/transfer ./internal/flow ./internal/conn ./internal/server ./internal/archive ./internal/fileutil ./internal/peer ./internal/stream ./internal/tunnel ./internal/rsync ./internal/cli ./internal/testturn
 
   macos-rsync:
     runs-on: macos-15
@@ -267,6 +267,65 @@ jobs:
         with:
           name: netem-perf
           path: test-results/perf/**
+          if-no-files-found: ignore
+      - name: Tear down the network namespace
+        if: always()
+        run: sudo scripts/ci/netns.sh down
+
+  # Shadow period: intentionally not in build.needs and not a required check
+  # yet, same as netem above. See docs/testing.md's TURN relay section for
+  # the design and how to read its results.
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SP2P_RELAY_TEST: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci
+      - run: make build-web
+      - name: Build CLI, server, and test-TURN binaries
+        run: |
+          go build -o bin/sp2p ./cmd/sp2p
+          go build -o bin/sp2p-server ./cmd/sp2p-server
+          go build -o bin/testturnd ./internal/testturn/testturnd
+      - run: cd web && npx playwright install --with-deps chromium
+      - name: Ensure ethtool and iptables are available
+        run: command -v ethtool && command -v iptables || (sudo apt-get update && sudo apt-get install -y ethtool iptables)
+      - name: Create the sp2p network namespace
+        run: sudo scripts/ci/netns.sh up
+      - name: Apply the relay-only firewall
+        run: sudo scripts/ci/relay-firewall.sh apply
+      - name: Preflight — hard-fail unless the relay-only firewall is in place
+        run: sudo scripts/ci/relay-firewall.sh verify
+      - name: Run the relay suite (PR subset) inside the namespace
+        run: |
+          cd web
+          "$GITHUB_WORKSPACE/scripts/ci/netns.sh" exec -- npx playwright test --project=relay --grep @pr
+        env:
+          SP2P_PW_SKIP_WEB_BUILD: "1"
+          SP2P_PW_CLI_BIN: ${{ github.workspace }}/bin/sp2p
+          SP2P_PW_SERVER_BIN: ${{ github.workspace }}/bin/sp2p-server
+          SP2P_PW_TESTTURND_BIN: ${{ github.workspace }}/bin/testturnd
+      - name: Firewall counters (post-run, for the job log)
+        if: always()
+        run: sudo scripts/ci/relay-firewall.sh stats || true
+      - name: Relay summary (fails on missing pairings)
+        if: always()
+        run: node web/tests/relay-summary.mjs --gate --expect pr
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: relay-turn-stats
+          path: test-results/relay/**
           if-no-files-found: ignore
       - name: Tear down the network namespace
         if: always()
