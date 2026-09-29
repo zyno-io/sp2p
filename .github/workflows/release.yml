@@ -64,6 +64,7 @@ jobs:
       clean_tag: ${{ steps.parse.outputs.clean_tag }}
       clean_version: ${{ steps.parse.outputs.clean_version }}
       scope: ${{ steps.parse.outputs.scope }}
+      plain_version: ${{ steps.parse.outputs.plain_version }}
       has_server: ${{ steps.parse.outputs.has_server }}
       has_cli: ${{ steps.parse.outputs.has_cli }}
       has_linux: ${{ steps.parse.outputs.has_linux }}
@@ -113,6 +114,8 @@ jobs:
           echo "clean_tag=$CLEAN_TAG" >> "$GITHUB_OUTPUT"
           echo "clean_version=$CLEAN_VERSION" >> "$GITHUB_OUTPUT"
           echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          if [[ "$CLEAN_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then PLAIN=true; else PLAIN=false; fi
+          echo "plain_version=$PLAIN" >> "$GITHUB_OUTPUT"
           echo "has_server=$HAS_SERVER" >> "$GITHUB_OUTPUT"
           echo "has_cli=$HAS_CLI" >> "$GITHUB_OUTPUT"
           echo "has_linux=$HAS_LINUX" >> "$GITHUB_OUTPUT"
@@ -436,7 +439,9 @@ jobs:
   # CLI-only tag never deploys anything for this to check.
   smoke:
     needs: [release, publish-release]
-    if: needs.release.outputs.scope == 'all'
+    # smoke-prod.mjs only accepts plain vX.Y.Z tags; skip anything else
+    # (e.g. a -rc suffix) instead of failing a published release.
+    if: needs.release.outputs.scope == 'all' && needs.release.outputs.plain_version == 'true'
     permissions:
       contents: read
     uses: ./.github/workflows/smoke-production.yml

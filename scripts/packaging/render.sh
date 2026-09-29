@@ -234,6 +234,8 @@ render_chocolatey() {
   </metadata>
 </package>
 NUSPEC
+  # LF line endings (the pre-render.sh pwsh Set-Content wrote CRLF);
+  # PowerShell treats both the same.
   cat >"$OUTDIR/tools/chocolateyInstall.ps1" <<INSTALL
 \$ErrorActionPreference = 'Stop'
 \$toolsDir = Split-Path -Parent \$MyInvocation.MyCommand.Definition

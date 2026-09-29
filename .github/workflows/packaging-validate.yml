@@ -53,7 +53,10 @@ env:
 
 jobs:
   resolve:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # A Release run can fail after its release is already published (e.g. the
+    # post-deploy smoke job), so a non-success run still gets validated when
+    # its publish-release job succeeded; the resolve step checks that.
+    if: github.event_name != 'workflow_run' || contains(fromJSON('["success","failure"]'), github.event.workflow_run.conclusion)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -72,6 +75,8 @@ jobs:
           RUN_EVENT: ${{ github.event.workflow_run.event }}
           RUN_TAG: ${{ github.event.workflow_run.head_branch }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
@@ -91,6 +96,11 @@ jobs:
           if [[ "$EVENT" == workflow_run ]]; then
             [[ "$RUN_EVENT" == push ]] || skip "Release run's triggering event was '$RUN_EVENT', not a tag push"
             TAG="$RUN_TAG" # release.yml triggers on push: tags: ["v*"], so head_branch is the tag name
+            if [[ "$RUN_CONCLUSION" != success ]]; then
+              PUBLISH=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs" --paginate \
+                --jq '.jobs[] | select(.name == "publish-release") | .conclusion')
+              [[ "$PUBLISH" == success ]] || skip "Release run concluded '$RUN_CONCLUSION' and its publish-release job did not succeed"
+            fi
           else
             TAG="$INPUT_TAG"
           fi
@@ -115,8 +125,14 @@ jobs:
 
           # A tag from before render.sh existed has nothing for this workflow
           # to validate.
-          if ! gh api "repos/${REPO}/contents/scripts/packaging/render.sh?ref=${REF}" --silent 2>/dev/null; then
-            skip "scripts/packaging/render.sh does not exist at ${REF:0:12} (this release predates it)"
+          # Only a 404 means that; any other API error fails the run rather
+          # than turning into a green run that validated nothing.
+          if ! err=$(gh api "repos/${REPO}/contents/scripts/packaging/render.sh?ref=${REF}" --silent 2>&1); then
+            if [[ "$err" == *"HTTP 404"* ]]; then
+              skip "scripts/packaging/render.sh does not exist at ${REF:0:12} (this release predates it)"
+            fi
+            echo "::error::checking for render.sh at ${REF:0:12} failed: $err"
+            exit 1
           fi
 
           out skip false
@@ -595,18 +611,21 @@ jobs:
           KOMAC_CREATED_WITH: WinGet Releaser
           KOMAC_CREATED_WITH_URL: https://github.com/vedantmgoyal9/winget-releaser
           IDENTIFIER: ${{ steps.cfg.outputs.identifier }}
+          URLS: ${{ steps.urls.outputs.urls }}
         run: |
-          # shellcheck disable=SC2086
-          komac update "$IDENTIFIER" --version "$VERSION" --urls ${{ steps.urls.outputs.urls }} \
+          # shellcheck disable=SC2086 # URLS is a space-separated list
+          komac update "$IDENTIFIER" --version "$VERSION" --urls $URLS \
             --dry-run --output out/winget
       - name: Check the rendered manifest
+        env:
+          IDENTIFIER: ${{ steps.cfg.outputs.identifier }}
         run: |
           set -euo pipefail
           dir=$(find out/winget -type d -path "*/zyno-io/sp2p/${VERSION}")
           [ -n "$dir" ] || { echo "::error::no rendered manifest directory for version $VERSION"; exit 1; }
           count=$(find "$dir" -maxdepth 1 -name '*.yaml' | wc -l)
           [ "$count" -eq 3 ] || { echo "::error::expected 3 manifest files, found $count"; exit 1; }
-          installer="$dir/${{ steps.cfg.outputs.identifier }}.installer.yaml"
+          installer="$dir/${IDENTIFIER}.installer.yaml"
           [ "$(yq '.PackageVersion' "$installer")" = "$VERSION" ] || { echo "::error::PackageVersion mismatch"; exit 1; }
           [ "$(yq '.Installers | length' "$installer")" -eq 2 ] || { echo "::error::expected 2 installers"; exit 1; }
           nested=$(yq '.NestedInstallerType // .Installers[0].NestedInstallerType' "$installer")

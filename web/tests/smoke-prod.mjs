@@ -246,6 +246,10 @@ async function installCLI() {
   const cliVersionMatch = /^sp2p (\S+)/.exec(identity.stdout);
   if (!cliVersionMatch) throw new Error("could not parse `sp2p version` output");
   say(`CLI identity: sp2p ${cliVersionMatch[1]}`);
+  const wantVersion = TAG_RE.exec(cliTag)?.[1];
+  if (cliVersionMatch[1] !== wantVersion) {
+    throw new Error(`CLI reports version ${cliVersionMatch[1]}, expected ${wantVersion}`);
+  }
   return { bin, xdgDir };
 }
 

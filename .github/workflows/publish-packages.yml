@@ -170,7 +170,7 @@ jobs:
     container: archlinux:base
     steps:
       - name: Install dependencies
-        run: pacman -Syu --noconfirm --needed git openssh github-cli
+        run: pacman -Syu --noconfirm --needed git openssh github-cli diffutils
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
