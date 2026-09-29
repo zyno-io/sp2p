@@ -3,7 +3,6 @@
 package flow
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -300,12 +299,10 @@ func PrepareInput(paths []string, name string) (*transfer.Metadata, io.Reader, f
 		}, tarReader, func() { tarReader.Close() }, nil
 	}
 
-	// MUTATION (throwaway): read the whole file into memory.
-	whole, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, nil, noop, err
 	}
-	f := io.NopCloser(bytes.NewReader(whole))
 
 	mimeType := mime.TypeByExtension(filepath.Ext(path))
 	if mimeType == "" {
