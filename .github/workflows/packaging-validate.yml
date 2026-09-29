@@ -321,31 +321,10 @@ jobs:
         with:
           name: packaging-inputs
           path: dist
-      - if: env.MODE == 'snapshot'
-        shell: pwsh
-        run: |
-          Start-Process -FilePath python -WorkingDirectory $PWD `
-            -ArgumentList '-m', 'http.server', $env:SERVE_PORT, '--bind', '127.0.0.1', '--directory', 'dist' `
-            -RedirectStandardOutput "$env:RUNNER_TEMP\http.out" -RedirectStandardError "$env:RUNNER_TEMP\http.err"
-          foreach ($i in 1..30) {
-            try { Invoke-WebRequest -UseBasicParsing -Method Head "http://127.0.0.1:$env:SERVE_PORT/checksums.txt" | Out-Null; exit 0 }
-            catch { Start-Sleep 1 }
-          }
-          Get-Content "$env:RUNNER_TEMP\http.err" -ErrorAction SilentlyContinue
-          throw "local asset server did not start"
-      - name: Render
-        run: bash scripts/packaging/render.sh scoop "$VERSION" "$BASE_URL" dist/checksums.txt out/scoop
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: packaging-rendered
           path: rendered-ubuntu
-      - name: Confirm identical to the ubuntu render
-        run: diff -r rendered-ubuntu/scoop out/scoop
-      - name: Verify asset URLs and checksums
-        run: bash scripts/packaging/verify-urls.sh scoop out/scoop dist/checksums.txt
-      - name: Manifest is well-formed JSON
-        shell: pwsh
-        run: Get-Content -Raw out/scoop/sp2p.json | ConvertFrom-Json | Out-Null
       - name: Install Scoop
         shell: pwsh
         run: |
@@ -355,9 +334,40 @@ jobs:
           if ($actual -ne $env:SCOOP_INSTALLER_SHA256) { throw "Scoop installer sha256 mismatch: got $actual" }
           & $installer -RunAsAdmin
           "$env:USERPROFILE\scoop\shims" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-      - name: Install, run, and uninstall the package
+      # A backgrounded local asset server doesn't survive past the end of a
+      # Windows runner step (the runner's job-object cleanup kills it), and
+      # `scoop install` itself downloads from that server in snapshot mode —
+      # so everything from starting the server through uninstalling the
+      # package has to run in this one step.
+      - name: Render, verify, install, run, and uninstall the package
         shell: pwsh
         run: |
+          if ($env:MODE -eq 'snapshot') {
+            Start-Process -FilePath python -WorkingDirectory $PWD `
+              -ArgumentList '-m', 'http.server', $env:SERVE_PORT, '--bind', '127.0.0.1', '--directory', 'dist' `
+              -RedirectStandardOutput "$env:RUNNER_TEMP\http.out" -RedirectStandardError "$env:RUNNER_TEMP\http.err"
+            $ready = $false
+            foreach ($i in 1..30) {
+              try { Invoke-WebRequest -UseBasicParsing -Method Head "http://127.0.0.1:$env:SERVE_PORT/checksums.txt" | Out-Null; $ready = $true; break }
+              catch { Start-Sleep 1 }
+            }
+            if (-not $ready) {
+              Get-Content "$env:RUNNER_TEMP\http.err" -ErrorAction SilentlyContinue
+              throw "local asset server did not start"
+            }
+          }
+
+          bash scripts/packaging/render.sh scoop $env:VERSION $env:BASE_URL dist/checksums.txt out/scoop
+          if ($LASTEXITCODE -ne 0) { throw "render.sh failed" }
+
+          bash -c 'diff -r rendered-ubuntu/scoop out/scoop'
+          if ($LASTEXITCODE -ne 0) { throw "render differs from the ubuntu render" }
+
+          bash scripts/packaging/verify-urls.sh scoop out/scoop dist/checksums.txt
+          if ($LASTEXITCODE -ne 0) { throw "verify-urls.sh failed" }
+
+          Get-Content -Raw out/scoop/sp2p.json | ConvertFrom-Json | Out-Null
+
           $manifest = (Resolve-Path out/scoop/sp2p.json).Path
           scoop install $manifest
           $exe = "$env:USERPROFILE\scoop\apps\sp2p\current\sp2p.exe"
@@ -386,31 +396,42 @@ jobs:
         with:
           name: packaging-inputs
           path: dist
-      - if: env.MODE == 'snapshot'
-        shell: pwsh
-        run: |
-          Start-Process -FilePath python -WorkingDirectory $PWD `
-            -ArgumentList '-m', 'http.server', $env:SERVE_PORT, '--bind', '127.0.0.1', '--directory', 'dist' `
-            -RedirectStandardOutput "$env:RUNNER_TEMP\http.out" -RedirectStandardError "$env:RUNNER_TEMP\http.err"
-          foreach ($i in 1..30) {
-            try { Invoke-WebRequest -UseBasicParsing -Method Head "http://127.0.0.1:$env:SERVE_PORT/checksums.txt" | Out-Null; exit 0 }
-            catch { Start-Sleep 1 }
-          }
-          Get-Content "$env:RUNNER_TEMP\http.err" -ErrorAction SilentlyContinue
-          throw "local asset server did not start"
-      - name: Render
-        run: bash scripts/packaging/render.sh chocolatey "$VERSION" "$BASE_URL" dist/checksums.txt out/chocolatey
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: packaging-rendered
           path: rendered-ubuntu
-      - name: Confirm identical to the ubuntu render
-        run: diff -r rendered-ubuntu/chocolatey out/chocolatey
-      - name: Verify asset URLs and checksums
-        run: bash scripts/packaging/verify-urls.sh chocolatey out/chocolatey dist/checksums.txt
-      - name: Pack, install, run, and uninstall the package
+      # A backgrounded local asset server doesn't survive past the end of a
+      # Windows runner step (the runner's job-object cleanup kills it), and
+      # `choco install` itself downloads from that server in snapshot mode —
+      # so everything from starting the server through uninstalling the
+      # package has to run in this one step.
+      - name: Render, verify, pack, install, run, and uninstall the package
         shell: pwsh
         run: |
+          if ($env:MODE -eq 'snapshot') {
+            Start-Process -FilePath python -WorkingDirectory $PWD `
+              -ArgumentList '-m', 'http.server', $env:SERVE_PORT, '--bind', '127.0.0.1', '--directory', 'dist' `
+              -RedirectStandardOutput "$env:RUNNER_TEMP\http.out" -RedirectStandardError "$env:RUNNER_TEMP\http.err"
+            $ready = $false
+            foreach ($i in 1..30) {
+              try { Invoke-WebRequest -UseBasicParsing -Method Head "http://127.0.0.1:$env:SERVE_PORT/checksums.txt" | Out-Null; $ready = $true; break }
+              catch { Start-Sleep 1 }
+            }
+            if (-not $ready) {
+              Get-Content "$env:RUNNER_TEMP\http.err" -ErrorAction SilentlyContinue
+              throw "local asset server did not start"
+            }
+          }
+
+          bash scripts/packaging/render.sh chocolatey $env:VERSION $env:BASE_URL dist/checksums.txt out/chocolatey
+          if ($LASTEXITCODE -ne 0) { throw "render.sh failed" }
+
+          bash -c 'diff -r rendered-ubuntu/chocolatey out/chocolatey'
+          if ($LASTEXITCODE -ne 0) { throw "render differs from the ubuntu render" }
+
+          bash scripts/packaging/verify-urls.sh chocolatey out/chocolatey dist/checksums.txt
+          if ($LASTEXITCODE -ne 0) { throw "verify-urls.sh failed" }
+
           Push-Location out/chocolatey
           choco pack
           if ($LASTEXITCODE -ne 0) { throw "choco pack failed" }
@@ -565,8 +586,9 @@ jobs:
         run: |
           curl -fsSL "https://github.com/russellbanks/komac/releases/download/v${KOMAC_VERSION}/komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/komac.tar.gz
           echo "${KOMAC_SHA256}  /tmp/komac.tar.gz" | sha256sum -c -
-          tar -xzf /tmp/komac.tar.gz -C /tmp
-          install -m 755 "/tmp/komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu/komac" /usr/local/bin/komac
+          mkdir -p /tmp/komac-extract
+          tar -xzf /tmp/komac.tar.gz -C /tmp/komac-extract # extracts flat: komac, LICENSE.md
+          install -m 755 /tmp/komac-extract/komac /usr/local/bin/komac
       - name: Dry-run a WinGet manifest update
         env:
           GITHUB_TOKEN: ${{ github.token }}
