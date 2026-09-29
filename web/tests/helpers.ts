@@ -294,6 +294,33 @@ export async function verifyDisk(page: Page, expectedSize: number, expectedHash:
   expect(received).toEqual({ size: expectedSize, hash: expectedHash });
 }
 
+// Streaming counterpart to verifyDisk, for files too large to comfortably
+// hold twice in page memory (once as the OPFS-backed File, once again as
+// verifyDisk's whole-file arrayBuffer() copy) — see large.spec.ts and
+// docs/testing.md's large-transfer section. Hashes the received OPFS file in
+// chunks via File.slice(), using the incremental SHA-256 implementation from
+// web/src/sha256.ts, which dist/crypto-test.js (built by global-setup.ts,
+// same bundle crypto-vectors.spec.ts uses) exposes as
+// window.__cryptoTest.SHA256. Loads that script tag itself, so callers don't
+// need to.
+export async function verifyDiskStreaming(page: Page, expectedSize: number, expectedHash: string, chunkBytes = 8 * 1024 * 1024): Promise<void> {
+  await page.addScriptTag({ url: "/crypto-test.js" });
+  const received = await page.evaluate(async (chunk: number) => {
+    const file: File = await (window as any).__testOutput.getFile();
+    const hasher = new (window as any).__cryptoTest.SHA256();
+    for (let offset = 0; offset < file.size; offset += chunk) {
+      const buffer = await file.slice(offset, Math.min(offset + chunk, file.size)).arrayBuffer();
+      hasher.update(new Uint8Array(buffer));
+    }
+    const digest: Uint8Array = hasher.digest();
+    return {
+      size: file.size,
+      hash: Array.from(digest, (b: number) => b.toString(16).padStart(2, "0")).join(""),
+    };
+  }, chunkBytes);
+  expect(received).toEqual({ size: expectedSize, hash: expectedHash });
+}
+
 // ── Cross-engine receive-path sink ──────────────────────────────────────────
 
 // Chromium gets the real OPFS disk path (receiveToDisk/verifyDisk above).
@@ -341,16 +368,24 @@ export async function verifyReceiverSink(page: Page, browserName: string, expect
 
 // ── Share code / confirmation ────────────────────────────────────────────────
 
-// Selects a file on the sender page and returns the transfer code from its
-// share URL.
-export async function chooseFile(page: Page, data: Buffer, filename: string): Promise<string> {
-  const path = join(temporaryDirectory("sp2p-webrtc-test-"), filename);
-  writeFileSync(path, data);
+// Selects an already-on-disk file on the sender page and returns the
+// transfer code from its share URL. Split out from chooseFile below so a
+// caller with a large file already generated on disk (large.spec.ts) never
+// needs to hold its content in a Buffer to select it.
+export async function chooseFileAtPath(page: Page, path: string): Promise<string> {
   await page.goto("/");
   await page.locator(".file-input").setInputFiles(path);
   await expect(page.locator(".share-url")).toBeVisible();
   const url = await page.locator(".share-url").textContent();
   return new URL(url!).hash.slice(1);
+}
+
+// Selects a file on the sender page and returns the transfer code from its
+// share URL.
+export async function chooseFile(page: Page, data: Buffer, filename: string): Promise<string> {
+  const path = join(temporaryDirectory("sp2p-webrtc-test-"), filename);
+  writeFileSync(path, data);
+  return chooseFileAtPath(page, path);
 }
 
 // Clicks the receiver's confirmation button if one is shown; some flows skip

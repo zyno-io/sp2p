@@ -40,15 +40,21 @@
   UDP is blocked so every WebRTC pairing is forced through a real (CI-only)
   TURN server, with exact allocation accounting and no leaked allocations.
   See [TURN relay (relay-only) suite](#turn-relay-relay-only-suite) below.
+- **Large-transfer suite** — `web/tests/large.spec.ts`, run in CI (the
+  `large` job) at 1 GiB across all four transfer pairings, on both an
+  unshaped and a `wan150`-shaped namespace. Catches stalls, integrity bugs,
+  and memory that scales with file size. See
+  [Large transfers](#large-transfers) below.
 
 ## Extended checks
 
 `.github/workflows/extended.yml` ("Extended checks") runs the slower suites
 that don't gate every PR: the `netem-extended` performance matrix (`wan150-cap`
 and `wan500`), `engines` (WebKit plus the full, untagged `--project=engines`
-matrix, on `macos-15`), `compat-n2` (N-2 previous-release compatibility), and
+matrix, on `macos-15`), `compat-n2` (N-2 previous-release compatibility),
 `relay-full` (the complete TURN relay suite, including Firefox pairings, the
-quota case, and the consent negative controls). It runs:
+quota case, and the consent negative controls), and `large` (1 GiB transfers
+across all four pairings, on `clean` and `wan150` profiles). It runs:
 
 - on every push to `main`, so a failure points at the single merge that
   caused it;
@@ -1113,6 +1119,486 @@ the underlying race isn't specific to the larger `relay-full` job).
   `testturnd` all run on the same CI runner, so one relay allocation per
   lane is always sufficient — this suite doesn't (and can't, on a single
   host) exercise a topology where a lane might need two relay hops.
+
+## Large transfers
+
+`web/tests/large.spec.ts` runs a 1 GiB transfer across all four pairings
+(browser-browser, browser-CLI, CLI-browser, CLI-CLI with `-transport auto`)
+and asserts completion, exact size, SHA-256 integrity, the 8-lane WebRTC
+policy where it applies, and — the reason this suite exists — that peak
+process memory for the 1 GiB run doesn't scale with file size beyond a
+small constant relative to a 64 MiB control run of the same pairing. It's
+skipped unless `SP2P_LARGE_TEST=1`, which only the Extended checks `large`
+job (`.github/workflows/extended.yml`) sets — same rationale as the
+netem/relay suites' env gates. It is deliberately not part of the PR-gated
+suite: a 1 GiB transfer takes minutes even unshaped, and this class of bug
+(a stall or a memory leak that only shows up at scale) is exactly what
+Extended checks (runs after each merge to `main`, weekly, and gates
+releases — see [Extended checks](#extended-checks) above) exists for.
+
+Every browser page and CLI process this suite drives is registered for
+dump-on-failure diagnostics (`trackForDiagnostics`/`trackCLIForDiagnostics`,
+`flushDiagnostics` from `test.afterEach` — the same pattern `relay.spec.ts`
+and `interop.spec.ts` use), so a stall or an unexpected failure logs each
+page's buffered console output (plus its live step/status/error DOM
+snapshot, but only if the page is still open at flush time — every `run*`
+helper in this file closes its browser/context in a `finally` block right
+after returning, so in practice that snapshot is rarely available here; see
+`helpers.ts`'s `flushDiagnostics`) and the CLI's sanitized JSON event
+log/stderr, instead of just the bare assertion message. The CLI side of
+this actively redacts a resolved transfer code from its own printed output
+(`flushCLIDiagnostics` in `helpers.ts`); page console output is not
+redacted by the harness — the app itself only ever logs a transfer code's
+session-id component (`web/src/main.ts`), never the encryption-seed
+component that makes a code sensitive, so this hasn't been a real
+disclosure so far, but it's not a guarantee the way the CLI-side redaction
+is. Each CLI process's exit is also bounded by a timer (`waitForCLIExit`,
+racing `cli.exited` against `CLI_EXIT_TIMEOUT_MS`, or the full
+`TRANSFER_TIMEOUT_MS` for the one wait that's itself a pairing's actual
+completion gate — see `large.spec.ts`) rather than relying solely on the
+`large` project's 30-minute Playwright test timeout to
+eventually catch a hung CLI process.
+
+### Source data and hashing
+
+The 1 GiB source file (and a 64 MiB control file, generated alongside it)
+are written once per run with `generateRandomFile` in `large.spec.ts`:
+`crypto.randomBytes()` in 4 MiB chunks, streamed to disk with backpressure
+(`stream.write()`/`"drain"`), hashing each chunk into a running SHA-256 as
+it's written — the content is never held in memory all at once on the
+generation side. `SP2P_LARGE_TEST_SIZE_BYTES` overrides the 1 GiB default
+for local iteration on a smaller file; the control size scales down with it
+(`min(64 MiB, max(4 MiB, large/4))`) so it stays smaller than the large run
+and (at the 1 GiB default) still meets the 64 MiB parallel-WebRTC/parallel-TCP
+threshold (`PARALLEL_MIN_BYTES` in `web/src/webrtc-parallel.ts`;
+`tcpPreferThreshold`/`parallelMinFileSize` in `internal/flow`) — see
+[Realistic-WAN (netem) suite](#realistic-wan-netem-suite) above for the same
+threshold's role there.
+
+Verifying the received copy never loads the whole file into memory either:
+
+- **CLI receivers** are hashed from Node with a streaming `createReadStream`
+  piped through `crypto.createHash("sha256")` (`hashFileStreaming`).
+- **Browser (Chromium) receivers** use the real OPFS sink
+  (`receiveToDisk`/`helpers.ts`, the same one `netem.spec.ts` and
+  `compatibility.spec.ts` use — this is a real user's actual receive path,
+  not a test-only shortcut), but are verified with a new streaming
+  counterpart, `verifyDiskStreaming` (`helpers.ts`), instead of the existing
+  `verifyDisk`: it hashes the received `File` in 8 MiB chunks via
+  `File.slice(...).arrayBuffer()`, feeding each chunk into the incremental
+  SHA-256 implementation in `web/src/sha256.ts` — exposed on the page as
+  `window.__cryptoTest.SHA256` by `dist/crypto-test.js`, the same bundle
+  `crypto-vectors.spec.ts` uses (built by `global-setup.ts`, or, when
+  `SP2P_PW_SKIP_WEB_BUILD=1` inside the netns like the `wan150` `large` job
+  leg, by an explicit `npx esbuild src/crypto-test-entry.ts ...` CI step —
+  see below). `verifyDisk`'s one-shot `file.arrayBuffer()` would work
+  functionally, but defeats the point of this suite by loading the entire
+  received file into page memory just to check it.
+- **Browser senders** already stream from disk in `SEND_CHUNK_SIZE` (64 KiB)
+  slices (`web/src/transfer.ts`'s `sendFile`, via `File.slice(...)`), so
+  `chooseFileAtPath` (`helpers.ts` — a `chooseFile` split that takes an
+  already-on-disk path instead of a `Buffer`, so a caller with a 1 GiB file
+  already generated on disk never needs to hold it in memory to select it)
+  is all that's needed on that side.
+
+The two source files (and the shared temp directory holding them) are
+allocated with a plain `mkdtempSync`, not `helpers.ts`'s `temporaryDirectory`
+— that helper tracks every directory it returns in one shared, module-level
+list that `cleanupTemporaryDirectories()` (run from every spec's
+`test.afterEach`, including this one, to clean up each pairing's
+destination files) empties completely on every test. Using it for the
+shared source files too deleted them right after the first test in early
+development of this suite, breaking every pairing after the first — caught
+by running the full file locally rather than one test in isolation.
+`test.afterAll` removes the `mkdtempSync` directory explicitly once, after
+every test has run.
+
+### Memory sampling and the scaling assertion
+
+Each pairing test runs the 64 MiB control transfer, then the 1 GiB large
+transfer, and compares peak memory between them:
+
+```
+peak(large) <= 1.5 * peak(control) + 32 MiB          (relative — the real regression check)
+peak(large) <= peak(control) + 256 MiB               (additive — browser tree only, see below)
+peak(large) <= 512 MiB (CLI) / 2 GiB (browser tree)  (absolute backstop)
+```
+
+The relative check is what actually catches "memory that scales with file
+size": the product's real per-chunk buffering (256 KiB chunks,
+8-deep pipeline — see `internal/transfer/sender.go`/`receiver.go` — and
+64 KiB browser chunks) means peak memory should stay roughly flat between a
+64 MiB and a 1 GiB transfer of the same pairing; the constant (32 MiB) and
+multiplier (1.5x) allow for real per-run variance (GC timing, OS page
+cache, a second Chromium renderer/GPU/utility process spinning up) without
+being loose enough to miss an actual per-byte leak. The absolute backstop
+is a second, independent floor that would catch a bug on the very first run
+(no control needed) if the relative comparison were ever somehow gamed.
+**Calibrate/confirm both numbers against real Extended checks runs and
+record the observed figures here** (see [Observed figures](#observed-figures)
+below) rather than trusting them from source alone, the same way the netem
+suite's throughput floors and the relay suite's allocation formula were
+both confirmed against a real CI run before being trusted (see
+[Realistic-WAN (netem) suite](#realistic-wan-netem-suite) and
+[TURN relay (relay-only) suite](#turn-relay-relay-only-suite) above).
+
+The additive check (`assertMemoryScaling`'s optional `additiveCeilingBytes`
+argument, `web/tests/large.spec.ts`) applies only to the browser-tree
+assertions, not the CLI ones. It exists because the 1.5x relative ceiling
+scales with the control run's own peak: Chromium's fixed per-process
+overhead (tens to hundreds of MiB per process, before any payload bytes)
+gets multiplied by 1.5x right along with the real per-byte signal the check
+is meant to catch, so a pairing whose control run happens to have a higher
+baseline (browser-to-browser's two full Chromium instances, for example)
+gets a looser large-run ceiling for a reason that has nothing to do with
+file size. The additive bound catches that: regardless of how large the
+control peak is, the large run's peak may not exceed it by more than a
+fixed number of bytes. `BROWSER_TREE_ADDITIVE_CEILING_BYTES` in
+`large.spec.ts` is calibrated from real Extended checks runs — see
+[Observed figures](#observed-figures) below for whether/how it's been
+recalibrated for the current per-process-VmHWM sampling method (its initial
+value was calibrated from the older, now-replaced VmRSS-snapshot method's
+numbers, with headroom added on top for the newer method's tendency to read
+at or above what the old one reported for the same run — see the
+per-process-VmHWM sampling comment above).
+
+- **CLI process peak.** On Linux (every CI runner; this suite always runs on
+  `ubuntu-latest`), `readCLIPeakRSSBytes` polls `/proc/<pid>/status`'s
+  `VmHWM` — the kernel's own lifetime high-water mark for the process, so a
+  single read at any point during its life already reflects the true peak
+  up to that point; polling (every 50ms) just needs to catch one reading
+  shortly before the process exits, since `/proc/<pid>` is gone by the time
+  Node's `"exit"` event fires (the child has already been reaped). The
+  50ms interval matters more than it looks: a control-run CLI receiver can
+  exit in well under 500ms (92ms observed locally on a tiny control file),
+  and under-sampling the fast control run — not the slow large run — is
+  what would silently make the relative ceiling too tight, not too loose.
+  Non-Linux (local macOS iteration only) falls back to `ps -o rss=`, an
+  instantaneous sample rather than a true high-water mark, so local numbers
+  can under-count between polls — expect CI's numbers to be the accurate
+  ones.
+- **Browser process tree peak.** Chromium exposes no single tree-wide
+  high-water-mark API, but each individual process in the tree *does* still
+  expose its own `VmHWM` — the same lifetime high-water mark
+  `readCLIPeakRSSBytes` above reads for the CLI process, reused here.
+  `startBrowserRSSSampling` polls every ~500ms (fast enough to promptly
+  discover new pids as Chromium spawns renderer/GPU/utility processes
+  through the run, not because the interval itself needs to catch a spike
+  anymore): each tick re-lists every pid across every given browser's
+  process tree (`browserProcessPids`, the same `SystemInfo.getProcessInfo`
+  CDP call `netem.spec.ts` uses for its UDP socket check; more than one
+  `Browser` for browser-to-browser, whose sender and receiver are two
+  separate browser processes — see below), reads each pid's current
+  `VmHWM`, and keeps the maximum seen so far *per pid* in a map. On
+  `stop()`, it sums that map's values. Because each pairing test launches
+  fresh browser(s) per control/large run (rather than reusing the project's
+  shared `browser`/`page` fixtures), every *currently-live* pid's `VmHWM` at
+  `stop()` is that one process's true peak for its entire lifetime so far.
+  The sum across pids is still only an **upper bound** on the tree's actual
+  simultaneous peak, not a literal instant-in-time measurement — it adds
+  together maxima different processes reached at different points in time,
+  which need not have coincided — but for a ceiling check that's the safe
+  direction to be imprecise in: it can only overstate the tree's memory use,
+  never understate it. That's exactly the failure mode it replaces: the
+  earlier version summed each pid's *current* `VmRSS` (a live snapshot, not
+  a high-water mark) every ~2s, so a short-lived process — and the clean
+  64 MiB control run's *entire* transfer lasts only ~1-3s — could spawn,
+  peak, and exit within one 2s window and contribute nothing to any sample,
+  understating the control run's real peak and artificially tightening the
+  relative ceiling for that pairing's large run. The 500ms tick still
+  matters for two things VmHWM alone doesn't cover: discovering a new pid
+  (a renderer/GPU/utility process spawning mid-run) promptly enough to track
+  it at all, and catching growth that happens after this loop's last read of
+  a pid but before that process exits (a pid that's already gone by the next
+  tick can't be read again). Each pairing test launching its own fresh
+  browser(s) also means one run's sample is never polluted by another
+  test's residual pages/processes. Sampling stops right after `.complete`
+  is asserted, before the streaming-hash verification above runs in the
+  same page — so the in-page SHA-256 pass isn't itself counted as part of
+  the transfer's memory footprint.
+- **A browser receiver page always runs inside `launchPersistentContext`,
+  never a plain `launch()` + `newPage()`.** Chromium's default context (no
+  explicit user-data directory) behaves like an incognito profile, and
+  backs origin storage — including OPFS, the real receive path
+  `receiveToDisk`/`verifyDiskStreaming` exercise — in memory rather than on
+  disk. That's invisible functionally (the write/read-back still round-trips
+  correctly) but fatal to this suite's actual purpose: writing a 1 GiB file
+  to an in-memory OPFS store inflates the browser process's RSS by roughly
+  the file's own size, which would fail the memory-scaling assertion on
+  every correct build — a false positive manufactured by the test harness,
+  not a real product regression, and not representative of a real user's
+  browser (a real, non-incognito Chrome profile backs OPFS with real disk
+  I/O, same as `launchPersistentContext`). Confirmed locally: writing
+  512 MiB to OPFS raised RSS by roughly 530 MiB under a plain
+  `launch()`+`newPage()`, versus roughly 43 MiB under
+  `launchPersistentContext` (backed by a real, `temporaryDirectory`-managed
+  profile directory) for the identical write. Only pages that *receive* use
+  this — `runBrowserToCLI`'s browser only sends (reads from disk via
+  `File.slice()`, never touches OPFS), so it stays on a plain `launch()`.
+  `browser-to-browser` therefore launches two separate browser processes
+  (a plain-launched sender, a persistent-context receiver) rather than two
+  pages sharing one browser, which is why its process-tree sampling sums
+  more than one `Browser`'s pids (see above) and why its reported browser-tree
+  peak runs meaningfully higher than the single-browser pairings' — two
+  Chromium instances' baseline overhead, not a bug.
+- **A zero peak fails loudly instead of passing vacuously.**
+  `assertMemoryScaling` asserts both the control and large peaks are
+  `> 0` before comparing them — a sampler that never got a single
+  successful reading would otherwise report `0`, which passes both the
+  relative and absolute checks trivially (`0 <= anything`).
+
+### Observed figures
+
+Duration, throughput, and CLI peak-RSS numbers below are from
+[run 36514431412](https://github.com/zyno-io/sp2p/actions/runs/36514431412)
+(a `workflow_dispatch` of this branch) — those are unaffected by the
+browser-tree sampling-method change above (CLI sampling didn't change; wall
+time and bytes/sec don't depend on how memory is measured), so they stand
+as-is. The "browser tree peak" columns from that run used the old,
+now-replaced VmRSS-snapshot-every-2s method — see the per-process-VmHWM
+sampling comment above for why those numbers aren't directly reusable as a
+calibration target for the current method, and whichever of the
+placeholder note below or a later revision of this section has the current
+method's own real numbers and the resulting
+`BROWSER_TREE_ADDITIVE_CEILING_BYTES` value.
+
+**`clean` profile (no network namespace):**
+
+| pairing | size | duration | throughput | CLI peak (bytes) | browser tree peak, old method (bytes) |
+|---|---|---:|---:|---:|---:|
+| browser-browser | control | 12.0s | 5.6 MB/s | — | 938,909,696 (895.5 MiB) |
+| browser-browser | large | 51.7s | 20.7 MB/s | — | 1,107,849,216 (1056.6 MiB) |
+| browser-cli | control | 8.9s | 7.5 MB/s | receiver 36,139,008 (34.5 MiB) | 416,206,848 (396.9 MiB) |
+| browser-cli | large | 47.3s | 22.7 MB/s | receiver 35,454,976 (33.8 MiB) | 515,694,592 (491.7 MiB) |
+| cli-browser | control | 8.6s | 7.8 MB/s | sender 51,142,656 (48.8 MiB) | 527,785,984 (503.4 MiB) |
+| cli-browser | large | 30.1s | 35.6 MB/s | sender 53,334,016 (50.9 MiB) | 547,254,272 (521.9 MiB) |
+| cli-cli-auto | control | 0.14s | 472.6 MB/s | sender 30,871,552 / receiver 33,165,312 | — |
+| cli-cli-auto | large | 1.4s | 783.8 MB/s | sender 33,280,000 / receiver 33,652,736 | — |
+
+**`wan150` profile (75ms delay + 0.1% loss, inside the netns):**
+
+| pairing | size | duration | throughput | CLI peak (bytes) | browser tree peak, old method (bytes) |
+|---|---|---:|---:|---:|---:|
+| browser-browser | control | 31.8s | 2.1 MB/s | — | 1,000,255,488 (953.9 MiB) |
+| browser-browser | large | 7m34s | 2.4 MB/s | — | 1,048,547,328 (1000.0 MiB) |
+| browser-cli | control | 30.8s | 2.2 MB/s | receiver 41,877,504 (39.9 MiB) | 452,915,200 (431.9 MiB) |
+| browser-cli | large | 7m32s | 2.4 MB/s | receiver 43,819,008 (41.8 MiB) | 513,220,608 (489.4 MiB) |
+| cli-browser | control | 38.8s | 1.7 MB/s | sender 46,510,080 (44.4 MiB) | 541,536,256 (516.5 MiB) |
+| cli-browser | large | 8m02s | 2.2 MB/s | sender 52,436,992 (50.0 MiB) | 552,292,352 (526.7 MiB) |
+| cli-cli-auto | control | 16.3s | 4.1 MB/s | sender 36,630,528 / receiver 29,306,880 | — |
+| cli-cli-auto | large | 5m13s | 3.4 MB/s | sender 34,971,648 / receiver 27,865,088 | — |
+
+(The three browser-involving pairings — browser-browser, browser-cli,
+cli-browser — show `8`/`8` WebRTC lanes in both profiles, per the
+`size >= PARALLEL_THRESHOLD` assertions in `large.spec.ts`. `cli-cli-auto`
+picked `transport: tcp` on both legs, as expected racing on a single host
+(`runCLIToCLI`'s comment in `large.spec.ts`); its `lanes` field is
+`counts[0] ?? 1` from `watchCLI` — a `parallel_streams` JSON event only
+where the CLI actually negotiated one, else the `1` fallback. `clean` shows
+`1`/`1` (no parallel TCP negotiated at effectively zero local RTT);
+`wan150` shows `6`/`6` (parallel TCP negotiated under the profile's shaped
+RTT). Neither is asserted in the test — see [Known
+limitations](#known-limitations) below.)
+
+With the old method, the largest observed browser-tree control→large delta
+across every pairing/profile pair above was browser-browser/`clean`:
+`1,107,849,216 - 938,909,696 = 168,939,520` bytes (~161 MiB, ~169 MB) — the
+real-run number `BROWSER_TREE_ADDITIVE_CEILING_BYTES` (256 MiB) was
+initially sized against, before recalibrating it against the new
+per-process-VmHWM method below.
+
+<!-- Filled in after a real validation run of the per-process-VmHWM
+browser-tree sampling change: new browser-tree peak bytes per
+pairing/profile, the resulting control→large deltas, and the
+BROWSER_TREE_ADDITIVE_CEILING_BYTES value/headroom chosen from them. -->
+
+### CI wiring
+
+`extended.yml`'s `large` job runs on `ubuntu-latest` with a
+`profile: [clean, wan150]` matrix (`fail-fast: false`, `SP2P_LARGE_TEST: "1"`):
+
+- **`clean`** runs `npx playwright test --project=large` directly on the
+  runner — no network namespace.
+- **`wan150`** reuses `netem-extended`'s namespace/shaping setup steps
+  verbatim (load `sch_netem`, widen `net.core.rmem_max`/`wmem_max`,
+  `netns.sh up`, `netem.sh apply wan150`, `netem.sh verify wan150`) and then
+  runs the same Playwright command through `netns.sh exec --`, matching how
+  the `netem`/`netem-extended` jobs run `netem.spec.ts`. This is the plain
+  `wan150` profile (75ms delay + 0.1% loss, uncapped rate), the same one
+  the PR/push `netem` job uses — not `netem-extended`'s rate-capped
+  `wan150-cap`. Two things this leg needs that weren't automatic: `netns.sh
+  exec`'s allowlist of environment variables it forwards into the namespace
+  (see [Network setup](#network-setup) above — `sudo` resets almost
+  everything else) didn't include `SP2P_LARGE_TEST`/`SP2P_LARGE_TEST_SIZE_BYTES`
+  until this suite added them, and without it every test silently skips
+  inside the namespace (Playwright still exits 0) — caught by
+  `large-summary.mjs --gate` failing with all eight records MISSING on the
+  first real dispatch. And the `large` Playwright project's `launchOptions`
+  sets `--disable-features=WebRtcHideLocalIpsWithMdns` unconditionally (see
+  the `netem`/`relay`/`engine-matrix` projects for the same flag), since
+  `wan150`'s namespace has no mDNS resolution for the `.local` host
+  candidate names Chromium would otherwise gather on `dummy0` — harmless on
+  the `clean` leg, which isn't namespaced.
+  **Its durations are not directly comparable to `netem.spec.ts`'s own
+  `wan150` numbers, because its signaling traffic is shaped too, unlike
+  `netem.spec.ts`'s.** `netem.sh apply` only bypasses netem shaping for TCP
+  traffic on the *fixed* port `18090` (`SIGNAL_PORT` in
+  `scripts/ci/netem.sh` — see [Network setup](#network-setup) above);
+  `netem.spec.ts` runs against that exact port, via the shared server
+  `global-setup.ts` always starts there.
+  This suite's tests use `isolatedServerTest` (`helpers.ts`) instead — its
+  own real signaling server, bound to a random OS-assigned port
+  (`listener.listen(0, ...)`), deliberately isolated from the shared server
+  so this suite doesn't compete with unrelated tests for the production rate
+  limiter. That port is never `18090` and is never added to netem's bypass,
+  so on the `wan150` leg this suite's signaling handshake and every page
+  load over it are shaped along with the transfer itself — `netem.spec.ts`'s
+  signaling is not. A reported `wan150` duration here is therefore slower,
+  by more than shaping the transfer bytes alone would account for, than the
+  same profile in `netem.spec.ts`; don't compare the two directly, and don't
+  read a duration delta between them as a throughput regression. (Making
+  this suite's isolated server share the bypassed port instead isn't simple:
+  `global-setup.ts`'s shared server already binds `18090` unconditionally,
+  even for the `large` Playwright project, so this suite's server can't
+  reuse that same port without either colliding with it or giving up the
+  isolation `isolatedServerTest` exists for — see `helpers.ts`'s comment on
+  it. Documenting the limitation was the simpler, lower-risk fix.)
+
+Both matrix legs build web assets, the CLI/server binaries, and — unlike
+the `netem`/`relay` jobs, which don't need it — `dist/crypto-test.js`
+(`npx esbuild src/crypto-test-entry.ts --bundle --outfile=dist/crypto-test.js
+--target=es2020`, the same command `global-setup.ts` runs when it isn't
+skipped) as an explicit step *before* the `wan150` leg enters the
+namespace, since `SP2P_PW_SKIP_WEB_BUILD=1` (needed there for the same
+no-network-inside-the-namespace reason as `netem`/`relay` — see
+[Realistic-WAN (netem) suite](#realistic-wan-netem-suite) above) would
+otherwise skip building it, and `verifyDiskStreaming` above needs it on
+both legs. A `df -h` step logs disk headroom for the job log; the suite's
+own `large.spec.ts` module-level `df -k` check skips the whole suite
+outright (rather than failing opaquely with `ENOSPC` partway through) if
+the runner has less than 10 GB free — a browser receiver's real on-disk
+profile (`launchPersistentContext` above) means the concurrent footprint
+within one pairing test is now roughly source file + destination copy +
+that same copy again inside the browser profile, all at the same size, not
+just source + destination. `test.afterEach(cleanupTemporaryDirectories)`
+removes each pairing's on-disk source/destination copies and browser
+profile directories between tests, so the 1 GiB source and control files
+(generated once, in `test.beforeAll` into a directory outside that
+tracking — see above) are the only files that persist across the whole
+run, cleaned up in `test.afterAll`.
+
+Numeric-only perf JSON — one record per pairing per size, `bytes`,
+`durationMs`, `mbps`, peak memory in bytes, lane counts, transport — is
+written to `test-results/perf-large/` (`large.spec.ts`'s `writeRecord`,
+the same pattern as `netem.spec.ts`'s `writePerfRecord` and
+`relay.spec.ts`'s equivalent) *before* that pairing's memory-scaling
+`expect()` calls, so a failing assertion still leaves both runs' numbers in
+the uploaded artifact instead of only in the failure message. Rendered as a
+markdown table on `$GITHUB_STEP_SUMMARY` by `web/tests/large-summary.mjs
+--gate` (fails if any of the four pairings is missing a control or large
+record — the actual memory-scaling pass/fail comes from `expect()` inside
+`large.spec.ts` itself, not from this summary script). `global-setup.ts`
+clears `test-results/perf-large/` up front when `SP2P_LARGE_TEST` is set,
+the same way it already does for the netem/relay suites' perf
+directories, so a stale local record can't hide a real MISSING pairing (CI
+always starts from a fresh checkout, so this only matters locally). Only
+that `test-results/perf-large/**` directory is uploaded as an artifact
+(`large-perf-<profile>`); like `netem`/`relay`, this suite's Playwright
+project (`web/playwright.config.ts`) disables traces, screenshots, and
+video, since they'd capture transfer codes in a public artifact.
+
+The four pairing tests use a plain `test.describe`, not `.describe.serial`:
+`playwright.config.ts`'s global `workers: 1`/`fullyParallel: false` already
+run every test in the file in order, so `.serial`'s only actual effect
+would be skipping the rest of the file after one failure — which would
+hide the CLI-involving pairings (the ones that actually catch the
+`os.ReadFile`-style mutation this suite exists to catch; see
+[Mutation check](#mutation-check) below) behind an unrelated
+browser-pairing failure.
+
+### Mutation check
+
+Confirms the memory-scaling assertion actually depends on the product
+streaming the file, not just on the transfer completing:
+`internal/flow/helpers.go`'s `PrepareInput`, for a single regular file,
+normally opens the file and returns it directly as the `io.Reader`
+(`os.Open`, streamed through `internal/transfer/sender.go`'s bounded
+256 KiB/8-deep-pipeline chunking). The mutation reads the whole file into
+memory first instead (`os.ReadFile` + `bytes.NewReader`), touching only the
+CLI *sender* path for a regular file — folders, stdin, and the receive path
+are untouched. Expected: the CLI-sender memory assertion fails on the
+1 GiB run for both CLI-involving pairings (`cli-browser`, `cli-cli-auto`);
+`browser-cli` (CLI is the *receiver* there) is unaffected, which is itself
+part of confirming the mutation is caught for the right reason.
+
+Confirmed against a real throwaway-commit run on Extended checks:
+[run 36584881023](https://github.com/zyno-io/sp2p/actions/runs/36584881023)
+(mutation commit 597fb60, "THROWAWAY MUTATION: CLI sender reads the whole
+file into memory"; reverted in 38e5304) failed the `large (clean)` job's
+`large.spec.ts` exactly as expected, on both CLI-sender-involving
+pairings, and only those:
+
+- `cli-browser: CLI sender`: peak RSS `2,222,731,264` bytes (~2.07 GiB)
+  vs. relative ceiling `304,873,472` bytes (~290.7 MiB; 1.5x control
+  `180,879,360` bytes + 32 MiB).
+- `cli-cli-auto: sender`: peak RSS `2,169,237,504` bytes (~2.02 GiB) vs.
+  relative ceiling `242,505,728` bytes (~231.3 MiB; 1.5x control
+  `139,300,864` bytes + 32 MiB).
+
+Both failures show the mutated run's peak rising well past its own control
+peak: `2,041,851,904` bytes (~1.90 GiB) for `cli-browser`, `2,029,936,640`
+bytes (~1.89 GiB) for `cli-cli-auto` — roughly *1.9x* the mutated 1 GiB
+payload's own size, not the ~1x a naive "the sender now holds one extra
+copy of the file" read of the mutation would predict. This suite doesn't
+have enough visibility into the sender's actual allocation behavior under
+the mutation to say why the multiple lands near 2x rather than 1x (whether
+that's the normal per-chunk pipeline's own buffering stacking on top of the
+mutation's single big buffer, GC not yet having reclaimed the `os.ReadFile`
+buffer, or something else) — what the mutation run does confirm is the
+thing it's for: the assertion fails on exactly the CLI-sender-involving
+pairings and no others, which is the actual test of whether the
+memory-scaling check depends on the product streaming the file. The
+`browser-cli` pairing (CLI is the *receiver* there,
+untouched by the mutation) was unaffected, confirming the assertion fails
+for the mutated code path specifically and not from some unrelated
+side-effect of the throwaway commit. The rest of that run's jobs
+(`netem-extended`, `engines`, `relay-full`, `large (wan150)`) were cancelled
+once `large (clean)`'s failure had confirmed the mutation was caught — they
+don't exercise the CLI sender's memory path this mutation targets, so
+letting them run to completion wasn't needed to confirm the result.
+
+### Known limitations
+
+- **No throughput floor is gated** for this suite (unlike `netem.spec.ts`'s
+  `perf-floors.json`) — `mbps` is recorded for visibility only. A floor
+  calibrated for a 1 GiB transfer would need its own real-run baseline
+  separate from the 128 MiB netem floors, and throughput regressions at
+  this scale are already covered by the netem suite's existing floors; this
+  suite's job is stalls/integrity/memory, not throughput.
+- **The CLI absolute backstop is platform-accurate on Linux only** (CI); a
+  local macOS run's `ps`-sampled numbers are a lower bound, not a true peak
+  (see above).
+- **`SP2P_LARGE_TEST_SIZE_BYTES` is for local iteration only** — CI always
+  runs the 1 GiB default; a smaller override may fall under the 64 MiB
+  parallel-WebRTC/parallel-TCP threshold, in which case the lane-count
+  assertions are skipped rather than adjusted (`large.spec.ts` checks
+  `size >= PARALLEL_THRESHOLD` before asserting `[8]`).
+- **`cli-cli-auto`'s lane count isn't asserted**, unlike the three
+  browser-involving pairings' `[8]` checks — see
+  [Observed figures](#observed-figures) above for why its `1`/`1` (clean)
+  vs. `6`/`6` (wan150) numbers differ and aren't a regression signal by
+  themselves.
+- **Dump-on-failure page diagnostics are console-only in practice.** Every
+  `run*` helper in `large.spec.ts` closes its browser/context before
+  returning, so by the time `test.afterEach`'s `flushDiagnostics` runs, the
+  page is already closed and only its buffered console output prints — the
+  live DOM step/status/error snapshot `helpers.ts` can also capture is
+  reachable only if the page is still open at flush time, which doesn't
+  happen here. Page console output also isn't redacted the way CLI
+  diagnostics are (see [Large transfers](#large-transfers) above) — that's
+  safe today only because the app itself never logs a transfer code's
+  seed component, just its session-id component, but that's a product-code
+  invariant this suite doesn't itself enforce.
 
 ## Windows (native CLI and Edge)
 
