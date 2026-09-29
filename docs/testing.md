@@ -40,15 +40,21 @@
   UDP is blocked so every WebRTC pairing is forced through a real (CI-only)
   TURN server, with exact allocation accounting and no leaked allocations.
   See [TURN relay (relay-only) suite](#turn-relay-relay-only-suite) below.
+- **Large-transfer suite** — `web/tests/large.spec.ts`, run in CI (the
+  `large` job) at 1 GiB across all four transfer pairings, on both an
+  unshaped and a `wan150`-shaped namespace. Catches stalls, integrity bugs,
+  and memory that scales with file size. See
+  [Large transfers](#large-transfers) below.
 
 ## Extended checks
 
 `.github/workflows/extended.yml` ("Extended checks") runs the slower suites
 that don't gate every PR: the `netem-extended` performance matrix (`wan150-cap`
 and `wan500`), `engines` (WebKit plus the full, untagged `--project=engines`
-matrix, on `macos-15`), `compat-n2` (N-2 previous-release compatibility), and
+matrix, on `macos-15`), `compat-n2` (N-2 previous-release compatibility),
 `relay-full` (the complete TURN relay suite, including Firefox pairings, the
-quota case, and the consent negative controls). It runs:
+quota case, and the consent negative controls), and `large` (1 GiB transfers
+across all four pairings, on `clean` and `wan150` profiles). It runs:
 
 - on every push to `main`, so a failure points at the single merge that
   caused it;
@@ -1113,6 +1119,182 @@ the underlying race isn't specific to the larger `relay-full` job).
   `testturnd` all run on the same CI runner, so one relay allocation per
   lane is always sufficient — this suite doesn't (and can't, on a single
   host) exercise a topology where a lane might need two relay hops.
+
+## Large transfers
+
+`web/tests/large.spec.ts` runs a 1 GiB transfer across all four pairings
+(browser-browser, browser-CLI, CLI-browser, CLI-CLI with `-transport auto`)
+and asserts completion, exact size, SHA-256 integrity, the 8-lane WebRTC
+policy where it applies, and — the reason this suite exists — that peak
+process memory for the 1 GiB run doesn't scale with file size beyond a
+small constant relative to a 64 MiB control run of the same pairing. It's
+skipped unless `SP2P_LARGE_TEST=1`, which only the Extended checks `large`
+job (`.github/workflows/extended.yml`) sets — same rationale as the
+netem/relay suites' env gates. It is deliberately not part of the PR-gated
+suite: a 1 GiB transfer takes minutes even unshaped, and this class of bug
+(a stall or a memory leak that only shows up at scale) is exactly what
+Extended checks (runs after each merge to `main`, weekly, and gates
+releases — see [Extended checks](#extended-checks) above) exists for.
+
+### Source data and hashing
+
+The 1 GiB source file (and a 64 MiB control file, generated alongside it)
+are written once per run with `generateRandomFile` in `large.spec.ts`:
+`crypto.randomBytes()` in 4 MiB chunks, streamed to disk with backpressure
+(`stream.write()`/`"drain"`), hashing each chunk into a running SHA-256 as
+it's written — the content is never held in memory all at once on the
+generation side. `SP2P_LARGE_TEST_SIZE_BYTES` overrides the 1 GiB default
+for local iteration on a smaller file; the control size scales down with it
+(`min(64 MiB, max(4 MiB, large/4))`) so it stays smaller than the large run
+and (at the 1 GiB default) still meets the 64 MiB parallel-WebRTC/parallel-TCP
+threshold (`PARALLEL_MIN_BYTES` in `web/src/webrtc-parallel.ts`;
+`tcpPreferThreshold`/`parallelMinFileSize` in `internal/flow`) — see
+[Realistic-WAN (netem) suite](#realistic-wan-netem-suite) above for the same
+threshold's role there.
+
+Verifying the received copy never loads the whole file into memory either:
+
+- **CLI receivers** are hashed from Node with a streaming `createReadStream`
+  piped through `crypto.createHash("sha256")` (`hashFileStreaming`).
+- **Browser (Chromium) receivers** use the real OPFS sink
+  (`receiveToDisk`/`helpers.ts`, the same one `netem.spec.ts` and
+  `compatibility.spec.ts` use — this is a real user's actual receive path,
+  not a test-only shortcut), but are verified with a new streaming
+  counterpart, `verifyDiskStreaming` (`helpers.ts`), instead of the existing
+  `verifyDisk`: it hashes the received `File` in 8 MiB chunks via
+  `File.slice(...).arrayBuffer()`, feeding each chunk into the incremental
+  SHA-256 implementation in `web/src/sha256.ts` — exposed on the page as
+  `window.__cryptoTest.SHA256` by `dist/crypto-test.js`, the same bundle
+  `crypto-vectors.spec.ts` uses (built by `global-setup.ts`, or, when
+  `SP2P_PW_SKIP_WEB_BUILD=1` inside the netns like the `wan150` `large` job
+  leg, by an explicit `npx esbuild src/crypto-test-entry.ts ...` CI step —
+  see below). `verifyDisk`'s one-shot `file.arrayBuffer()` would work
+  functionally, but defeats the point of this suite by loading the entire
+  received file into page memory just to check it.
+- **Browser senders** already stream from disk in `SEND_CHUNK_SIZE` (64 KiB)
+  slices (`web/src/transfer.ts`'s `sendFile`, via `File.slice(...)`), so
+  `chooseFileAtPath` (`helpers.ts` — a `chooseFile` split that takes an
+  already-on-disk path instead of a `Buffer`, so a caller with a 1 GiB file
+  already generated on disk never needs to hold it in memory to select it)
+  is all that's needed on that side.
+
+### Memory sampling and the scaling assertion
+
+Each pairing test runs the 64 MiB control transfer, then the 1 GiB large
+transfer, and compares peak memory between them:
+
+```
+peak(large) <= 1.5 * peak(control) + 32 MiB          (relative — the real regression check)
+peak(large) <= 512 MiB (CLI) / 2 GiB (browser tree)  (absolute backstop)
+```
+
+The relative check is what actually catches "memory that scales with file
+size": the product's real per-chunk buffering (256 KiB chunks,
+8-deep pipeline — see `internal/transfer/sender.go`/`receiver.go` — and
+64 KiB browser chunks) means peak memory should stay roughly flat between a
+64 MiB and a 1 GiB transfer of the same pairing; the constant (32 MiB) and
+multiplier (1.5x) allow for real per-run variance (GC timing, OS page
+cache, a second Chromium renderer/GPU/utility process spinning up) without
+being loose enough to miss an actual per-byte leak. The absolute backstop
+is a second, independent floor that would catch a bug on the very first run
+(no control needed) if the relative comparison were ever somehow gamed.
+**Calibrate/confirm both numbers against real Extended checks runs and
+record the observed figures here** (see the note below once available)
+rather than trusting them from source alone, the same way the netem
+suite's throughput floors and the relay suite's allocation formula were
+both confirmed against a real CI run before being trusted (see
+[Realistic-WAN (netem) suite](#realistic-wan-netem-suite) and
+[TURN relay (relay-only) suite](#turn-relay-relay-only-suite) above).
+
+- **CLI process peak.** On Linux (every CI runner; this suite always runs on
+  `ubuntu-latest`), `readCLIPeakRSSBytes` polls `/proc/<pid>/status`'s
+  `VmHWM` — the kernel's own lifetime high-water mark for the process, so a
+  single read at any point during its life already reflects the true peak
+  up to that point; polling (every 500ms) just needs to catch one reading
+  shortly before the process exits, since `/proc/<pid>` is gone by the time
+  Node's `"exit"` event fires (the child has already been reaped). Non-Linux
+  (local macOS iteration only) falls back to `ps -o rss=`, an instantaneous
+  sample rather than a true high-water mark, so local numbers can
+  under-count between polls — expect CI's numbers to be the accurate ones.
+- **Browser process tree peak.** Chromium exposes no equivalent
+  high-water-mark API, so this is always a sampled maximum: every ~2s during
+  the transfer, `startBrowserRSSSampling` re-lists every pid in the
+  browser's process tree (`browserProcessPids`, the same
+  `SystemInfo.getProcessInfo` CDP call `netem.spec.ts` uses for its UDP
+  socket check) and sums each one's `/proc/<pid>/status` `VmRSS` (or, on
+  macOS, `ps -o rss=` per pid). Each pairing test launches its own fresh
+  `playwright.chromium.launch(...)` per control/large run (rather than
+  reusing the project's shared `browser`/`page` fixtures), so one run's
+  sample is never polluted by another test's residual pages/processes.
+  Sampling stops right after `.complete` is asserted, before the
+  streaming-hash verification above runs in the same page — so the
+  in-page SHA-256 pass isn't itself counted as part of the transfer's
+  memory footprint.
+
+### CI wiring
+
+`extended.yml`'s `large` job runs on `ubuntu-latest` with a
+`profile: [clean, wan150]` matrix (`fail-fast: false`, `SP2P_LARGE_TEST: "1"`):
+
+- **`clean`** runs `npx playwright test --project=large` directly on the
+  runner — no network namespace.
+- **`wan150`** reuses `netem-extended`'s namespace/shaping setup steps
+  verbatim (load `sch_netem`, widen `net.core.rmem_max`/`wmem_max`,
+  `netns.sh up`, `netem.sh apply wan150`, `netem.sh verify wan150`) and then
+  runs the same Playwright command through `netns.sh exec --`, matching how
+  the `netem`/`netem-extended` jobs run `netem.spec.ts`. This is the plain
+  `wan150` profile (75ms delay + 0.1% loss, uncapped rate), the same one
+  the PR/push `netem` job uses — not `netem-extended`'s rate-capped
+  `wan150-cap`.
+
+Both matrix legs build web assets, the CLI/server binaries, and — unlike
+the `netem`/`relay` jobs, which don't need it — `dist/crypto-test.js`
+(`npx esbuild src/crypto-test-entry.ts --bundle --outfile=dist/crypto-test.js
+--target=es2020`, the same command `global-setup.ts` runs when it isn't
+skipped) as an explicit step *before* the `wan150` leg enters the
+namespace, since `SP2P_PW_SKIP_WEB_BUILD=1` (needed there for the same
+no-network-inside-the-namespace reason as `netem`/`relay` — see
+[Realistic-WAN (netem) suite](#realistic-wan-netem-suite) above) would
+otherwise skip building it, and `verifyDiskStreaming` above needs it on
+both legs. A `df -h` step logs disk headroom for the job log; the suite's
+own `large.spec.ts` module-level `df -k` check skips the whole suite
+outright (rather than failing opaquely with `ENOSPC` partway through) if
+the runner has less than 8 GB free. `test.afterEach(cleanupTemporaryDirectories)`
+removes each pairing's on-disk source/destination copies between tests, so
+the 1 GiB source and control files (generated once, in `test.beforeAll`)
+are the only files that persist across the whole run — cleaned up in
+`test.afterAll`.
+
+Numeric-only perf JSON — one record per pairing per size, `bytes`,
+`durationMs`, `mbps`, peak memory in bytes, lane counts, transport — is
+written to `test-results/perf-large/` (`large.spec.ts`'s `writeRecord`,
+the same pattern as `netem.spec.ts`'s `writePerfRecord` and
+`relay.spec.ts`'s equivalent) and rendered as a markdown table on
+`$GITHUB_STEP_SUMMARY` by `web/tests/large-summary.mjs --gate` (fails if
+any of the four pairings is missing a control or large record — the actual
+memory-scaling pass/fail comes from `expect()` inside `large.spec.ts`
+itself, not from this summary script). Only that `test-results/perf-large/**`
+directory is uploaded as an artifact (`large-perf-<profile>`); like
+`netem`/`relay`, this suite's Playwright project (`web/playwright.config.ts`)
+disables traces, screenshots, and video, since they'd capture transfer
+codes in a public artifact.
+
+### Known limitations
+
+- **No throughput floor is gated** for this suite (unlike `netem.spec.ts`'s
+  `perf-floors.json`) — `mbps` is recorded for visibility only. A floor
+  calibrated for a 1 GiB transfer would need its own real-run baseline
+  separate from the 128 MiB netem floors, and throughput regressions at
+  this scale are already covered by the netem suite's existing floors; this
+  suite's job is stalls/integrity/memory, not throughput.
+- **The CLI absolute backstop is platform-accurate on Linux only** (CI); a
+  local macOS run's `ps`-sampled numbers are a lower bound, not a true peak
+  (see above).
+- **`SP2P_LARGE_TEST_SIZE_BYTES` is for local iteration only** — CI always
+  runs the 1 GiB default; a smaller override may fall under the 64 MiB
+  parallel-WebRTC/parallel-TCP threshold, in which case the lane-count
+  assertions are skipped rather than adjusted (`large.spec.ts` checks
+  `size >= PARALLEL_THRESHOLD` before asserting `[8]`).
 
 ## Windows (native CLI and Edge)
 

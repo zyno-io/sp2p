@@ -42,8 +42,11 @@ export default defineConfig({
       // does not belong to any single-browserName project's enumeration).
       // relay.spec.ts likewise has its own "relay" project below (env-gated
       // on SP2P_RELAY_TEST, needs the firewalled netns, and also launches
-      // every engine itself via the `playwright` fixture).
-      testIgnore: [/netem\.spec\.ts/, /engine-matrix\.spec\.ts/, /relay\.spec\.ts/],
+      // every engine itself via the `playwright` fixture). large.spec.ts
+      // likewise has its own "large" project below (env-gated on
+      // SP2P_LARGE_TEST, needs a long per-test timeout and no
+      // traces/screenshots, and launches its own browsers per pairing).
+      testIgnore: [/netem\.spec\.ts/, /engine-matrix\.spec\.ts/, /relay\.spec\.ts/, /large\.spec\.ts/],
     },
     // Firefox and WebKit only run the browser-facing interop specs that
     // generalize across engines — not Node-only specs (parallel.spec.ts,
@@ -111,6 +114,25 @@ export default defineConfig({
       use: {
         // Traces/screenshots/video would capture transfer codes and TURN
         // credentials in a public artifact — never collect them for this suite.
+        trace: "off",
+        screenshot: "off",
+        video: "off",
+      },
+    },
+    // large.spec.ts's tests launch their own Chromium instance per pairing
+    // (isolated peak-RSS sampling) rather than using this project's own
+    // `browser`/`page` fixtures, so browserName here is unused — it exists
+    // only to scope enumeration, timeout, and trace/screenshot settings.
+    // Serial (workers: 1 already applies), long per-test timeout: a 1 GiB
+    // transfer under wan150 shaping can take several minutes.
+    {
+      name: "large",
+      testMatch: /large\.spec\.ts/,
+      timeout: 30 * 60_000,
+      use: {
+        // Traces/screenshots would capture transfer codes in a public
+        // artifact — never collect them for this suite (only numeric perf
+        // JSON is uploaded; see docs/testing.md).
         trace: "off",
         screenshot: "off",
         video: "off",

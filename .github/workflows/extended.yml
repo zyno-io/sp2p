@@ -85,6 +85,101 @@ jobs:
         if: always()
         run: sudo scripts/ci/netns.sh down
 
+  # Large (1 GiB) transfer checks: stalls, integrity, and memory that scales
+  # with file size, across all four pairings (browser-browser, browser-CLI,
+  # CLI-browser, CLI-CLI auto). `clean` runs directly on the runner; `wan150`
+  # reuses netem-extended's namespace/shaping setup. See docs/testing.md's
+  # large-transfer section.
+  large:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SP2P_LARGE_TEST: "1"
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [clean, wan150]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci
+      - run: make build-web
+      - name: Build the crypto test bundle (large.spec.ts's streaming SHA-256 receiver hash)
+        run: cd web && npx esbuild src/crypto-test-entry.ts --bundle --outfile=dist/crypto-test.js --target=es2020
+      - name: Build CLI and server binaries
+        run: |
+          go build -o bin/sp2p ./cmd/sp2p
+          go build -o bin/sp2p-server ./cmd/sp2p-server
+      - run: cd web && npx playwright install --with-deps chromium
+      - name: Disk headroom (for the job log)
+        run: df -h
+      # wan150-only setup, reusing netem-extended's steps (see that job above).
+      - name: Load the netem qdisc kernel module
+        if: matrix.profile == 'wan150'
+        run: |
+          sudo modprobe sch_netem || {
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+            sudo modprobe sch_netem
+          }
+      - name: Ensure ethtool is available
+        if: matrix.profile == 'wan150'
+        run: command -v ethtool || (sudo apt-get update && sudo apt-get install -y ethtool)
+      - name: Widen host UDP socket buffer ceilings (for Chrome's 1 MiB buffer hint)
+        if: matrix.profile == 'wan150'
+        run: sudo sysctl -w net.core.rmem_max=4194304 net.core.wmem_max=4194304
+      - name: Create the sp2p network namespace
+        if: matrix.profile == 'wan150'
+        run: sudo scripts/ci/netns.sh up
+      - name: Apply netem shaping (wan150)
+        if: matrix.profile == 'wan150'
+        run: sudo scripts/ci/netem.sh apply wan150
+      - name: Preflight — hard-fail unless the shaped RTT is in band
+        if: matrix.profile == 'wan150'
+        run: sudo scripts/ci/netem.sh verify wan150
+      # Everything above needs the network (or, for wan150, must run outside
+      # the namespace); nothing below should.
+      - name: Run the large suite (clean, direct on the runner)
+        if: matrix.profile == 'clean'
+        run: cd web && npx playwright test --project=large
+        env:
+          SP2P_PW_SKIP_WEB_BUILD: "1"
+          SP2P_PW_CLI_BIN: ${{ github.workspace }}/bin/sp2p
+          SP2P_PW_SERVER_BIN: ${{ github.workspace }}/bin/sp2p-server
+      - name: Run the large suite (wan150, inside the namespace)
+        if: matrix.profile == 'wan150'
+        run: |
+          cd web
+          "$GITHUB_WORKSPACE/scripts/ci/netns.sh" exec -- npx playwright test --project=large
+        env:
+          SP2P_PW_SKIP_WEB_BUILD: "1"
+          SP2P_PW_CLI_BIN: ${{ github.workspace }}/bin/sp2p
+          SP2P_PW_SERVER_BIN: ${{ github.workspace }}/bin/sp2p-server
+      - name: netem qdisc stats (post-run, for the job log)
+        if: always() && matrix.profile == 'wan150'
+        run: sudo scripts/ci/netem.sh stats || true
+      - name: Large-transfer summary
+        if: always()
+        run: node web/tests/large-summary.mjs --gate
+      # Numeric perf JSON only — no traces/screenshots (would capture
+      # transfer codes; the "large" Playwright project already disables them).
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: large-perf-${{ matrix.profile }}
+          path: test-results/perf-large/**
+          if-no-files-found: ignore
+      - name: Tear down the network namespace
+        if: always() && matrix.profile == 'wan150'
+        run: sudo scripts/ci/netns.sh down
+
   # WebKit's real DataChannel/ICE/OPFS behavior is closest to Safari's on
   # macOS, so this always builds and runs on macos-15 (never ubuntu-latest),
   # and Firefox/Chromium cells of the full matrix ride along here too since
@@ -219,7 +314,7 @@ jobs:
   # matrix, and compat-n2/engines/relay-full are independent of it and each
   # other), and only on failure — a passing run stays silent.
   report-failure:
-    needs: [netem-extended, compat-n2, engines, relay-full]
+    needs: [netem-extended, compat-n2, engines, relay-full, large]
     # A leg that hits timeout-minutes is reported as cancelled, not failed.
     # Manual dispatches (e.g. validating a branch) report in the run only.
     if: (failure() || cancelled()) && github.event_name != 'workflow_dispatch'
@@ -237,6 +332,7 @@ jobs:
           COMPAT_N2_RESULT: ${{ needs.compat-n2.result }}
           ENGINES_RESULT: ${{ needs.engines.result }}
           RELAY_RESULT: ${{ needs.relay-full.result }}
+          LARGE_RESULT: ${{ needs.large.result }}
         run: |
           set -euo pipefail
           gh label create extended-checks --color b60205 \
@@ -251,10 +347,11 @@ jobs:
           if [[ "$COMPAT_N2_RESULT" != "success" ]]; then failed+="- compat-n2: $COMPAT_N2_RESULT\n"; fi
           if [[ "$ENGINES_RESULT" != "success" ]]; then failed+="- engines: $ENGINES_RESULT\n"; fi
           if [[ "$RELAY_RESULT" != "success" ]]; then failed+="- relay-full: $RELAY_RESULT\n"; fi
+          if [[ "$LARGE_RESULT" != "success" ]]; then failed+="- large: $LARGE_RESULT\n"; fi
 
           note="Run: $RUN_URL (branch \`${GITHUB_REF_NAME}\`, commit \`${GITHUB_SHA:0:12}\`)."
           jobs=$(printf '%b' "$failed")
-          detail="See the job summary and artifacts on this run for details. netem: netem-extended-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section). engines: the WebKit and full cross-engine matrix run on macos-15 (docs/testing.md's Engines section). relay-full: relay-only TURN transfers, per-session allocation accounting, quota and consent controls (relay-turn-stats-extended artifact; docs/testing.md's TURN relay section)."
+          detail="See the job summary and artifacts on this run for details. netem: netem-extended-perf-* artifacts, per-pairing numbers and netem drops (docs/testing.md's netem section). compat-n2: the Go/Playwright previous-release (N-2) compatibility matrix (docs/testing.md's browser previous-release matrix section). engines: the WebKit and full cross-engine matrix run on macos-15 (docs/testing.md's Engines section). relay-full: relay-only TURN transfers, per-session allocation accounting, quota and consent controls (relay-turn-stats-extended artifact; docs/testing.md's TURN relay section). large: 1 GiB transfer pairings, stalls/integrity/memory scaling across clean and wan150 profiles (large-perf-* artifacts; docs/testing.md's large-transfer section)."
           body=$(printf '%s\n\nFailed job(s):\n%s\n%s\n' "$note" "$jobs" "$detail")
 
           if [[ -n "$existing" && "$existing" != "null" ]]; then
