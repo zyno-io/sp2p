@@ -1,0 +1,609 @@
+name: Packaging validation
+
+# Exercises the exact rendering scripts/packaging/render.sh performs for
+# .github/workflows/publish-packages.yml (Homebrew, Scoop, AUR, Chocolatey)
+# plus a dry-run WinGet manifest, then actually installs each package on its
+# native platform. Never publishes anything: no `environment:`, no
+# publishing secrets, `permissions: contents: read`. See docs/testing.md.
+#
+# Two ways this runs:
+#   pull_request  — packaging files changed; renders against a goreleaser
+#                   snapshot (version 0.0.0) served locally over HTTP.
+#   workflow_run  — the "Release" workflow just succeeded; renders against
+#                   that real, tagged release's actual assets and
+#                   checksums.txt (read-only; no secrets needed for public
+#                   release assets).
+#   workflow_dispatch — validate an already-published tag on demand (e.g.
+#                   right after this workflow file merges, since
+#                   workflow_run can't fire retroactively). Also read-only.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/publish-packages.yml
+      - .github/workflows/packaging-validate.yml
+      - scripts/packaging/**
+      - .goreleaser.yaml
+      - scripts/filter-goreleaser.sh
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to validate (uses this ref's scripts/packaging)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: packaging-validate-${{ github.event.pull_request.number || github.event.workflow_run.head_branch || inputs.tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  REPO: zyno-io/sp2p
+  SERVE_PORT: "8765"
+  GORELEASER_VERSION: v2.18.2
+
+jobs:
+  resolve:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.resolve.outputs.skip }}
+      mode: ${{ steps.resolve.outputs.mode }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      base_url: ${{ steps.resolve.outputs.base_url }}
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Resolve validation mode, tag, version, and base URL
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          out() { printf '%s=%s\n' "$1" "$2" >>"$GITHUB_OUTPUT"; echo "$1=$2"; }
+          skip() { echo "::notice::Skipping packaging validation: $1"; out skip true; exit 0; }
+
+          if [[ "$EVENT" == pull_request ]]; then
+            out skip false
+            out mode snapshot
+            out tag ""
+            out version 0.0.0
+            out base_url "http://127.0.0.1:${SERVE_PORT}"
+            out ref "$GITHUB_SHA"
+            exit 0
+          fi
+
+          if [[ "$EVENT" == workflow_run ]]; then
+            [[ "$RUN_EVENT" == push ]] || skip "Release run's triggering event was '$RUN_EVENT', not a tag push"
+            TAG="$RUN_TAG" # release.yml triggers on push: tags: ["v*"], so head_branch is the tag name
+          else
+            TAG="$INPUT_TAG"
+          fi
+
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || skip "'$TAG' is not a publishable tag (publish-packages.yml's validate-release rule)"
+          gh release view "$TAG" -R "$REPO" --json tagName >/dev/null
+
+          TAG_SHA=$(gh api "repos/${REPO}/commits/${TAG}" --jq .sha)
+          if [[ "$EVENT" == workflow_run ]]; then
+            # Tags must never move (docs/testing.md's pinned-fixtures policy);
+            # if this one did, the Release run built a different commit than
+            # the tag currently points at, so validating "the tag" would
+            # silently validate the wrong thing.
+            if [[ "$TAG_SHA" != "$RUN_SHA" ]]; then
+              echo "::error::$TAG now points at ${TAG_SHA:0:12}, but the Release run built ${RUN_SHA:0:12}; tags must never move"
+              exit 1
+            fi
+            REF="$TAG_SHA" # publish-packages.yml is dispatched from the tag itself
+          else
+            REF="$GITHUB_SHA"
+          fi
+
+          # A tag from before render.sh existed has nothing for this workflow
+          # to validate.
+          if ! gh api "repos/${REPO}/contents/scripts/packaging/render.sh?ref=${REF}" --silent 2>/dev/null; then
+            skip "scripts/packaging/render.sh does not exist at ${REF:0:12} (this release predates it)"
+          fi
+
+          out skip false
+          out mode release
+          out tag "$TAG"
+          out version "${TAG#v}"
+          # Must equal the base URL publish-packages.yml's jobs build.
+          out base_url "https://github.com/${REPO}/releases/download/${TAG}"
+          out ref "$REF"
+
+  inputs:
+    needs: resolve
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      MODE: ${{ needs.resolve.outputs.mode }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - if: env.MODE == 'snapshot'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - if: env.MODE == 'snapshot'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - if: env.MODE == 'snapshot'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - if: env.MODE == 'snapshot'
+        run: npm --prefix web ci
+      - if: env.MODE == 'snapshot'
+        run: make build-web
+      - if: env.MODE == 'snapshot'
+        name: Install yq
+        run: |
+          YQ_VERSION="v4.44.6"
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq
+          echo '0c2b24e645b57d8e7c0566d18643a6d4f5580feeea3878127354a46f2a1e4598  /usr/local/bin/yq' | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+      - if: env.MODE == 'snapshot'
+        run: ./scripts/filter-goreleaser.sh all /tmp/goreleaser.yaml
+      - if: env.MODE == 'snapshot'
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: ${{ env.GORELEASER_VERSION }}
+          args: release --snapshot --clean --skip=publish,docker,sign --config /tmp/goreleaser.yaml
+        env:
+          APK_SIGNING_KEY: /dev/null
+          SP2P_VERSION: ${{ env.VERSION }}
+      - if: env.MODE == 'snapshot'
+        name: Checksum like release.yml's publish-release job
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -print0 |
+            LC_ALL=C sort -z | xargs -0 sha256sum >checksums.txt
+      - if: env.MODE == 'release'
+        name: Download the real release's assets and checksums.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          gh release download "$TAG" -R "$REPO" -D dist
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packaging-inputs
+          path: |
+            dist/checksums.txt
+            dist/sp2p_*.tar.gz
+            dist/sp2p_*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  render:
+    needs: [resolve, inputs]
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      BASE_URL: ${{ needs.resolve.outputs.base_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-inputs
+          path: dist
+      - name: Self-test render.sh
+        run: bash scripts/packaging/render_test.sh
+      - name: Render every channel
+        run: |
+          rc=0
+          for ch in homebrew scoop aur chocolatey; do
+            bash scripts/packaging/render.sh "$ch" "$VERSION" "$BASE_URL" dist/checksums.txt "rendered/$ch" || rc=1
+          done
+          exit "$rc"
+      - name: Syntax-check rendered manifests
+        run: |
+          ruby -c rendered/homebrew/sp2p.rb
+          jq empty rendered/scoop/sp2p.json
+          bash -n rendered/aur/PKGBUILD
+          python3 -c 'import sys, xml.dom.minidom as m; m.parse(sys.argv[1])' rendered/chocolatey/sp2p.nuspec
+          # shellcheck disable=SC2016 # $errors below is a PowerShell variable, not bash's
+          pwsh -NoProfile -Command '
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile("rendered/chocolatey/tools/chocolateyInstall.ps1", [ref]$null, [ref]$errors)
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+          '
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: packaging-rendered
+          path: rendered/
+          include-hidden-files: true # required, or aur/.SRCINFO is dropped
+          if-no-files-found: ignore
+          retention-days: 7
+
+  homebrew:
+    needs: [resolve, inputs, render]
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      MODE: ${{ needs.resolve.outputs.mode }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      BASE_URL: ${{ needs.resolve.outputs.base_url }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-inputs
+          path: dist
+      - if: env.MODE == 'snapshot'
+        run: bash scripts/packaging/serve.sh dist
+      - name: Render
+        run: bash scripts/packaging/render.sh homebrew "$VERSION" "$BASE_URL" dist/checksums.txt out/homebrew
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-rendered
+          path: rendered-ubuntu
+      - name: Confirm identical to the ubuntu render
+        run: diff -r rendered-ubuntu/homebrew out/homebrew
+      - name: Verify asset URLs and checksums
+        run: bash scripts/packaging/verify-urls.sh homebrew out/homebrew dist/checksums.txt
+      - name: Install, test, and audit
+        run: |
+          brew tap-new --no-git local/sp2p
+          tap=$(brew --repository local/sp2p)
+          mkdir -p "$tap/Formula"
+          cp out/homebrew/sp2p.rb "$tap/Formula/sp2p.rb"
+          brew trust --tap local/sp2p # Homebrew >=7 refuses formulae from an untrusted tap
+          brew install --formula local/sp2p/sp2p
+          brew test local/sp2p/sp2p
+          v=$("$(brew --prefix)/bin/sp2p" version)
+          echo "$v"
+          case "$v" in
+            "sp2p $VERSION"|"sp2p $VERSION "*) ;;
+            *) echo "::error::installed sp2p reports '$v', expected version $VERSION"; exit 1 ;;
+          esac
+          # --except=version: Homebrew's URL-derived-version audit always
+          # fires for a URL like .../download/v$VERSION/... — see
+          # docs/testing.md. --os/--arch=all also audits the on_* branches
+          # this runner's own platform doesn't take.
+          brew audit --strict --os=all --arch=all --except=version --formula local/sp2p/sp2p
+          brew uninstall --formula local/sp2p/sp2p
+          brew untap local/sp2p
+
+  scoop:
+    needs: [resolve, inputs, render]
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      MODE: ${{ needs.resolve.outputs.mode }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      BASE_URL: ${{ needs.resolve.outputs.base_url }}
+      # ScoopInstaller/Install@master, pinned by commit + sha256 (Scoop core
+      # itself still comes from unpinned master — inherent to Scoop).
+      SCOOP_INSTALLER_COMMIT: 1e2f334083d609986d8c8bc9e31ae8e87c39fab4
+      SCOOP_INSTALLER_SHA256: 94f983b190438311e006b957db7c8422709e0ba62a6c2ac04e278164108f2512
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-inputs
+          path: dist
+      - if: env.MODE == 'snapshot'
+        shell: pwsh
+        run: |
+          Start-Process -FilePath python -WorkingDirectory $PWD `
+            -ArgumentList '-m', 'http.server', $env:SERVE_PORT, '--bind', '127.0.0.1', '--directory', 'dist' `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\http.out" -RedirectStandardError "$env:RUNNER_TEMP\http.err"
+          foreach ($i in 1..30) {
+            try { Invoke-WebRequest -UseBasicParsing -Method Head "http://127.0.0.1:$env:SERVE_PORT/checksums.txt" | Out-Null; exit 0 }
+            catch { Start-Sleep 1 }
+          }
+          Get-Content "$env:RUNNER_TEMP\http.err" -ErrorAction SilentlyContinue
+          throw "local asset server did not start"
+      - name: Render
+        run: bash scripts/packaging/render.sh scoop "$VERSION" "$BASE_URL" dist/checksums.txt out/scoop
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-rendered
+          path: rendered-ubuntu
+      - name: Confirm identical to the ubuntu render
+        run: diff -r rendered-ubuntu/scoop out/scoop
+      - name: Verify asset URLs and checksums
+        run: bash scripts/packaging/verify-urls.sh scoop out/scoop dist/checksums.txt
+      - name: Manifest is well-formed JSON
+        shell: pwsh
+        run: Get-Content -Raw out/scoop/sp2p.json | ConvertFrom-Json | Out-Null
+      - name: Install Scoop
+        shell: pwsh
+        run: |
+          $installer = "$env:RUNNER_TEMP\install.ps1"
+          Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/ScoopInstaller/Install/$env:SCOOP_INSTALLER_COMMIT/install.ps1" -OutFile $installer
+          $actual = (Get-FileHash -Path $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:SCOOP_INSTALLER_SHA256) { throw "Scoop installer sha256 mismatch: got $actual" }
+          & $installer -RunAsAdmin
+          "$env:USERPROFILE\scoop\shims" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Install, run, and uninstall the package
+        shell: pwsh
+        run: |
+          $manifest = (Resolve-Path out/scoop/sp2p.json).Path
+          scoop install $manifest
+          $exe = "$env:USERPROFILE\scoop\apps\sp2p\current\sp2p.exe"
+          if (-not (Test-Path $exe)) { throw "sp2p.exe not found after scoop install" }
+          $v = (& "$env:USERPROFILE\scoop\shims\sp2p.exe" version | Out-String).Trim()
+          Write-Output $v
+          if ($v -notmatch ('^sp2p ' + [regex]::Escape($env:VERSION) + '( |$)')) { throw "unexpected version output: $v" }
+          scoop uninstall sp2p
+          if (Get-Command sp2p -ErrorAction SilentlyContinue) { throw "sp2p still resolvable after scoop uninstall" }
+
+  chocolatey:
+    needs: [resolve, inputs, render]
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      MODE: ${{ needs.resolve.outputs.mode }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      BASE_URL: ${{ needs.resolve.outputs.base_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-inputs
+          path: dist
+      - if: env.MODE == 'snapshot'
+        shell: pwsh
+        run: |
+          Start-Process -FilePath python -WorkingDirectory $PWD `
+            -ArgumentList '-m', 'http.server', $env:SERVE_PORT, '--bind', '127.0.0.1', '--directory', 'dist' `
+            -RedirectStandardOutput "$env:RUNNER_TEMP\http.out" -RedirectStandardError "$env:RUNNER_TEMP\http.err"
+          foreach ($i in 1..30) {
+            try { Invoke-WebRequest -UseBasicParsing -Method Head "http://127.0.0.1:$env:SERVE_PORT/checksums.txt" | Out-Null; exit 0 }
+            catch { Start-Sleep 1 }
+          }
+          Get-Content "$env:RUNNER_TEMP\http.err" -ErrorAction SilentlyContinue
+          throw "local asset server did not start"
+      - name: Render
+        run: bash scripts/packaging/render.sh chocolatey "$VERSION" "$BASE_URL" dist/checksums.txt out/chocolatey
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-rendered
+          path: rendered-ubuntu
+      - name: Confirm identical to the ubuntu render
+        run: diff -r rendered-ubuntu/chocolatey out/chocolatey
+      - name: Verify asset URLs and checksums
+        run: bash scripts/packaging/verify-urls.sh chocolatey out/chocolatey dist/checksums.txt
+      - name: Pack, install, run, and uninstall the package
+        shell: pwsh
+        run: |
+          Push-Location out/chocolatey
+          choco pack
+          if ($LASTEXITCODE -ne 0) { throw "choco pack failed" }
+          if (-not (Test-Path "sp2p.$env:VERSION.nupkg")) { throw "expected nupkg not found" }
+          choco install sp2p --source "$PWD" --version $env:VERSION -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco install failed" }
+          $exe = Join-Path $env:ChocolateyInstall 'bin\sp2p.exe'
+          $v = (& $exe version | Out-String).Trim()
+          Write-Output $v
+          if ($v -notmatch ('^sp2p ' + [regex]::Escape($env:VERSION) + '( |$)')) { throw "unexpected version output: $v" }
+          choco uninstall sp2p -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "choco uninstall failed" }
+
+  aur:
+    needs: [resolve, inputs, render]
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    timeout-minutes: 20
+    env:
+      MODE: ${{ needs.resolve.outputs.mode }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      BASE_URL: ${{ needs.resolve.outputs.base_url }}
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git base-devel namcap python
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-inputs
+          path: dist
+      - if: env.MODE == 'snapshot'
+        run: bash scripts/packaging/serve.sh dist
+      - name: Render
+        run: bash scripts/packaging/render.sh aur "$VERSION" "$BASE_URL" dist/checksums.txt out/aur
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-rendered
+          path: rendered-ubuntu
+      - name: Confirm identical to the ubuntu render
+        run: diff -r rendered-ubuntu/aur out/aur
+      - name: Verify asset URLs and checksums
+        run: bash scripts/packaging/verify-urls.sh aur out/aur dist/checksums.txt
+      - name: Build, lint, and install as a non-root user
+        run: |
+          useradd -m builder
+          install -d -o builder -g builder /home/builder/build
+          cp out/aur/PKGBUILD out/aur/.SRCINFO LICENSE /home/builder/build/
+          chown builder:builder /home/builder/build/PKGBUILD /home/builder/build/.SRCINFO /home/builder/build/LICENSE
+
+          echo "-- .SRCINFO must match what makepkg itself derives from the PKGBUILD --"
+          su builder -c 'cd ~/build && makepkg --printsrcinfo' | diff -u - out/aur/.SRCINFO
+
+          echo "-- namcap on the PKGBUILD --"
+          su builder -c 'cd ~/build && namcap PKGBUILD' | tee /tmp/namcap-pkgbuild.txt
+          if grep -qE ' E: ' /tmp/namcap-pkgbuild.txt; then
+            echo "::error::namcap reported error(s) against PKGBUILD"
+            exit 1
+          fi
+
+          echo "-- build --"
+          su builder -c 'cd ~/build && makepkg -s --noconfirm --cleanbuild'
+          pkg=$(su builder -c 'cd ~/build && makepkg --packagelist' | grep -v -- '-debug-')
+          if [ "$(printf '%s\n' "$pkg" | grep -c '^.')" -ne 1 ]; then
+            echo "::error::expected exactly one non-debug package, got: $pkg"
+            exit 1
+          fi
+
+          echo "-- namcap on the built package --"
+          su builder -c "cd ~/build && namcap '$pkg'" | tee /tmp/namcap-pkg.txt
+          if grep -qE ' E: ' /tmp/namcap-pkg.txt; then
+            echo "::error::namcap reported error(s) against the built package"
+            exit 1
+          fi
+
+          echo "-- install and run --"
+          pacman -U --noconfirm "$pkg"
+          v=$(sp2p version)
+          echo "$v"
+          case "$v" in
+            "sp2p $VERSION"|"sp2p $VERSION "*) ;;
+            *) echo "::error::installed sp2p reports '$v', expected version $VERSION"; exit 1 ;;
+          esac
+          test -f /usr/share/licenses/sp2p-bin/LICENSE
+          pacman -Rns --noconfirm sp2p-bin
+
+  winget:
+    needs: [resolve, inputs]
+    if: needs.resolve.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MODE: ${{ needs.resolve.outputs.mode }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      BASE_URL: ${{ needs.resolve.outputs.base_url }}
+      # komac v2.16.0 linux x86_64 tarball, from its own published SHA256SUMS.
+      KOMAC_VERSION: 2.16.0
+      KOMAC_SHA256: 7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packaging-inputs
+          path: dist
+      - if: env.MODE == 'snapshot'
+        run: bash scripts/packaging/serve.sh dist
+      - name: Install yq
+        run: |
+          YQ_VERSION="v4.44.6"
+          curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" -o /usr/local/bin/yq
+          echo '0c2b24e645b57d8e7c0566d18643a6d4f5580feeea3878127354a46f2a1e4598  /usr/local/bin/yq' | sha256sum -c -
+          chmod +x /usr/local/bin/yq
+      - name: Read identifier and installers-regex from publish-packages.yml
+        id: cfg
+        run: |
+          sel='.jobs.winget.steps[] | select((.uses // "") | test("^vedantmgoyal9/winget-releaser@"))'
+          id=$(yq "$sel | .with.identifier" .github/workflows/publish-packages.yml)
+          re=$(yq "$sel | .with.\"installers-regex\"" .github/workflows/publish-packages.yml)
+          echo "identifier=$id" >>"$GITHUB_OUTPUT"
+          echo "regex=$re" >>"$GITHUB_OUTPUT"
+      - name: Resolve installer URLs the way the action does
+        id: urls
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IDENTIFIER: ${{ steps.cfg.outputs.identifier }}
+          REGEX: ${{ steps.cfg.outputs.regex }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = release ]; then
+            # shellcheck disable=SC2016 # $re below is a jq variable (--arg re), not bash's
+            mapfile -t urls < <(gh api "repos/${REPO}/releases/tags/${TAG}" --jq \
+              --arg re "$REGEX" '.assets[] | select(.name | test($re)) | .browser_download_url')
+          else
+            mapfile -t names < <(awk '{ f = $2; sub(/^\*?\.\//, "", f); sub(/^\*/, "", f); print f }' dist/checksums.txt |
+              grep -E "$REGEX")
+            urls=()
+            for n in "${names[@]}"; do urls+=("${BASE_URL}/${n}"); done
+          fi
+          if [ "${#urls[@]}" -ne 2 ]; then
+            echo "::error::expected exactly 2 installer URLs matching '$REGEX', got ${#urls[@]}"
+            exit 1
+          fi
+          printf 'urls=%s\n' "${urls[*]}" >>"$GITHUB_OUTPUT"
+      - name: Install komac
+        run: |
+          curl -fsSL "https://github.com/russellbanks/komac/releases/download/v${KOMAC_VERSION}/komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz" -o /tmp/komac.tar.gz
+          echo "${KOMAC_SHA256}  /tmp/komac.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/komac.tar.gz -C /tmp
+          install -m 755 "/tmp/komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu/komac" /usr/local/bin/komac
+      - name: Dry-run a WinGet manifest update
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          KOMAC_CREATED_WITH: WinGet Releaser
+          KOMAC_CREATED_WITH_URL: https://github.com/vedantmgoyal9/winget-releaser
+          IDENTIFIER: ${{ steps.cfg.outputs.identifier }}
+        run: |
+          # shellcheck disable=SC2086
+          komac update "$IDENTIFIER" --version "$VERSION" --urls ${{ steps.urls.outputs.urls }} \
+            --dry-run --output out/winget
+      - name: Check the rendered manifest
+        run: |
+          set -euo pipefail
+          dir=$(find out/winget -type d -path "*/zyno-io/sp2p/${VERSION}")
+          [ -n "$dir" ] || { echo "::error::no rendered manifest directory for version $VERSION"; exit 1; }
+          count=$(find "$dir" -maxdepth 1 -name '*.yaml' | wc -l)
+          [ "$count" -eq 3 ] || { echo "::error::expected 3 manifest files, found $count"; exit 1; }
+          installer="$dir/${{ steps.cfg.outputs.identifier }}.installer.yaml"
+          [ "$(yq '.PackageVersion' "$installer")" = "$VERSION" ] || { echo "::error::PackageVersion mismatch"; exit 1; }
+          [ "$(yq '.Installers | length' "$installer")" -eq 2 ] || { echo "::error::expected 2 installers"; exit 1; }
+          nested=$(yq '.NestedInstallerType // .Installers[0].NestedInstallerType' "$installer")
+          [ "$nested" = portable ] || { echo "::error::expected NestedInstallerType portable, got $nested"; exit 1; }
+          bash scripts/packaging/verify-urls.sh winget "$dir" dist/checksums.txt
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: packaging-winget-manifests
+          path: out/winget
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Not validated here, and intentionally so:
+  #   - The fork sync, branch push, and PR creation steps of the real WinGet
+  #     job need WINGET_TOKEN (a PAT this workflow deliberately has no
+  #     access to) and would create a real pull request against
+  #     microsoft/winget-pkgs.
+  #   - `winget validate` itself: the winget CLI isn't a dependable tool on
+  #     a Linux/macOS runner image, and komac writes schema-versioned
+  #     manifests (1.12.0 as of this writing) itself, which is what's
+  #     checked above instead.

@@ -69,6 +69,7 @@ jobs:
       has_linux: ${{ steps.parse.outputs.has_linux }}
       has_darwin: ${{ steps.parse.outputs.has_darwin }}
       has_windows: ${{ steps.parse.outputs.has_windows }}
+      web_bundle: ${{ steps.web_bundle.outputs.bundle }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -134,6 +135,22 @@ jobs:
         run: cd web && npm ci
       - if: steps.parse.outputs.has_server == 'true'
         run: make build-web
+
+      # The smoke job (below) waits until sp2p.io serves exactly this
+      # bundle, so it knows the deploy actually landed rather than serving a
+      # previous release's identically-shaped filename by coincidence.
+      - name: Record web bundle name
+        id: web_bundle
+        if: steps.parse.outputs.has_server == 'true'
+        run: |
+          set -euo pipefail
+          mapfile -t bundles < <(grep -oE 'src="main-[A-Z0-9]{8}\.js"' web/dist/index.html | sed -E 's/^src="(.*)"$/\1/' | sort -u)
+          if [[ ${#bundles[@]} -ne 1 || ! -f "web/dist/${bundles[0]}" ]]; then
+            echo "::error::Expected exactly one main-*.js bundle referenced by web/dist/index.html"
+            exit 1
+          fi
+          echo "bundle=${bundles[0]}" >> "$GITHUB_OUTPUT"
+          echo "Web bundle: ${bundles[0]}"
 
       # --- code signing setup ---
       - name: Install rcodesign
@@ -412,3 +429,17 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
           ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'cd /opt/sp2p && docker compose pull && docker compose up -d'
+
+  # Post-deploy check of production sp2p.io. Full releases only: a
+  # `-server`-scoped tag has no CLI asset to drive one side of the transfer
+  # (dispatch smoke-production.yml by hand with cli_tag for that case), and a
+  # CLI-only tag never deploys anything for this to check.
+  smoke:
+    needs: [release, publish-release]
+    if: needs.release.outputs.scope == 'all'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/smoke-production.yml
+    with:
+      tag: ${{ github.ref_name }}
+      expected_bundle: ${{ needs.release.outputs.web_bundle }}
