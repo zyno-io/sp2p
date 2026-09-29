@@ -154,14 +154,14 @@ func (r *streamReporter) finish(err error, sent, received uint64) error {
 	return reportedMachineError(err)
 }
 
-func (r *streamReporter) promptRelay(ctx context.Context) bool {
+func (r *streamReporter) promptRelay(ctx context.Context) conn.RelayAnswer {
 	if r.machine != nil {
-		return r.machine.PromptRelayContext(ctx)
+		return r.machine.PromptRelayAnswer(ctx)
 	}
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Relay requires consent; use --allow-relay when running without a terminal.")
-		return false
+		return conn.RelayUnavailable
 	}
 	defer tty.Close()
 	stop := context.AfterFunc(ctx, func() { tty.Close() })
@@ -169,10 +169,13 @@ func (r *streamReporter) promptRelay(ctx context.Context) bool {
 	fmt.Fprint(os.Stderr, "Direct connection failed. Allow the encrypted TURN relay? [y/N]: ")
 	scanner := bufio.NewScanner(tty)
 	if !scanner.Scan() {
-		return false
+		return conn.RelayUnavailable
 	}
 	answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
-	return answer == "y" || answer == "yes"
+	if answer == "y" || answer == "yes" {
+		return conn.RelayAllow
+	}
+	return conn.RelayDeny
 }
 
 func (r *streamReporter) subprocessWriter(name string, human io.Writer) io.Writer {

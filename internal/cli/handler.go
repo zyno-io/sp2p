@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"time"
 
 	"github.com/zyno-io/sp2p/internal/conn"
@@ -116,4 +117,12 @@ func (h *cliHandler) PromptRelay() bool {
 	result := promptRelay()
 	h.progress.Resume()
 	return result
+}
+
+// PromptRelayAnswer implements flow.RelayPromptHandler: a cancellable,
+// richer relay prompt that flow prefers over PromptRelay above.
+func (h *cliHandler) PromptRelayAnswer(ctx context.Context) conn.RelayAnswer {
+	h.progress.Pause()
+	defer h.progress.Resume()
+	return promptRelayTTY(ctx)
 }

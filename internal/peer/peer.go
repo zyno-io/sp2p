@@ -7,6 +7,7 @@ package peer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"runtime"
@@ -34,7 +35,7 @@ type Config struct {
 	OnPhase       func(string)
 	OnStatus      func(conn.MethodStatus)
 	OnLog         func(string)
-	PromptRelay   func(context.Context) bool
+	PromptRelay   func(context.Context) conn.RelayAnswer
 }
 
 // Result owns the established physical connection and its encrypted frame
@@ -344,133 +345,73 @@ func joinerExchange(ctx context.Context, client *signal.Client, public []byte, p
 }
 
 func establish(ctx context.Context, client *signal.Client, cfg Config, connCfg conn.ConnectConfig, turnAvailable bool, logf func(string, ...any)) (*conn.EstablishResult, error) {
-	peerLeft := client.Subscribe(signal.TypePeerLeft)
-	defer client.Unsubscribe(signal.TypePeerLeft, peerLeft)
-	relay := client.Subscribe(signal.TypeRelayRetry)
-	defer client.Unsubscribe(signal.TypeRelayRetry, relay)
-	denied := client.Subscribe(signal.TypeRelayDenied)
-	defer client.Unsubscribe(signal.TypeRelayDenied, denied)
+	relayWatch := conn.WatchRelay(client)
+	defer relayWatch.Close()
 
-	attemptCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	monitorCtx, stopMonitor := context.WithCancel(ctx)
-	peerRequestedRelay := make(chan struct{})
-	peerDisconnected := make(chan struct{})
-	peerDeniedRelay := make(chan struct{})
-	monitorDone := make(chan struct{})
-	defer func() { stopMonitor(); <-monitorDone }()
-	go func() {
-		defer close(monitorDone)
-		for {
-			select {
-			case <-relay:
-				select {
-				case <-peerRequestedRelay:
-				default:
-					close(peerRequestedRelay)
-				}
-				cancel()
-			case <-peerLeft:
-				select {
-				case <-peerDisconnected:
-				default:
-					close(peerDisconnected)
-				}
-				cancel()
-			case <-denied:
-				select {
-				case <-peerDeniedRelay:
-				default:
-					close(peerDeniedRelay)
-				}
-			case <-client.Done():
-				select {
-				case <-peerDisconnected:
-				default:
-					close(peerDisconnected)
-				}
-				cancel()
-				return
-			case <-monitorCtx.Done():
-				return
-			}
-		}
-	}()
+	attemptCtx := relayWatch.AttemptContext(ctx)
 	result, err := conn.Establish(attemptCtx, connCfg)
-	if err == nil {
-		select {
-		case <-peerDisconnected:
-			closeEstablishResult(result)
-			return nil, fmt.Errorf("peer disconnected")
-		default:
-			return result, nil
-		}
-	}
-	select {
-	case <-peerDisconnected:
+	if relayWatch.PeerLeft() {
+		closeEstablishResult(result)
 		return nil, fmt.Errorf("peer disconnected")
-	default:
+	}
+	if err == nil {
+		return result, nil
 	}
 	if !turnAvailable || cfg.Transport == conn.TransportTCP {
 		return nil, err
 	}
 	logf("direct connection failed; requesting TURN relay")
-	// Subscribe before requesting credentials: a local/fast signaling server
-	// may reply before Send returns.
-	turnCh := client.Subscribe(signal.TypeTURNCredentials)
-	defer client.Unsubscribe(signal.TypeTURNCredentials, turnCh)
-	if sendErr := client.Send(ctx, signal.TypeRelayRetry, struct{}{}); sendErr != nil {
-		return nil, fmt.Errorf("requesting relay: %w", sendErr)
-	}
-	select {
-	case env := <-turnCh:
-		if env == nil {
-			return nil, fmt.Errorf("signaling connection lost waiting for relay credentials")
-		}
-		var credentials signal.TURNCredentials
-		if err := env.ParsePayload(&credentials); err != nil {
-			return nil, fmt.Errorf("parsing relay credentials: %w", err)
-		}
-		_, turns := iceServers(credentials.ICEServers)
-		connCfg.TURNServers = append(connCfg.TURNServers, turns...)
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-peerDisconnected:
-		return nil, fmt.Errorf("peer disconnected")
-	case <-peerDeniedRelay:
-		return nil, fmt.Errorf("peer denied relay")
-	case <-time.After(30 * time.Second):
-		return nil, fmt.Errorf("timeout waiting for relay credentials")
-	}
-	select {
-	case <-peerDisconnected:
-		return nil, fmt.Errorf("peer disconnected")
-	default:
-	}
-	if !cfg.RelayOK {
-		allowed, promptErr := askRelay(ctx, peerDisconnected, peerDeniedRelay, cfg.PromptRelay)
-		if promptErr != nil {
-			return nil, promptErr
-		}
-		if !allowed {
-			client.Send(ctx, signal.TypeRelayDenied, struct{}{})
-			return nil, fmt.Errorf("direct connection failed and relay was not allowed")
-		}
-	}
-	select {
-	case <-peerRequestedRelay:
-	case <-peerDeniedRelay:
-		return nil, fmt.Errorf("peer denied relay")
-	case <-peerDisconnected:
-		return nil, fmt.Errorf("peer disconnected")
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(30 * time.Second):
-		return nil, fmt.Errorf("peer did not agree to relay")
-	}
 	connCfg.Transport = conn.TransportWebRTC
-	return conn.Establish(ctx, connCfg)
+	result, err = conn.RetryWithRelay(ctx, client, relayWatch, connCfg, conn.RelayOptions{
+		RelayOK: cfg.RelayOK,
+		Prompt:  cfg.PromptRelay,
+		OnLog:   cfg.OnLog,
+	})
+	if err != nil {
+		return nil, mapRelayErr(err)
+	}
+	return result, nil
 }
+
+// mapRelayErr turns a conn.RetryWithRelay error into peer's plain-text
+// contract: since this package has no separate user-facing message channel
+// (unlike flow.Handler.OnError), err.Error() itself is what a human sees. It
+// wraps rather than replaces the original error so errors.Is(err,
+// conn.ErrPeerDeclinedRelay) still matches further up the call chain (e.g.
+// internal/cli/machine.go's peer_relay_denied code for tunnel/rsync).
+func mapRelayErr(err error) error {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	var declined *conn.PeerDeclinedRelayError
+	switch {
+	case errors.As(err, &declined):
+		text := "direct connection failed and the peer declined the relay"
+		if declined.Reason == signal.RelayDeniedUnavailable {
+			text = "direct connection failed and the peer could not be asked to allow the relay; they can rerun sp2p with -allow-relay"
+		}
+		return &relayTextError{text: text, err: err}
+	case errors.Is(err, conn.ErrPeerLeft):
+		return &relayTextError{text: "peer disconnected", err: err}
+	case errors.Is(err, conn.ErrPeerRelayTimeout):
+		return &relayTextError{text: "timed out waiting for the peer to allow the relay", err: err}
+	case errors.Is(err, conn.ErrSignalingLost):
+		return &relayTextError{text: "signaling connection lost", err: err}
+	case errors.Is(err, conn.ErrRelayNotAllowed):
+		return &relayTextError{text: "direct connection failed and relay was not allowed", err: err}
+	}
+	return err
+}
+
+// relayTextError pairs a friendly, human-facing message with an underlying
+// error that errors.Is/errors.As can still traverse.
+type relayTextError struct {
+	text string
+	err  error
+}
+
+func (e *relayTextError) Error() string { return e.text }
+func (e *relayTextError) Unwrap() error { return e.err }
 
 func closeEstablishResult(result *conn.EstablishResult) {
 	if result == nil {
@@ -481,36 +422,6 @@ func closeEstablishResult(result *conn.EstablishResult) {
 	}
 	if result.TCPResult != nil && result.TCPResult.Cleanup != nil {
 		result.TCPResult.Cleanup()
-	}
-}
-
-// askRelay gives a terminal-independent relay prompt a context which is
-// canceled when the peer goes away or refuses relay. PromptRelay is required
-// to honor its context; waiting for its result after cancellation keeps this
-// helper from leaving a prompt goroutine behind.
-func askRelay(ctx context.Context, peerDisconnected, peerDenied <-chan struct{}, prompt func(context.Context) bool) (bool, error) {
-	if prompt == nil {
-		return false, nil
-	}
-	promptCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	result := make(chan bool, 1)
-	go func() { result <- prompt(promptCtx) }()
-	select {
-	case allowed := <-result:
-		return allowed, nil
-	case <-peerDisconnected:
-		cancel()
-		<-result
-		return false, fmt.Errorf("peer disconnected")
-	case <-peerDenied:
-		cancel()
-		<-result
-		return false, fmt.Errorf("peer denied relay")
-	case <-ctx.Done():
-		cancel()
-		<-result
-		return false, ctx.Err()
 	}
 }
 

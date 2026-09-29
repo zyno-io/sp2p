@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/zyno-io/sp2p/internal/conn"
 	"github.com/zyno-io/sp2p/internal/flow"
 )
 
@@ -93,15 +94,27 @@ func sendMachine(ctx context.Context, cfg SendConfig) error {
 	return nil
 }
 
-// promptRelay asks the user whether to allow TURN relay.
-// It opens /dev/tty directly so it works even when stdin is piped.
-// Returns false if no TTY is available.
+// promptRelay asks the user whether to allow TURN relay. It opens /dev/tty
+// directly so it works even when stdin is piped. Returns false if no TTY is
+// available. Kept for the plain Handler.PromptRelay() bool contract; the
+// interactive CLI itself uses the cancellable promptRelayTTY below.
 func promptRelay() bool {
+	return promptRelayTTY(context.Background()) == conn.RelayAllow
+}
+
+// promptRelayTTY asks the user whether to allow TURN relay, honoring ctx
+// cancellation by closing the TTY out from under a blocked read — the same
+// pattern stream_reporter.go's promptRelay uses. It opens /dev/tty directly
+// so it works even when stdin is piped. Returns Unavailable if no TTY is
+// available, ctx is canceled before an answer arrives, or input hits EOF.
+func promptRelayTTY(ctx context.Context) conn.RelayAnswer {
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
-		return false
+		return conn.RelayUnavailable
 	}
 	defer tty.Close()
+	stop := context.AfterFunc(ctx, func() { tty.Close() })
+	defer stop()
 
 	// Check that the TTY is actually readable (not EOF) before printing
 	// the prompt. In environments like Docker without -t, /dev/tty may
@@ -118,10 +131,14 @@ func promptRelay() bool {
 	scanner := bufio.NewScanner(tty)
 	if scanner.Scan() {
 		answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-		return answer == "y" || answer == "yes"
+		if answer == "y" || answer == "yes" {
+			return conn.RelayAllow
+		}
+		return conn.RelayDeny
 	}
-	// Scanner failed (EOF / no TTY input). Print newline so the cursor
-	// moves off the prompt line and Resume() doesn't erase it.
+	// Scanner failed (EOF / no TTY input / ctx canceled and tty closed).
+	// Print newline so the cursor moves off the prompt line and Resume()
+	// doesn't erase it.
 	fmt.Fprintf(os.Stderr, "\n")
-	return false
+	return conn.RelayUnavailable
 }

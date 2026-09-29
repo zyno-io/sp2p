@@ -406,32 +406,33 @@ func (r *machineReporter) OnWarning(message string) {
 // creates the response file itself so an agent cannot accidentally approve a
 // later transfer with a stale file. The file is removed after a response.
 func (r *machineReporter) PromptRelay() bool {
-	return r.promptRelay(r.ctx)
+	return r.promptRelay(r.ctx) == conn.RelayAllow
 }
 
-// PromptRelayContext lets flow stop a machine relay prompt when the peer has
-// already declined or disconnected.
-func (r *machineReporter) PromptRelayContext(ctx context.Context) bool {
+// PromptRelayAnswer lets flow stop a machine relay prompt when the peer has
+// already declined or disconnected, and reports "could not be asked"
+// (response-file errors) distinctly from an explicit deny.
+func (r *machineReporter) PromptRelayAnswer(ctx context.Context) conn.RelayAnswer {
 	return r.promptRelay(ctx)
 }
 
-func (r *machineReporter) promptRelay(ctx context.Context) bool {
+func (r *machineReporter) promptRelay(ctx context.Context) conn.RelayAnswer {
 	responseFile, err := os.CreateTemp("", "sp2p-relay-response-")
 	if err != nil {
 		r.OnError("Could not create relay response file")
-		return false
+		return conn.RelayUnavailable
 	}
 	path := responseFile.Name()
 	if err := responseFile.Chmod(0o600); err != nil {
 		responseFile.Close()
 		os.Remove(path)
 		r.OnError("Could not secure relay response file")
-		return false
+		return conn.RelayUnavailable
 	}
 	if err := responseFile.Close(); err != nil {
 		os.Remove(path)
 		r.OnError("Could not prepare relay response file")
-		return false
+		return conn.RelayUnavailable
 	}
 	defer os.Remove(path)
 
@@ -455,7 +456,7 @@ func (r *machineReporter) promptRelay(ctx context.Context) bool {
 			r.snapshot.RelayRequired = false
 			r.mu.Unlock()
 			r.OnError("Could not read relay response file")
-			return false
+			return conn.RelayUnavailable
 		}
 		response := strings.ToLower(strings.TrimSpace(string(data)))
 		switch response {
@@ -465,7 +466,10 @@ func (r *machineReporter) promptRelay(ctx context.Context) bool {
 			r.snapshot.RelayRequired = false
 			r.emitLocked(machineEvent{Event: "relay_response", Response: response})
 			r.mu.Unlock()
-			return response == "allow"
+			if response == "allow" {
+				return conn.RelayAllow
+			}
+			return conn.RelayDeny
 		case "":
 			// Still waiting for the agent.
 		default:
@@ -490,7 +494,7 @@ func (r *machineReporter) promptRelay(ctx context.Context) bool {
 			r.snapshot.RelayRequired = false
 			r.emitLocked(machineEvent{Event: "relay_prompt_canceled"})
 			r.mu.Unlock()
-			return false
+			return conn.RelayUnavailable
 		case <-ticker.C:
 		}
 	}
@@ -520,6 +524,8 @@ func (r *machineReporter) finish(err error, savedPath string) {
 		errorCode := "operation_failed"
 		if errors.Is(err, context.Canceled) {
 			errorCode = "canceled"
+		} else if errors.Is(err, conn.ErrPeerDeclinedRelay) {
+			errorCode = "peer_relay_denied"
 		} else if r.relayResponse == "deny" {
 			errorCode = "relay_denied"
 		} else if r.snapshot.RelayRequired {

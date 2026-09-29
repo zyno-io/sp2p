@@ -135,6 +135,65 @@ func TestUnsubscribe_ResumesIncoming(t *testing.T) {
 	}
 }
 
+func TestSubscribeTypes_DeliversMultipleTypesInOrder(t *testing.T) {
+	srv, getConn := wsServer(t)
+	defer srv.Close()
+
+	client := connectClient(t, srv.URL)
+	defer client.Close()
+
+	srvConn := getConn()
+	defer srvConn.Close(websocket.StatusNormalClosure, "")
+
+	ch := client.SubscribeTypes(TypeRelayDenied, TypePeerLeft)
+	defer client.UnsubscribeTypes(ch, TypeRelayDenied, TypePeerLeft)
+
+	// Interleave with a type that is NOT subscribed, to prove only the
+	// requested types land on ch, in the order the server sent them.
+	sendEnvelope(t, srvConn, TypeCandidate, &Candidate{Candidate: "candidate:1"})
+	sendEnvelope(t, srvConn, TypeRelayDenied, &RelayDenied{Reason: RelayDeniedDeclined})
+	sendEnvelope(t, srvConn, TypePeerLeft, &PeerLeft{})
+
+	select {
+	case env := <-ch:
+		if env.Type != TypeRelayDenied {
+			t.Fatalf("expected relay-denied first, got %s", env.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for relay-denied on SubscribeTypes channel")
+	}
+	select {
+	case env := <-ch:
+		if env.Type != TypePeerLeft {
+			t.Fatalf("expected peer-left second, got %s", env.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for peer-left on SubscribeTypes channel")
+	}
+
+	// The unsubscribed candidate went to Incoming, not ch.
+	select {
+	case env := <-client.Incoming:
+		if env.Type != TypeCandidate {
+			t.Fatalf("expected candidate on Incoming, got %s", env.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for candidate on Incoming")
+	}
+
+	// After unsubscribing, both types go back to Incoming.
+	client.UnsubscribeTypes(ch, TypeRelayDenied, TypePeerLeft)
+	sendEnvelope(t, srvConn, TypeRelayDenied, &RelayDenied{})
+	select {
+	case env := <-client.Incoming:
+		if env.Type != TypeRelayDenied {
+			t.Fatalf("expected relay-denied on Incoming after unsubscribe, got %s", env.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for relay-denied on Incoming after UnsubscribeTypes")
+	}
+}
+
 // ── Done channel ───────────────────────────────────────────────────────────
 
 func TestDone_ClosesOnServerDisconnect(t *testing.T) {

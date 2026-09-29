@@ -23,8 +23,8 @@ const (
 	TypeDirect           = "direct" // Direct connection endpoint exchange
 	TypeConnected        = "connected"
 	TypeRetry            = "retry"             // Signals willingness to retry P2P with swapped roles
-	TypeRelayRetry       = "relay-retry"       // Signals willingness to retry with TURN relay
-	TypeRelayDenied      = "relay-denied"      // Signals that the peer denied TURN relay
+	TypeRelayRetry       = "relay-retry"       // Signals willingness to retry with TURN relay (payload: RelayRetry)
+	TypeRelayDenied      = "relay-denied"      // Signals that a side denied (or could not be asked to allow) TURN relay (payload: RelayDenied)
 	TypeTURNCredentials  = "turn-credentials"  // Server delivers TURN credentials on relay-retry
 	TypeFileInfo         = "file-info"         // Encrypted file metadata for receiver preview
 	TypeTransferComplete = "transfer-complete" // Client reports transfer stats to server
@@ -133,6 +133,43 @@ type FileInfo struct {
 
 // PeerLeft notifies a client that the other peer has disconnected.
 type PeerLeft struct{}
+
+// RelayRetry signals willingness to retry P2P using a TURN relay. Consent is
+// an additive field: every server since v0.1.0 forwards this message
+// verbatim, so a client on v0.6.2 or earlier sends an empty payload ({}).
+// Consent == "" (missing) means "old client" and is always treated as
+// RelayConsentGranted, matching that client's original go-immediately
+// behavior.
+type RelayRetry struct {
+	Consent string `json:"consent,omitempty"`
+}
+
+// RelayDenied signals that a side denied (or could not be asked to allow)
+// TURN relay. Reason is an additive field: a client on v0.6.2 or earlier
+// sends an empty payload, which is always treated as RelayDeniedDeclined.
+type RelayDenied struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// Relay consent stages carried by RelayRetry.Consent.
+const (
+	// RelayConsentPending means the sender gave up on a direct connection
+	// and its local relay prompt is open; a decision (granted or a
+	// relay-denied message) will follow.
+	RelayConsentPending = "pending"
+	// RelayConsentGranted means the sender consented to the relay (or ran
+	// with -allow-relay) and is ready for the relay connection attempt.
+	RelayConsentGranted = "granted"
+)
+
+// Relay decline reasons carried by RelayDenied.Reason.
+const (
+	// RelayDeniedDeclined means a person was asked and said no.
+	RelayDeniedDeclined = "declined"
+	// RelayDeniedUnavailable means the sender could not ask: no TTY/CONIN,
+	// a machine-mode response-file error, or a nil prompt callback.
+	RelayDeniedUnavailable = "unavailable"
+)
 
 // Error carries an error message.
 type Error struct {

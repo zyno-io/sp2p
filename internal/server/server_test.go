@@ -1309,6 +1309,90 @@ func setupPeers(t *testing.T, wsURL string) (sender, receiver *websocket.Conn) {
 	return sender, receiver
 }
 
+// TestSignal_RelayConsentPayloadsPassThroughUnchanged guards the compatibility
+// assumption the relay-consent design depends on: the server relays
+// relay-retry/relay-denied payload bytes verbatim (it never inspects or
+// rewrites the new "consent"/"reason" fields), and a second relay-retry
+// still gets the same cached TURN credentials as the first.
+func TestSignal_RelayConsentPayloadsPassThroughUnchanged(t *testing.T) {
+	wantURLs := []string{"turn:relay.example.com:3478"}
+	_, wsURL := startTestServerWithConfig(t, Config{
+		Addr:    ":0",
+		BaseURL: "http://localhost",
+		StaticTURN: []signal.ICEServer{
+			{URLs: wantURLs, Username: "u", Credential: "p"},
+		},
+	})
+	sender, receiver := setupPeers(t, wsURL)
+
+	// relay-retry{"consent":"pending"} arrives at the peer byte-for-byte,
+	// and the server still issues TURN credentials to the sender.
+	wsSend(t, sender, signal.TypeRelayRetry, signal.RelayRetry{Consent: signal.RelayConsentPending})
+	creds := wsReadSlow(t, sender)
+	if creds.Type != signal.TypeTURNCredentials {
+		t.Fatalf("expected turn-credentials, got %s", creds.Type)
+	}
+	var firstCreds signal.TURNCredentials
+	if err := creds.ParsePayload(&firstCreds); err != nil {
+		t.Fatal(err)
+	}
+
+	relayed := wsReadSlow(t, receiver)
+	if relayed.Type != signal.TypeRelayRetry {
+		t.Fatalf("expected relay-retry, got %s", relayed.Type)
+	}
+	var relayedRR signal.RelayRetry
+	if err := relayed.ParsePayload(&relayedRR); err != nil {
+		t.Fatal(err)
+	}
+	if relayedRR.Consent != signal.RelayConsentPending {
+		t.Fatalf("relayed consent = %q, want pending (payload must pass through unchanged)", relayedRR.Consent)
+	}
+
+	// relay-denied{"reason":"unavailable"} also passes through unchanged.
+	wsSend(t, receiver, signal.TypeRelayDenied, signal.RelayDenied{Reason: signal.RelayDeniedUnavailable})
+	deniedEnv := wsReadSlow(t, sender)
+	if deniedEnv.Type != signal.TypeRelayDenied {
+		t.Fatalf("expected relay-denied, got %s", deniedEnv.Type)
+	}
+	var rd signal.RelayDenied
+	if err := deniedEnv.ParsePayload(&rd); err != nil {
+		t.Fatal(err)
+	}
+	if rd.Reason != signal.RelayDeniedUnavailable {
+		t.Fatalf("relayed reason = %q, want unavailable", rd.Reason)
+	}
+
+	// A second relay-retry (now consent=granted) returns the SAME cached
+	// credentials — clients ignore the extra copy, and no fresh TURN
+	// allocation happens on the repeat.
+	wsSend(t, sender, signal.TypeRelayRetry, signal.RelayRetry{Consent: signal.RelayConsentGranted})
+	repeatedCreds := wsReadSlow(t, sender)
+	if repeatedCreds.Type != signal.TypeTURNCredentials {
+		t.Fatalf("expected turn-credentials, got %s", repeatedCreds.Type)
+	}
+	var secondCreds signal.TURNCredentials
+	if err := repeatedCreds.ParsePayload(&secondCreds); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstCreds.ICEServers) != 1 || len(secondCreds.ICEServers) != 1 ||
+		firstCreds.ICEServers[0].Username != secondCreds.ICEServers[0].Username ||
+		firstCreds.ICEServers[0].Credential != secondCreds.ICEServers[0].Credential {
+		t.Fatalf("credentials changed on repeat: first=%+v second=%+v", firstCreds, secondCreds)
+	}
+	repeatedRelay := wsReadSlow(t, receiver)
+	if repeatedRelay.Type != signal.TypeRelayRetry {
+		t.Fatalf("expected relay-retry, got %s", repeatedRelay.Type)
+	}
+	var repeatedRR signal.RelayRetry
+	if err := repeatedRelay.ParsePayload(&repeatedRR); err != nil {
+		t.Fatal(err)
+	}
+	if repeatedRR.Consent != signal.RelayConsentGranted {
+		t.Fatalf("relayed consent = %q, want granted", repeatedRR.Consent)
+	}
+}
+
 func TestSignal_RelayRetryDeliversStaticTURN(t *testing.T) {
 	wantURLs := []string{"turn:relay.example.com:3478"}
 	wantUser := "staticuser"

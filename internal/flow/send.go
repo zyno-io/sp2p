@@ -210,31 +210,12 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	}
 	onLog := func(msg string) { h.OnVerbose(msg) }
 
-	// Pre-subscribe to relay-retry, relay-denied, and peer-left before
-	// conn.Establish so these signals aren't consumed by processSignaling.
-	relayCh := sigClient.Subscribe(signal.TypeRelayRetry)
-	defer sigClient.Unsubscribe(signal.TypeRelayRetry, relayCh)
-	deniedCh := sigClient.Subscribe(signal.TypeRelayDenied)
-	defer sigClient.Unsubscribe(signal.TypeRelayDenied, deniedCh)
-	peerLeftCh := sigClient.Subscribe(signal.TypePeerLeft)
-	defer sigClient.Unsubscribe(signal.TypePeerLeft, peerLeftCh)
-
-	// Cancel connection attempt early if peer signals relay-retry or disconnects,
-	// so both sides reach the relay prompt around the same time.
-	attemptCtx, attemptCancel := context.WithCancel(ctx)
-	peerWantsRelay := make(chan struct{})
-	peerLeft := make(chan struct{})
-	go func() {
-		select {
-		case <-relayCh:
-			close(peerWantsRelay)
-			attemptCancel()
-		case <-peerLeftCh:
-			close(peerLeft)
-			attemptCancel()
-		case <-attemptCtx.Done():
-		}
-	}()
+	// Watch relay-retry, relay-denied, and peer-left before conn.Establish
+	// so these signals aren't consumed by processSignaling, and so attempt 1
+	// is cancelled the instant the peer reaches its own relay step — both
+	// sides then reach the relay retry/prompt step around the same time.
+	relayWatch := conn.WatchRelay(sigClient)
+	defer relayWatch.Close()
 
 	connCfg := conn.ConnectConfig{
 		SignalClient:   sigClient,
@@ -258,10 +239,9 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 			return crypto.AuthenticateCandidate(ctx, c, keys, kp.Public, receiverPub, true)
 		}
 	}
+	attemptCtx := relayWatch.AttemptContext(ctx)
 	estResult, err := conn.Establish(attemptCtx, connCfg)
-	attemptCancel()
-	select {
-	case <-peerLeft:
+	if relayWatch.PeerLeft() {
 		if estResult != nil {
 			estResult.Conn.Close()
 			if estResult.TCPResult != nil && estResult.TCPResult.Cleanup != nil {
@@ -270,13 +250,12 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 		}
 		h.OnError("Receiver disconnected")
 		return fmt.Errorf("peer disconnected")
-	default:
 	}
 	if err != nil && turnAvailable && cfg.Transport != conn.TransportTCP {
 		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.
 		connCfg.Transport = conn.TransportWebRTC
 		connCfg.TCPPreferWait = 0
-		estResult, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerLeftCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
+		estResult, err = retryWithRelay(ctx, sigClient, relayWatch, cfg.RelayOK, h, connCfg, "receiver")
 	}
 	if err != nil {
 		return err

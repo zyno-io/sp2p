@@ -57,11 +57,13 @@ type Handler interface {
 }
 
 // RelayPromptHandler is implemented by handlers that can cancel a pending
-// relay prompt. PromptRelayContext must return when ctx is canceled. It lets a
-// machine client stop waiting when the peer denies the relay or the transfer
-// context ends, without changing the human UI contract.
+// relay prompt and report a richer answer than allow/deny. PromptRelayAnswer
+// must return when ctx is canceled. It lets a machine client stop waiting
+// when the peer denies the relay or the transfer context ends, and lets any
+// handler distinguish "asked and declined" from "could not be asked" so the
+// peer sees an accurate relay-denied reason.
 type RelayPromptHandler interface {
-	PromptRelayContext(ctx context.Context) bool
+	PromptRelayAnswer(ctx context.Context) conn.RelayAnswer
 }
 
 // Phase represents a lifecycle phase of the transfer flow.

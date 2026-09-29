@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zyno-io/sp2p/internal/conn"
 	"github.com/zyno-io/sp2p/internal/crypto"
 	"github.com/zyno-io/sp2p/internal/flow"
 	"github.com/zyno-io/sp2p/internal/transfer"
@@ -225,18 +226,18 @@ func TestMachineReporterCancelsRelayPrompt(t *testing.T) {
 		EventWriter: &output,
 	}, "receive", false)
 
-	response := make(chan bool, 1)
+	response := make(chan conn.RelayAnswer, 1)
 	go func() {
-		response <- reporter.PromptRelayContext(parent)
+		response <- reporter.PromptRelayAnswer(parent)
 	}()
 
 	responseFile := waitForRelayResponseFile(t, &output)
 	cancel()
 
 	select {
-	case allowed := <-response:
-		if allowed {
-			t.Fatal("canceled relay prompt was allowed")
+	case answer := <-response:
+		if answer != conn.RelayUnavailable {
+			t.Fatalf("canceled relay prompt answer = %v, want RelayUnavailable", answer)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out canceling relay prompt")
@@ -276,6 +277,100 @@ func TestMachineReporterClearsRelayStatusWhenResponseFileDisappears(t *testing.T
 	if reporter.snapshot.RelayRequired {
 		t.Fatal("relay status remained required after response file disappeared")
 	}
+}
+
+// TestMachineReporterPromptRelay_ResponseFileErrorGivesUnavailable checks
+// that a response-file error (the agent's file disappeared) resolves to
+// RelayUnavailable, not RelayDeny — it lets the peer-facing message say
+// "could not be asked" instead of "declined".
+func TestMachineReporterPromptRelay_ResponseFileErrorGivesUnavailable(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{
+		Format:      OutputJSON,
+		EventWriter: &output,
+	}, "send", false)
+
+	answerDone := make(chan conn.RelayAnswer, 1)
+	go func() { answerDone <- reporter.promptRelay(context.Background()) }()
+	responseFile := waitForRelayResponseFile(t, &output)
+	if err := os.Remove(responseFile); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case answer := <-answerDone:
+		if answer != conn.RelayUnavailable {
+			t.Fatalf("answer = %v, want RelayUnavailable", answer)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for response-file error")
+	}
+}
+
+// TestMachineReporterFinish_PeerRelayDenied checks that finish() maps a
+// wrapped conn.ErrPeerDeclinedRelay to the peer_relay_denied code.
+func TestMachineReporterFinish_PeerRelayDenied(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{
+		Format:      OutputJSON,
+		EventWriter: &output,
+	}, "send", false)
+
+	err := fmt.Errorf("relay retry failed: %w", &conn.PeerDeclinedRelayError{Reason: "declined"})
+	reporter.finish(err, "")
+
+	result := lastResultEvent(t, &output)
+	if result.Error == nil || result.Error.Code != "peer_relay_denied" {
+		t.Fatalf("result event = %#v, want error code peer_relay_denied", result)
+	}
+}
+
+// TestMachineReporterFinish_OwnDenyIsRelayDenied checks that finish() still
+// reports our own deny as relay_denied (unchanged), not peer_relay_denied,
+// when the returned error doesn't wrap conn.ErrPeerDeclinedRelay.
+func TestMachineReporterFinish_OwnDenyIsRelayDenied(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{
+		Format:      OutputJSON,
+		EventWriter: &output,
+	}, "send", false)
+
+	answerDone := make(chan conn.RelayAnswer, 1)
+	go func() { answerDone <- reporter.promptRelay(context.Background()) }()
+	responseFile := waitForRelayResponseFile(t, &output)
+	if err := os.WriteFile(responseFile, []byte("deny\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case answer := <-answerDone:
+		if answer != conn.RelayDeny {
+			t.Fatalf("answer = %v, want RelayDeny", answer)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deny response")
+	}
+
+	reporter.finish(conn.ErrRelayNotAllowed, "")
+	result := lastResultEvent(t, &output)
+	if result.Error == nil || result.Error.Code != "relay_denied" {
+		t.Fatalf("result event = %#v, want error code relay_denied", result)
+	}
+}
+
+func lastResultEvent(t *testing.T, output *lockedBuffer) machineEvent {
+	t.Helper()
+	var result machineEvent
+	found := false
+	for _, line := range bytes.Split(bytes.TrimSpace([]byte(output.String())), []byte{'\n'}) {
+		var event machineEvent
+		if json.Unmarshal(line, &event) == nil && event.Event == "result" {
+			result = event
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no result event found: %s", output.String())
+	}
+	return result
 }
 
 func TestMachineReporterReportsStatusFileFailures(t *testing.T) {
