@@ -178,6 +178,11 @@ jobs:
           cd dist
           find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.apk' \) -print0 |
             LC_ALL=C sort -z | xargs -0 sha256sum >checksums.txt
+      - if: env.MODE == 'snapshot'
+        name: THROWAWAY MUTATION CHECK — corrupt one checksum line (well-formed, wrong value)
+        run: |
+          sed -i -E 's#^[0-9a-f]{64}(  \./sp2p_linux_amd64\.tar\.gz)$#0000000000000000000000000000000000000000000000000000000000000000\1#' dist/checksums.txt
+          grep -c '^0\{64\}  \./sp2p_linux_amd64\.tar\.gz$' dist/checksums.txt
       - if: env.MODE == 'release'
         name: Download the real release's assets and checksums.txt
         env:
