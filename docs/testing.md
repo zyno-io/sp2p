@@ -55,6 +55,12 @@
   real CLI→browser and browser→browser transfer through production
   sp2p.io, using the release's own checksum-verified CLI, with relay denied.
   See [Production smoke test](#production-smoke-test) below.
+- **Lane-diagnostics stress** — `.github/workflows/lanes-stress.yml`,
+  manual-dispatch only, not part of any release gate. Repeats the
+  CLI↔Chromium `parallel-interop.spec.ts` tests many times, plus once under
+  CPU contention, to chase a rare parallel-WebRTC lane shortfall using the
+  `parallel_lanes` diagnostics below. See
+  [Lane-diagnostics stress](#lane-diagnostics-stress) below.
 
 ## Extended checks
 
@@ -82,6 +88,44 @@ a manual dispatch, which only reports in the run itself.
 release unless Extended checks passed on the tagged commit. If a run is
 already in progress on that commit, it waits (up to ~2 hours) instead of
 failing immediately.
+
+## Lane-diagnostics stress
+
+`.github/workflows/lanes-stress.yml` ("Lanes Stress") exists to chase the
+rare parallel-WebRTC lane shortfall described in
+[parallel-webrtc.md](parallel-webrtc.md#failure-diagnostics): a setup that
+negotiates and accepts N lanes but selects fewer, with no protocol change and
+(previously) no diagnostic trail. It is manual-dispatch only
+(`workflow_dispatch`, input `repeat`, default 50) — it never runs on
+push/pull_request and is not part of `extended.yml` or any release gate,
+because it exists to reproduce a suspected regression on demand, not to gate
+merges on a fixed pass rate.
+
+Run it with:
+
+```bash
+gh workflow run lanes-stress.yml --ref <branch-or-tag> -f repeat=200
+```
+
+It builds the same way `ci.yml`'s `browser-interop` job does (checkout,
+`setup-go`, `setup-node`, `npm ci`, `playwright install --with-deps
+chromium`), then runs `tests/parallel-interop.spec.ts`'s CLI-involving tests
+(`-g "CLI"` — the CLI→Chromium `compression 0`/`compression 3` sends and the
+browser→CLI receive; it does not include the pure browser↔browser
+`blockedExtras` cases) with `--repeat-each="$repeat"`, once plainly and once
+under CPU contention (a background busy-loop per core, matching the
+reproduction setup in the investigation that motivated the diagnostics).
+
+**Reading a shortfall.** If a run ever produces `counts`/`cli.counts` below
+the requested lane count, the CLI's JSON stream carries a `parallel_lanes`
+event (see `man/sp2p.1`'s JSON EVENTS section) and the browser console
+carries one `[sp2p] ... parallel WebRTC lanes: ours=... theirs=... selected=...
+failures=[...]` line (Playwright's dump-on-failure diagnostics in
+`web/tests/helpers.ts` already capture both). Each `failures` entry names the
+`stage` the lane was lost at and a `class` bucket (`timeout`/`eof`/`closed`/
+`mismatch`/`error`) — never a raw address-bearing error string — plus its own
+address-free `trace`. That is enough to say *where* a lane was lost without
+a live repro; it does not by itself retry or recover the lane.
 
 ## Running locally
 

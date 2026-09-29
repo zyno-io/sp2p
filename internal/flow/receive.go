@@ -295,10 +295,11 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 			count = min(cfg.Parallel, webRTCParallelLimit)
 		}
 		h.OnVerbose("negotiating authenticated parallel WebRTC connections")
-		ms, e := negotiateWebRTC(ctx, rtc, encStream, keys, senderPub, kp.Public, false, count)
+		ms, laneReport, e := negotiateWebRTC(ctx, rtc, encStream, keys, senderPub, kp.Public, false, count)
 		if e != nil {
 			return nil, fmt.Errorf("parallel WebRTC setup: %w", e)
 		}
+		reportParallelLanes(h, laneReport)
 		if ms != nil {
 			frw, deadliner, multiStream = ms, ms, ms
 			h.OnParallelStreams(ms.StreamCount())

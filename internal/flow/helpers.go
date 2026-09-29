@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 	"mime"
 	"os"
 	"path/filepath"
@@ -115,6 +116,22 @@ func buildRelayPrompt(h Handler) func(context.Context) conn.RelayAnswer {
 			return conn.RelayAllow
 		}
 		return conn.RelayDeny
+	}
+}
+
+// reportParallelLanes calls h's optional ParallelLaneReporter whenever any
+// lane the peer accepted was not selected — including when report is nil
+// (negotiation never produced one, e.g. it failed before reaching "ready").
+// A nil report or a report with no gap is not reported.
+func reportParallelLanes(h Handler, report *ParallelLaneReport) {
+	reporter, ok := h.(ParallelLaneReporter)
+	if !ok || report == nil {
+		return
+	}
+	accepted := report.Accepted - 1 // extra lanes only; id 0 is the primary
+	selectedCount := bits.OnesCount32(report.Selected)
+	if selectedCount < accepted {
+		reporter.OnParallelLaneReport(report)
 	}
 }
 

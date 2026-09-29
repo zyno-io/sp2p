@@ -557,6 +557,24 @@ and
 .B bytes_received
 for streams.
 .PP
+File transfers over parallel WebRTC also emit a
+.B parallel_lanes
+event whenever a negotiation accepted more independent connections than it
+ended up selecting.
+Its
+.B failures
+array names each lost lane's setup
+.BR stage ,
+a fixed
+.B class
+.RB ( timeout ", " eof ", " closed ", " mismatch ", or " error ),
+and an address-free
+.BR trace ;
+it never contains an IP address, port, ICE credential, SDP, or the
+underlying Go/Pion error text.
+This event is emitted regardless of
+.BR \-v .
+.PP
 An
 .B error
 event is diagnostic, not terminal.

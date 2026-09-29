@@ -368,6 +368,107 @@ test("failed DataChannel construction closes each unused peer before agreed fall
   }
 });
 
+// Minimal RTCPeerConnection stub for the two tests below: a receiver-role
+// negotiation whose only extra lane gets a real (non-empty) offer, so it
+// reaches SetDescription and Description/createAnswer, where it fails.
+// Unlike the empty-SDP paths (which the *sender* itself validates and
+// closes), nothing else in the protocol closes a receiver's own lane when
+// its own answer-generation fails — that's exactly the gap Lane.close's
+// "gather" hardening covers.
+function failingAnswerPeerConnection(createAnswerError: string, onClose: () => void): typeof RTCPeerConnection {
+  return class {
+    ondatachannel: ((event: { channel: unknown }) => void) | null = null;
+    onconnectionstatechange: (() => void) | null = null;
+    oniceconnectionstatechange: (() => void) | null = null;
+    connectionState = "new";
+    iceConnectionState = "new";
+    setRemoteDescription(): Promise<void> { return Promise.resolve(); }
+    createAnswer(): Promise<never> { return Promise.reject(new Error(createAnswerError)); }
+    close(): void { onClose(); }
+  } as unknown as typeof RTCPeerConnection;
+}
+
+test("a lane that fails to gather its description is closed immediately, not left for wait()'s 8s timer", async () => {
+  const p = await setup(1);
+  const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);
+  const originalPeer = globalThis.RTCPeerConnection;
+  let closed = 0;
+  globalThis.RTCPeerConnection = failingAnswerPeerConnection("test: answer generation failed", () => { closed++; });
+  const read = async () => {
+    const frame = await p.send[0].readFrame();
+    frame.release?.();
+    return JSON.parse(new TextDecoder().decode(frame.data));
+  };
+  try {
+    const result = negotiateParallelWebRTC(p.inbound[0] as unknown as RTCDataChannel,
+      { close() {}, getConfiguration: () => ({}) } as RTCPeerConnection, new EncryptedChannel(key, key), [],
+      { confirm: new Uint8Array(32) } as DerivedKeys, new Uint8Array(32), new Uint8Array(32), false, 2);
+    await p.send[0].writeFrame(0x0e, json({ step: "hello", version: 1, count: 2, nonce: Buffer.alloc(32).toString("base64") }));
+    const accept = await read(); expect(accept).toEqual({ step: "accept", count: 2 });
+    await p.send[0].writeFrame(0x0e, json({ step: "offer", id: 1, sdp: "v=0" }));
+    const answer = await read();
+    expect(answer).toEqual({ step: "answer", id: 1, sdp: "" }); // gather failed: nothing to offer back
+    await p.send[0].writeFrame(0x0e, json({ step: "ready", mask: 0 }));
+    const ready = await read(); expect(ready.mask).toBe(0);
+    await p.send[0].writeFrame(0x0e, json({ step: "commit", mask: 0 }));
+    const committed = await read(); expect(committed.mask).toBe(0);
+
+    const start = Date.now();
+    const primary = await result;
+    expect(Date.now() - start).toBeLessThan(2000); // never waits out wait()'s 8s timer
+    expect(closed).toBeGreaterThan(0); // the lane's own pc.close() ran promptly, not after 8s
+    expect(primary.diagnostics().connections).toBe(1);
+    primary.close();
+  } finally {
+    if (originalPeer) globalThis.RTCPeerConnection = originalPeer;
+    else delete (globalThis as any).RTCPeerConnection;
+    for (const lane of [...p.send, ...p.receive]) lane.close();
+  }
+});
+
+test("the one-line lane-failure log names masks and stages but never leaks address-like text", async () => {
+  const p = await setup(1);
+  const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);
+  const originalPeer = globalThis.RTCPeerConnection;
+  // A synthetic error carrying address-like text, as a real
+  // RTCPeerConnection/DOM exception conceivably could — describeError must
+  // bucket this into a generic reason, never pass the text through.
+  globalThis.RTCPeerConnection = failingAnswerPeerConnection("test: answer generation failed near 203.0.113.7:51820", () => {});
+  const logs: string[] = [];
+  const originalLog = console.log;
+  console.log = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+  const read = async () => {
+    const frame = await p.send[0].readFrame();
+    frame.release?.();
+    return JSON.parse(new TextDecoder().decode(frame.data));
+  };
+  try {
+    const result = negotiateParallelWebRTC(p.inbound[0] as unknown as RTCDataChannel,
+      { close() {}, getConfiguration: () => ({}) } as RTCPeerConnection, new EncryptedChannel(key, key), [],
+      { confirm: new Uint8Array(32) } as DerivedKeys, new Uint8Array(32), new Uint8Array(32), false, 2);
+    await p.send[0].writeFrame(0x0e, json({ step: "hello", version: 1, count: 2, nonce: Buffer.alloc(32).toString("base64") }));
+    await read(); // accept
+    await p.send[0].writeFrame(0x0e, json({ step: "offer", id: 1, sdp: "v=0" }));
+    await read(); // answer
+    await p.send[0].writeFrame(0x0e, json({ step: "ready", mask: 0 }));
+    await read(); // ready
+    await p.send[0].writeFrame(0x0e, json({ step: "commit", mask: 0 }));
+    await read(); // committed
+    const primary = await result;
+    primary.close();
+  } finally {
+    console.log = originalLog;
+    if (originalPeer) globalThis.RTCPeerConnection = originalPeer;
+    else delete (globalThis as any).RTCPeerConnection;
+    for (const lane of [...p.send, ...p.receive]) lane.close();
+  }
+  const combined = logs.join("\n");
+  expect(combined).toMatch(/parallel WebRTC lanes: ours=0x\w+ theirs=0x\w+ selected=0x\w+ failures=/);
+  expect(combined).toMatch(/"stage":"gather"/);
+  expect(combined).not.toMatch(/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/);
+  expect(combined).not.toContain("203.0.113.7");
+});
+
 test("stalled parallel negotiation is bounded and closes its primary", async () => {
   const p = await setup(1);
   const key = await crypto.subtle.importKey("raw", new Uint8Array(32).fill(1), "AES-GCM", false, ["encrypt", "decrypt"]);

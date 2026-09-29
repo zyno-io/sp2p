@@ -66,6 +66,16 @@ type RelayPromptHandler interface {
 	PromptRelayAnswer(ctx context.Context) conn.RelayAnswer
 }
 
+// ParallelLaneReporter is implemented by handlers that want per-lane WebRTC
+// setup diagnostics. It is called after a parallel WebRTC negotiation
+// completes (including when every extra lane failed) whenever at least one
+// accepted extra lane was not selected. The report is address-free — no
+// IPs, ports, ICE ufrags/pwds, or SDP — so it is safe to log or emit as
+// JSON.
+type ParallelLaneReporter interface {
+	OnParallelLaneReport(report *ParallelLaneReport)
+}
+
 // Phase represents a lifecycle phase of the transfer flow.
 type Phase string
 

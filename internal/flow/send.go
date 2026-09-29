@@ -331,10 +331,11 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 			count = 1
 		}
 		h.OnVerbose("negotiating authenticated parallel WebRTC connections")
-		ms, e := negotiateWebRTC(ctx, rtc, encStream, keys, kp.Public, receiverPub, true, count)
+		ms, laneReport, e := negotiateWebRTC(ctx, rtc, encStream, keys, kp.Public, receiverPub, true, count)
 		if e != nil {
 			return fmt.Errorf("parallel WebRTC setup: %w", e)
 		}
+		reportParallelLanes(h, laneReport)
 		if ms != nil {
 			frw, deadliner, multiStream = ms, ms, ms
 			h.OnParallelStreams(ms.StreamCount())

@@ -4,6 +4,8 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/zyno-io/sp2p/internal/conn"
@@ -106,6 +108,39 @@ func (h *cliHandler) OnParallelStreams(count int) {
 
 func (h *cliHandler) OnVerbose(msg string) {
 	h.progress.Log(msg)
+}
+
+// OnParallelLaneReport implements flow.ParallelLaneReporter. Progress.Log
+// already gates on verbose mode, so this only ever prints when -v is set.
+func (h *cliHandler) OnParallelLaneReport(report *flow.ParallelLaneReport) {
+	h.progress.Log(formatLaneReport(report))
+}
+
+// formatLaneReport renders a ParallelLaneReport as a single diagnostic
+// line. It only ever prints report fields, which are address-free by
+// construction (see flow.ParallelLaneReport) — no IPs, ports, ICE
+// ufrags/pwds, or SDP.
+func formatLaneReport(report *flow.ParallelLaneReport) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "parallel lanes: requested=%d accepted=%d ours=%#x theirs=%#x selected=%#x setup_ms=%d",
+		report.Requested, report.Accepted, report.Ours, report.Theirs, report.Selected, report.SetupMS)
+	for _, f := range report.Failures {
+		fmt.Fprintf(&b, " failure[id=%d stage=%s class=%s", f.ID, f.Stage, f.Class)
+		if f.Pair != "" {
+			fmt.Fprintf(&b, " pair=%s", f.Pair)
+		}
+		if len(f.Trace) > 0 {
+			b.WriteString(" trace=")
+			for i, ev := range f.Trace {
+				if i > 0 {
+					b.WriteByte(',')
+				}
+				fmt.Fprintf(&b, "%dms:%s", ev.MS, ev.Event)
+			}
+		}
+		b.WriteString("]")
+	}
+	return b.String()
 }
 
 func (h *cliHandler) OnWarning(msg string) {

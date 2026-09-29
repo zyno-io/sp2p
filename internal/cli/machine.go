@@ -191,6 +191,7 @@ type machineEvent struct {
 	TotalBytes       *uint64            `json:"total_bytes,omitempty"`
 	DurationMS       *int64             `json:"duration_ms,omitempty"`
 	ParallelStreams  int                `json:"parallel_streams,omitempty"`
+	ParallelLanes    *machineLaneReport `json:"parallel_lanes,omitempty"`
 	Message          string             `json:"message,omitempty"`
 	Error            *machineError      `json:"error,omitempty"`
 	Outcome          string             `json:"outcome,omitempty"`
@@ -204,6 +205,27 @@ type machineConnection struct {
 	Method string `json:"method"`
 	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
+}
+
+// machineLaneReport mirrors flow.ParallelLaneReport for the "parallel_lanes"
+// JSON event. It carries no IPs, ports, ICE ufrags/pwds, or SDP — see
+// flow.ParallelLaneReport and conn.LaneTraceEvent.
+type machineLaneReport struct {
+	Requested int                  `json:"requested"`
+	Accepted  int                  `json:"accepted"`
+	Ours      uint32               `json:"ours"`
+	Theirs    uint32               `json:"theirs"`
+	Selected  uint32               `json:"selected"`
+	SetupMS   int64                `json:"setup_ms"`
+	Failures  []machineLaneFailure `json:"failures,omitempty"`
+}
+
+type machineLaneFailure struct {
+	ID    int                   `json:"id"`
+	Stage string                `json:"stage"`
+	Class string                `json:"class"`
+	Trace []conn.LaneTraceEvent `json:"trace,omitempty"`
+	Pair  string                `json:"pair,omitempty"`
 }
 
 type machineError struct {
@@ -375,6 +397,30 @@ func (r *machineReporter) OnError(message string) {
 func (r *machineReporter) OnParallelStreams(count int) {
 	r.mu.Lock()
 	r.emitLocked(machineEvent{Event: "parallel_streams", ParallelStreams: count})
+	r.mu.Unlock()
+}
+
+// OnParallelLaneReport implements flow.ParallelLaneReporter. This is its own
+// "parallel_lanes" event, not a "log" event, so CI diagnostics that skip
+// verbose log lines (see web/tests/helpers.ts) still see it.
+func (r *machineReporter) OnParallelLaneReport(report *flow.ParallelLaneReport) {
+	if report == nil {
+		return
+	}
+	failures := make([]machineLaneFailure, len(report.Failures))
+	for i, f := range report.Failures {
+		failures[i] = machineLaneFailure{ID: f.ID, Stage: f.Stage, Class: string(f.Class), Trace: f.Trace, Pair: f.Pair}
+	}
+	r.mu.Lock()
+	r.emitLocked(machineEvent{Event: "parallel_lanes", ParallelLanes: &machineLaneReport{
+		Requested: report.Requested,
+		Accepted:  report.Accepted,
+		Ours:      report.Ours,
+		Theirs:    report.Theirs,
+		Selected:  report.Selected,
+		SetupMS:   report.SetupMS,
+		Failures:  failures,
+	}})
 	r.mu.Unlock()
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -64,6 +65,58 @@ func TestLegacyProtocolNoticeIsMachineReadableWithoutVerbose(t *testing.T) {
 		t.Fatal("agent prompt requires manual compatibility")
 	}
 }
+
+// TestMachineReporterEmitsParallelLanesEvent checks that OnParallelLaneReport
+// emits its own "parallel_lanes" event (not "log", so CI diagnostics that
+// skip log lines still see it — see web/tests/helpers.ts) with the report's
+// fields intact, and that the encoded event never contains an IP-like
+// string, matching flow.ParallelLaneReport's address-free guarantee.
+func TestMachineReporterEmitsParallelLanesEvent(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{Format: OutputJSON, EventWriter: &output}, "send", false)
+	report := &flow.ParallelLaneReport{
+		Requested: 8, Accepted: 8, Ours: 0b11111100, Theirs: 0b01111100, Selected: 0b01111100, SetupMS: 1234,
+		Failures: []flow.LaneFailure{{
+			ID: 7, Stage: "connect-timeout", Class: flow.ClassTimeout,
+			Trace: []conn.LaneTraceEvent{{MS: 5, Event: "conn=connecting"}, {MS: 5000, Event: "close=peer_connection_failed"}},
+			Pair:  "host/prflx",
+		}},
+	}
+	reporter.OnParallelLaneReport(report)
+
+	raw := output.String()
+	var event machineEvent
+	if err := json.Unmarshal([]byte(raw), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Event != "parallel_lanes" {
+		t.Fatalf("event = %q, want parallel_lanes", event.Event)
+	}
+	got := event.ParallelLanes
+	if got == nil {
+		t.Fatal("missing parallel_lanes payload")
+	}
+	if got.Requested != 8 || got.Accepted != 8 || got.Selected != 0b01111100 || got.SetupMS != 1234 {
+		t.Fatalf("parallel_lanes payload = %+v", got)
+	}
+	if len(got.Failures) != 1 || got.Failures[0].Stage != "connect-timeout" || got.Failures[0].Class != "timeout" || got.Failures[0].Pair != "host/prflx" {
+		t.Fatalf("failures = %+v", got.Failures)
+	}
+	if ipLikeEventPattern.MatchString(raw) {
+		t.Fatalf("parallel_lanes event contains an IP-like string: %s", raw)
+	}
+}
+
+func TestMachineReporterParallelLanesEventOmittedForNilReport(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{Format: OutputJSON, EventWriter: &output}, "send", false)
+	reporter.OnParallelLaneReport(nil)
+	if output.String() != "" {
+		t.Fatalf("expected no event for a nil report, got %q", output.String())
+	}
+}
+
+var ipLikeEventPattern = regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
 
 func (b *lockedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()

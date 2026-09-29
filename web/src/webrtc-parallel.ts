@@ -51,8 +51,47 @@ function resolveHelloRequest(hello: Setup): number {
   return hello.max;
 }
 
+// TraceEvent is one address-free state transition recorded for a Lane: a
+// millisecond offset from the lane's creation and a short event name such
+// as "ice=connected", "conn=failed", "dc=open", or "close=timeout". Mirrors
+// internal/conn.LaneTraceEvent on the Go side. Never includes IPs, ports,
+// ICE ufrags/pwds, or SDP.
+export interface TraceEvent { ms: number; event: string }
+
+// A small, fixed set of handshake.ts error messages that are safe to log
+// verbatim: every one of them is a hard-coded literal (see handshake.ts's
+// HandshakeIO), never derived from network or peer-controlled data.
+const KNOWN_HANDSHAKE_MESSAGES = new Set([
+  "Candidate authentication failed",
+  "Candidate selection failed",
+  "Invalid candidate selection",
+  "Key confirmation failed",
+  "Connection closed during handshake",
+  "Connection failed during handshake",
+  "Connection is not open during handshake",
+  "Invalid or excessive handshake data",
+]);
+
+// describeError reduces an arbitrary Error into a short, address-free
+// reason. handshake.ts's own fixed messages (including its "<phase> timed
+// out" template, whose phase is always one of our own literal strings) pass
+// through unchanged; anything else — e.g. a raw RTCPeerConnection/DOM
+// exception, which is not guaranteed address-free — is bucketed into one of
+// a handful of generic reasons, mirroring classifyLaneError on the Go side.
+function describeError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (KNOWN_HANDSHAKE_MESSAGES.has(message) || /^[A-Za-z ]+ timed out$/.test(message)) return message;
+  if (/closed/i.test(message)) return "closed";
+  if (/time(d)? ?out/i.test(message)) return "timeout";
+  return "error";
+}
+
 class Lane {
   readonly pc: RTCPeerConnection;
+  readonly trace: TraceEvent[] = [];
+  stage?: string;
+  reason?: string;
+  private readonly start = Date.now();
   private dc?: RTCDataChannel;
   private result?: EncryptedFrameIO;
   private closed = false;
@@ -61,14 +100,15 @@ class Lane {
   private resolve!: (io: EncryptedFrameIO | null) => void;
   private authenticated = new Promise<EncryptedFrameIO | null>(resolve => { this.resolve = resolve; });
 
-  constructor(configuration: RTCConfiguration, sender: boolean, keys: DerivedKeys, senderPub: Uint8Array, receiverPub: Uint8Array, budget: FrameBudget) {
+  constructor(readonly id: number, configuration: RTCConfiguration, sender: boolean, keys: DerivedKeys, senderPub: Uint8Array, receiverPub: Uint8Array, budget: FrameBudget) {
     this.pc = new RTCPeerConnection(configuration);
     const attach = (dc: RTCDataChannel) => {
       if (this.closed || this.dc || dc.label !== "sp2p" || !dc.ordered || dc.maxRetransmits !== null || dc.maxPacketLifeTime !== null) {
-        dc.close(); this.close(); return;
+        dc.close(); this.close("attach", "label_rejected"); return;
       }
       this.dc = dc;
       dc.binaryType = "arraybuffer";
+      dc.addEventListener("close", () => this.record("dc=close"));
       let started = false;
       const authenticate = async () => {
         if (started || this.closed) return;
@@ -82,23 +122,29 @@ class Lane {
           if (this.closed) { io.close(); return; }
           this.result = io;
           this.resolve(io);
-        } catch { this.close(); }
+        } catch (error) { this.close("confirm", describeError(error)); }
       };
-      dc.onopen = () => { void authenticate(); };
+      dc.onopen = () => { this.record("dc=open"); void authenticate(); };
       if (dc.readyState === "open") void authenticate();
     };
     this.pc.onconnectionstatechange = () => {
-      if (this.pc.connectionState === "failed" || this.pc.connectionState === "closed") this.close();
+      this.record("conn=" + this.pc.connectionState);
+      if (this.pc.connectionState === "failed" || this.pc.connectionState === "closed") this.close("connect", "peer_connection_failed");
     };
+    this.pc.oniceconnectionstatechange = () => { this.record("ice=" + this.pc.iceConnectionState); };
     try {
       if (sender) { attach(this.pc.createDataChannel("sp2p", { ordered: true })); addBufferHint(this.pc); }
       else this.pc.ondatachannel = event => attach(event.channel);
     } catch (error) {
       // Construction can fail after the peer connection has allocated native
       // resources. The caller cannot close a Lane it never received.
-      this.close();
+      this.close("create", describeError(error));
       throw error;
     }
+  }
+
+  private record(event: string): void {
+    this.trace.push({ ms: Date.now() - this.start, event });
   }
 
   async description(offer: boolean): Promise<string> {
@@ -131,14 +177,18 @@ class Lane {
   }
 
   async wait(): Promise<EncryptedFrameIO | null> {
-    const timer = setTimeout(() => this.close(), 8000);
+    const timer = setTimeout(() => this.close("connect", "timeout"), 8000);
     try { return await this.authenticated; }
     finally { clearTimeout(timer); }
   }
 
-  close(): void {
+  // close is idempotent: only the first call's stage/reason are recorded,
+  // matching the address-free discard sites in negotiateParallelWebRTC
+  // below, which each call close exactly once per lane.
+  close(stage?: string, reason?: string): void {
     if (this.closed) return;
     this.closed = true;
+    if (stage) { this.stage = stage; this.reason = reason; this.record("close=" + reason); }
     this.signalClose();
     this.result?.close();
     this.dc?.close();
@@ -161,13 +211,21 @@ export async function negotiateParallelWebRTC(
   primary.highWater = 8 * 1024 * 1024;
   const lanes: Array<Lane | null> = [];
   const gathering: Array<Promise<string>> = [];
+  // laneRecords keeps every lane ever constructed, even after lanes[id] is
+  // nulled out on discard, so the finally block below can still read its
+  // trace/stage/reason for the one-line failure summary. constructFailures
+  // covers the id's a Lane was never even created for.
+  const laneRecords: Array<Lane | null> = [];
+  const constructFailures: Array<{ id: number; reason: string }> = [];
   let keep = 0;
+  let ours = 0;
+  let peerMask = 0;
   let success = false;
   let expired = false;
   const timer = setTimeout(() => {
     expired = true;
     primary.close(new Error("Parallel WebRTC setup timed out"));
-    for (const lane of lanes) lane?.close();
+    for (const lane of lanes) lane?.close("timeout", "setup_timeout");
   }, 25000);
   const write = async (message: Setup) => {
     if (expired) throw new Error("Parallel WebRTC setup timed out");
@@ -210,17 +268,28 @@ export async function negotiateParallelWebRTC(
       const laneKeys = await deriveWebRTCLaneKeys(keys.confirm, nonce, id);
       if (expired) throw new Error("Parallel WebRTC setup timed out");
       let lane: Lane | null = null;
-      try { lane = new Lane(pc.getConfiguration(), sender, laneKeys, senderPub, receiverPub, budget); } catch { /* bounded setup fallback */ }
+      try {
+        lane = new Lane(id, pc.getConfiguration(), sender, laneKeys, senderPub, receiverPub, budget);
+        laneRecords[id] = lane;
+      } catch (error) { constructFailures.push({ id, reason: describeError(error) }); } // bounded setup fallback
       lanes[id] = lane;
       if (!sender) {
         const offer = await read("offer");
         if (offer.id !== id || (offer.sdp !== undefined && (typeof offer.sdp !== "string" || offer.sdp.length > 12 * 1024))) throw new Error("Invalid WebRTC lane offer");
         if (lane) {
-          try { await lane.setDescription(offer.sdp || "", true); }
-          catch { lane.close(); lane = null; lanes[id] = null; }
+          if (!offer.sdp) {
+            lane.close("offer", "peer_offer_empty");
+            lane = null; lanes[id] = null;
+          } else {
+            try { await lane.setDescription(offer.sdp, true); }
+            catch (error) { lane.close("offer", describeError(error)); lane = null; lanes[id] = null; }
+          }
         }
       }
-      gathering[id] = lane ? lane.description(sender).catch(() => "") : Promise.resolve("");
+      // Close (not just discard) a lane whose description gathering fails,
+      // instead of leaving it open until wait()'s own 8s timer — the same
+      // failure would otherwise cost the full timeout for no reason.
+      gathering[id] = lane ? lane.description(sender).catch(error => { lane?.close("gather", describeError(error)); return ""; }) : Promise.resolve("");
     }
     const descriptions = await Promise.all(gathering);
     for (let id = 1; id < count; id++) await write({ step: sender ? "offer" : "answer", id, sdp: descriptions[id] });
@@ -230,19 +299,23 @@ export async function negotiateParallelWebRTC(
         if (answer.id !== id || (answer.sdp !== undefined && (typeof answer.sdp !== "string" || answer.sdp.length > 12 * 1024))) throw new Error("Invalid WebRTC lane answer");
         const lane = lanes[id];
         if (lane) {
-          try { await lane.setDescription(answer.sdp || "", false); }
-          catch { lane.close(); lanes[id] = null; }
+          if (!answer.sdp) {
+            lane.close("answer", "peer_answer_empty");
+            lanes[id] = null;
+          } else {
+            try { await lane.setDescription(answer.sdp, false); }
+            catch (error) { lane.close("answer", describeError(error)); lanes[id] = null; }
+          }
         }
       }
     }
     onStage("Authenticating additional WebRTC connections");
     const authenticated = await Promise.all(lanes.map(lane => lane?.wait() ?? Promise.resolve(null)));
-    let ours = 0;
     for (let id = 1; id < count; id++) if (authenticated[id]?.dc.readyState === "open" && descriptions[id]) ours |= 1 << id;
     let theirs: Setup;
     if (sender) { await write({ step: "ready", mask: ours }); theirs = await read("ready"); }
     else { theirs = await read("ready"); await write({ step: "ready", mask: ours }); }
-    const peerMask = theirs.mask ?? 0;
+    peerMask = theirs.mask ?? 0;
     if (!Number.isInteger(peerMask) || peerMask < 0 || peerMask > (1 << count) - 2 || (peerMask & 1) !== 0) throw new Error("Invalid WebRTC ready mask");
     const selected = ours & peerMask;
     if (sender) {
@@ -266,8 +339,39 @@ export async function negotiateParallelWebRTC(
     return result;
   } finally {
     clearTimeout(timer);
-    for (let id = 1; id < lanes.length; id++) if (!success || !(keep & (1 << id))) lanes[id]?.close();
+    for (let id = 1; id < lanes.length; id++) {
+      if (!success) lanes[id]?.close("abort", "setup_aborted");
+      else if (!(keep & (1 << id))) lanes[id]?.close("select", "peer_not_ready");
+    }
     if (!success) primary.close(new Error("Parallel WebRTC setup failed"));
     await Promise.all(gathering);
+    logLaneFailures(lanes.length, ours, peerMask, keep, success, laneRecords, constructFailures);
   }
+}
+
+// logLaneFailures logs ONE console line (via log(), already dumped on test
+// failure) naming the masks and every lane that never made it into the
+// selected set, with its stage/reason/trace — matching
+// internal/flow.ParallelLaneReport on the Go side. Address-free by
+// construction: masks and Trace events come only from our own recording,
+// and reason strings are either fixed handshake.ts literals or one of the
+// small generic buckets from describeError (see its own comment).
+function logLaneFailures(
+  laneCount: number, ours: number, peerMask: number, keep: number, success: boolean,
+  laneRecords: Array<Lane | null>, constructFailures: Array<{ id: number; reason: string }>,
+): void {
+  if (laneCount <= 1) return;
+  const failures: Array<{ id: number; stage: string; reason: string; trace: TraceEvent[] }> = [];
+  for (let id = 1; id < laneCount; id++) {
+    if (success && (keep & (1 << id))) continue;
+    const lane = laneRecords[id];
+    if (lane) {
+      failures.push({ id, stage: lane.stage ?? "unknown", reason: lane.reason ?? "unknown", trace: lane.trace });
+    } else {
+      const cf = constructFailures.find(f => f.id === id);
+      failures.push({ id, stage: "create", reason: cf?.reason ?? "unknown", trace: [] });
+    }
+  }
+  if (failures.length === 0) return;
+  log(`parallel WebRTC lanes: ours=0x${ours.toString(16)} theirs=0x${peerMask.toString(16)} selected=0x${keep.toString(16)} failures=${JSON.stringify(failures)}`);
 }
