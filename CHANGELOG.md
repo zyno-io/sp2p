@@ -16,6 +16,8 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 ### Added
 
 - CI now runs the Go test suite natively on Windows and CLI↔Microsoft Edge browser interop against a Windows-built CLI, so Windows-specific bugs surface in CI. See [testing](docs/testing.md#windows-native-cli-and-edge).
+- Homebrew, Scoop, AUR, and Chocolatey package manifests are now rendered by a shared script (`scripts/packaging/render.sh`) and validated in CI — rendered, installed, and (where applicable) audited on their native platform, plus a dry-run WinGet manifest check — on every packaging-related PR and after every release, without ever publishing. See [testing](docs/testing.md#packaging-validation).
+- Each full release is now smoke-tested against production sp2p.io right after deploy: a real CLI→browser (64 MiB, 8 WebRTC lanes) and browser→browser (8 MiB) transfer, using the release's own checksum-verified CLI, with relay denied so only a direct path can succeed. See [testing](docs/testing.md#production-smoke-test).
 
 ### Changed
 

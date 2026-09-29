@@ -35,8 +35,7 @@ make dev     # Run the server locally on :8080
 - Web tests use Playwright (`web/tests/`).
 - See [docs/testing.md](docs/testing.md) for the full layer breakdown,
   protocol-compatibility fixtures (including automatic previous-release
-  resolution), and the release checklist note for
-  `testdata/release-capabilities.json`.
+  resolution), and the [release checklist](docs/testing.md#release-checklist).
 
 ## Security
 

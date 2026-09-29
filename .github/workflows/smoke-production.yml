@@ -1,0 +1,81 @@
+name: Production smoke test
+
+# Post-deploy check of sp2p.io and a release's public assets, run
+# automatically by release.yml's `smoke` job right after a real deploy (and
+# dispatchable on demand for any published tag). No secrets or
+# `environment:` — everything this touches (sp2p.io, public GitHub Release
+# assets) is public. See docs/testing.md's "Production smoke test" section.
+#
+# Always runs web/tests/smoke-prod.mjs as it exists on the ref this workflow
+# itself runs from (release.yml's caller checks out the tag before calling
+# it; a manual dispatch uses whatever ref it's run against) — this is a
+# check of production behavior, not of a specific tag's copy of the script,
+# so a fix to the script benefits re-validating an old tag too.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag whose deploy to sp2p.io to verify
+        required: true
+        type: string
+      expected_bundle:
+        description: main-XXXXXXXX.js bundle the release built (empty = resolve from the release's server archive)
+        required: false
+        type: string
+        default: ""
+      cli_tag:
+        description: Release tag whose Linux CLI to use (empty = tag)
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag deployed to sp2p.io (e.g. v0.6.3)
+        required: true
+        type: string
+      expected_bundle:
+        description: Optional main-XXXXXXXX.js bundle name (empty = resolve from the release's server archive)
+        required: false
+        type: string
+        default: ""
+      cli_tag:
+        description: Optional release tag whose Linux CLI to use (required for -server tags; empty = tag)
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    # ~10 min deploy wait, plus setup, plus 2 scenarios x up to 2 attempts
+    # each with a 60s backoff between attempts.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm --prefix web ci
+      - run: npx --prefix web playwright install --with-deps chromium
+      # No artifact uploads here, ever: pages this script drives hold live,
+      # human-shareable transfer codes.
+      - name: Smoke-test production sp2p.io
+        env:
+          TAG: ${{ inputs.tag }}
+          EXPECTED_BUNDLE: ${{ inputs.expected_bundle }}
+          CLI_TAG: ${{ inputs.cli_tag }}
+        run: |
+          set -euo pipefail
+          args=(--tag "$TAG" --cli-asset linux-amd64)
+          if [[ -n "$EXPECTED_BUNDLE" ]]; then args+=(--expect-bundle "$EXPECTED_BUNDLE"); fi
+          if [[ -n "$CLI_TAG" ]]; then args+=(--cli-tag "$CLI_TAG"); fi
+          node web/tests/smoke-prod.mjs "${args[@]}"
