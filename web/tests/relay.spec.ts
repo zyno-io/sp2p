@@ -27,13 +27,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ChildProcess } from "node:child_process";
-import type { Browser, Page, PlaywrightWorkerArgs } from "@playwright/test";
+import type { Browser, Dialog, Page, PlaywrightWorkerArgs } from "@playwright/test";
 import { expect, test as base } from "./fixtures";
 import {
   answerRelayPrompt, chooseFile, cleanupTemporaryDirectories, flushDiagnostics, installReceiverSink,
   observeConnections, temporaryDirectory, trackCLIForDiagnostics, trackForDiagnostics, verifyReceiverSink, watchCLI,
 } from "./helpers";
 import type { CLIWatch } from "./helpers";
+import { relayDeclinedMessage, relayWaitingMessage } from "../src/relay-consent";
 
 const ROOT = join(__dirname, "..", "..");
 
@@ -154,6 +155,44 @@ function registerDialog(page: Page, accept: boolean): DialogRecord[] {
     void (accept ? dialog.accept() : dialog.dismiss());
   });
   return dialogs;
+}
+
+// A registerDialog variant that keeps a dialog open until the test resolves
+// it explicitly, instead of resolving it the instant it appears. Needed by
+// the deterministic decline-ordering tests below: without holding it, the
+// new "skip the prompt if the peer already declined" behavior
+// (internal/conn/relay.go's RetryWithRelay step 2 / relay-consent.ts's
+// equivalent) would make an unconstrained dialog race the peer's decline,
+// re-introducing exactly the nondeterminism this file's consent tests exist
+// to eliminate.
+interface HeldDialog {
+  dialogs: DialogRecord[];
+  // Resolves once a dialog has appeared and is being held open.
+  opened: Promise<void>;
+  // Accepts or dismisses the held dialog. No-op if none is currently open.
+  resolve(accept: boolean): void;
+}
+
+function registerHeldDialog(page: Page): HeldDialog {
+  const dialogs: DialogRecord[] = [];
+  let resolveOpened: () => void;
+  const opened = new Promise<void>(r => { resolveOpened = r; });
+  let current: Dialog | null = null;
+  page.on("dialog", dialog => {
+    dialogs.push({ type: dialog.type(), message: dialog.message() });
+    current = dialog;
+    resolveOpened();
+  });
+  return {
+    dialogs,
+    opened,
+    resolve(accept: boolean) {
+      if (!current) return;
+      const dialog = current;
+      current = null;
+      void (accept ? dialog.accept() : dialog.dismiss());
+    },
+  };
 }
 
 // ── Worker fixture: relayEnv ────────────────────────────────────────────
@@ -574,6 +613,187 @@ async function runRelayPairing(opts: RunRelayPairingOptions): Promise<void> {
   }
 }
 
+// ── Consent-split runner ────────────────────────────────────────────────
+
+// Runs one of the 4 pairings x 2 decliners consent-split scenarios: one side
+// (accepter) allows the relay immediately; the other (decliner) holds its
+// own prompt open until the accepter has visibly committed to waiting for
+// it, then declines. This proves the accepter — despite having consented
+// itself — never starts (or even requests) a relay attempt until it learns
+// the peer's decision, and reports the peer's decline promptly instead of
+// timing out (see internal/conn/relay.go's RetryWithRelay / web/src/main.ts's
+// establishP2PWithRetry).
+interface RunConsentSplitOptions {
+  playwright: Playwright;
+  relayEnv: RelayEnv;
+  turn: TurnHandle;
+  sender: Peer;
+  receiver: Peer;
+  label: string;
+  decliner: "sender" | "receiver";
+}
+
+const CONSENT_SPLIT_DECLINE_WINDOW_MS = 10_000;
+
+async function runConsentSplit(opts: RunConsentSplitOptions): Promise<void> {
+  const { playwright, relayEnv, turn, sender, receiver, label, decliner } = opts;
+  // peerRole, from the accepting side's own point of view, matching
+  // web/src/main.ts's `peerRole = isSender ? "receiver" : "sender"` / flow's
+  // peerRole argument: the accepter's peer IS the decliner, so this is
+  // simply the decliner's own role.
+  const accepterOwnRole = decliner;
+
+  const before = turn.snapshot();
+  const start = Date.now();
+
+  const browsers: Browser[] = [];
+  const childProcesses: ChildProcess[] = [];
+  const relayAnswerPromises: Promise<void>[] = [];
+
+  let acceptSide: BrowserSide | undefined;
+  let acceptCLI: CLIWatch | undefined;
+  let declineSide: BrowserSide | undefined;
+  let declineHeld: HeldDialog | undefined;
+  let declineCLI: CLIWatch | undefined;
+
+  try {
+    let code: string;
+
+    // ── Sender ──
+    if (sender.kind === "browser") {
+      const browser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
+      browsers.push(browser);
+      const page = await browser.newPage({ baseURL: relayEnv.url });
+      trackForDiagnostics(page, `${label}-sender`);
+      if (decliner === "sender") {
+        declineHeld = registerHeldDialog(page);
+        declineSide = { browser, page, dialogs: declineHeld.dialogs, counts: observeConnections(page) };
+      } else {
+        acceptSide = { browser, page, dialogs: registerDialog(page, true), counts: observeConnections(page) };
+      }
+      code = await chooseFile(page, contents, `${label}-send.bin`);
+    } else {
+      const srcDir = temporaryDirectory("sp2p-relay-send-");
+      const srcPath = join(srcDir, `${label}-send.bin`);
+      writeFileSync(srcPath, contents);
+      const xdg = temporaryDirectory("sp2p-relay-xdg-");
+      const args = [
+        "send", "-format", "json", "-v", "-allow-relay=false", "-server", relayEnv.wsUrl, "-compress", "0",
+        ...(receiver.kind === "browser" ? ["-transport", "webrtc"] : []),
+        srcPath,
+      ];
+      const child = spawn(relayEnv.cliBin, args, { env: { ...process.env, XDG_CONFIG_HOME: xdg } });
+      childProcesses.push(child);
+      const cli = watchCLI(child);
+      trackCLIForDiagnostics(cli, `${label}-sender`);
+      if (decliner === "sender") {
+        declineCLI = cli;
+      } else {
+        acceptCLI = cli;
+        trackRelayAnswer(relayAnswerPromises, guardedAnswerRelayPrompt(cli, "allow"));
+      }
+      code = await cli.code;
+    }
+
+    // ── Receiver ──
+    if (receiver.kind === "browser") {
+      const browser = await playwright.chromium.launch(CHROMIUM_LAUNCH);
+      browsers.push(browser);
+      const page = await browser.newPage({ baseURL: relayEnv.url });
+      await installReceiverSink(page, "chromium");
+      trackForDiagnostics(page, `${label}-receiver`);
+      if (decliner === "receiver") {
+        declineHeld = registerHeldDialog(page);
+        declineSide = { browser, page, dialogs: declineHeld.dialogs, counts: observeConnections(page) };
+      } else {
+        acceptSide = { browser, page, dialogs: registerDialog(page, true), counts: observeConnections(page) };
+      }
+      await page.goto(`/r#${code}`);
+      await page.locator(".confirm-btn").click();
+    } else {
+      const destDir = temporaryDirectory("sp2p-relay-recv-");
+      const xdg = temporaryDirectory("sp2p-relay-xdg-");
+      const args = [
+        "receive", "-format", "json", "-v", "-allow-relay=false", "-server", relayEnv.wsUrl,
+        ...(sender.kind === "browser" ? ["-transport", "webrtc"] : []),
+        "-output", destDir, code,
+      ];
+      const child = spawn(relayEnv.cliBin, args, { env: { ...process.env, XDG_CONFIG_HOME: xdg } });
+      childProcesses.push(child);
+      const cli = watchCLI(child);
+      trackCLIForDiagnostics(cli, `${label}-receiver`);
+      if (decliner === "receiver") {
+        declineCLI = cli;
+      } else {
+        acceptCLI = cli;
+        trackRelayAnswer(relayAnswerPromises, guardedAnswerRelayPrompt(cli, "allow"));
+      }
+    }
+
+    // ── Step 1: the accepting side allows immediately (already wired
+    // above via registerDialog(page, true) / guardedAnswerRelayPrompt). ──
+
+    // ── Step 2: the decliner waits until the accepting side has answered. ──
+    if (acceptSide) {
+      await expect(acceptSide.page.locator(".step-p2p")).toContainText(
+        relayWaitingMessage(accepterOwnRole), { timeout: TRANSFER_TIMEOUT_MS },
+      );
+    } else if (acceptCLI) {
+      await acceptCLI.relayResponded;
+    }
+    // The decliner's own prompt must also be open before we can resolve it.
+    if (declineHeld) await declineHeld.opened;
+    else if (declineCLI) await declineCLI.relayRequired;
+
+    // ── Step 3: the decliner declines. ──
+    const declineStart = Date.now();
+    if (declineHeld) declineHeld.resolve(false);
+    else if (declineCLI) await answerRelayPrompt(declineCLI, "deny");
+
+    // ── Assertions: the accepting side sees the peer's decline promptly ──
+    const wantAccepterMessage = relayDeclinedMessage("declined", accepterOwnRole);
+    if (acceptSide) {
+      await expect(acceptSide.page.locator(".error-message")).toBeVisible({ timeout: CONSENT_SPLIT_DECLINE_WINDOW_MS });
+      expect(Date.now() - declineStart).toBeLessThan(CONSENT_SPLIT_DECLINE_WINDOW_MS);
+      expect(await acceptSide.page.locator(".error-message").textContent()).toBe(wantAccepterMessage);
+      expect(acceptSide.dialogs).toEqual([{ type: "confirm", message: RELAY_CONFIRM }]);
+    } else if (acceptCLI) {
+      expect(await acceptCLI.exited).toBe(1);
+      expect(Date.now() - declineStart).toBeLessThan(CONSENT_SPLIT_DECLINE_WINDOW_MS);
+      expect(acceptCLI.results[0]).toEqual({
+        outcome: "failed",
+        error: { code: "peer_relay_denied", message: wantAccepterMessage },
+      });
+      expect(acceptCLI.relayResponses).toEqual(["allow"]);
+    }
+
+    // ── Assertions: the decliner sees exactly its own decline text ──
+    if (declineSide) {
+      await expect(declineSide.page.locator(".error-message")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
+      expect(await declineSide.page.locator(".error-message").textContent()).toBe(DECLINED);
+      expect(declineSide.dialogs).toEqual([{ type: "confirm", message: RELAY_CONFIRM }]);
+    } else if (declineCLI) {
+      expect(await declineCLI.exited).toBe(1);
+      expect(declineCLI.results[0]).toEqual({
+        outcome: "failed",
+        error: { code: "relay_denied", message: CLI_DENIED },
+      });
+    }
+
+    // ── Zero TURN allocations: the accepter waited for the peer's grant,
+    // so no relay attempt — and thus no TURN allocation — ever started. ──
+    const after = turn.snapshot();
+    expect(Object.keys(after.users).sort()).toEqual(Object.keys(before.users).sort());
+
+    writeRelayRecord(`consent-${label}-${decliner}-declines`, {
+      lanes: 0, turn: { created: 0, peakLive: 0, quotaRejected: 0 }, releaseMs: 0, durationMs: Date.now() - start,
+    });
+  } finally {
+    for (const child of childProcesses) child.kill();
+    for (const browser of browsers) await browser.close();
+  }
+}
+
 test.afterEach(async ({}, testInfo) => {
   cleanupTemporaryDirectories();
   await flushDiagnostics(testInfo);
@@ -858,8 +1078,14 @@ test.describe("relay: consent", () => {
     try {
       const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
       const receiverPage = await receiverBrowser.newPage({ baseURL: relayEnv.url });
-      const senderDialogs = registerDialog(senderPage, false);
-      const receiverDialogs = registerDialog(receiverPage, false);
+      // Hold both dialogs until both have appeared, then dismiss both
+      // together. Without holding, the new "skip the prompt once the peer
+      // has already declined" behavior means whichever side's dialog
+      // resolves first could make the other side observe a decline before
+      // its own dialog even appears, still correct but nondeterministic
+      // about which of the two symmetric per-side assertions below race.
+      const senderHeld = registerHeldDialog(senderPage);
+      const receiverHeld = registerHeldDialog(receiverPage);
       // web/src/main.ts calls showSaveFilePicker() synchronously inside the
       // confirm button's click handler, before the receiver even connects to
       // signaling ("Invoke the picker in the click handler itself, before
@@ -879,13 +1105,17 @@ test.describe("relay: consent", () => {
       await receiverPage.goto(`/r#${code}`);
       await receiverPage.locator(".confirm-btn").click();
 
+      await Promise.all([senderHeld.opened, receiverHeld.opened]);
+      senderHeld.resolve(false);
+      receiverHeld.resolve(false);
+
       await expect(senderPage.locator(".error-message")).toBeVisible({ timeout: 60_000 });
       await expect(receiverPage.locator(".error-message")).toBeVisible({ timeout: 60_000 });
       expect(await senderPage.locator(".error-message").textContent()).toBe(DECLINED);
       expect(await receiverPage.locator(".error-message").textContent()).toBe(DECLINED);
 
-      expect(senderDialogs).toEqual([{ type: "confirm", message: RELAY_CONFIRM }]);
-      expect(receiverDialogs).toEqual([{ type: "confirm", message: RELAY_CONFIRM }]);
+      expect(senderHeld.dialogs).toEqual([{ type: "confirm", message: RELAY_CONFIRM }]);
+      expect(receiverHeld.dialogs).toEqual([{ type: "confirm", message: RELAY_CONFIRM }]);
 
       // Keys are content-addressed hashes of unique session IDs, so a
       // strict "no new key at all" check is exactly equivalent to a
@@ -911,17 +1141,13 @@ test.describe("relay: consent", () => {
     let child: ChildProcess | undefined;
     try {
       const senderPage = await senderBrowser.newPage({ baseURL: relayEnv.url });
-      // The dialog handler is registered before navigation, as always. Its
-      // decision is a constant .dismiss() regardless of the CLI's timing:
-      // web/src/main.ts's confirmRelay() (inside establishP2PWithRetry) is
-      // called unconditionally on THIS side's own P2P attempt-1 failure — it
-      // never checks the peer's prior response before prompting, so there is
-      // no dialog-decision race to gate on a "hasCliDenied" flag here. The
-      // ordering this test actually needs — confirming the CLI's own denial
-      // landed before asserting the browser's outcome — is enforced below by
-      // explicitly awaiting answerRelayPrompt and the CLI's exit/result
-      // first, not by conditioning the dialog handler itself.
-      const senderDialogs = registerDialog(senderPage, false);
+      // The dialog handler is registered before navigation, as always, but
+      // held open: the CLI must be denied first (see below), or its own
+      // relay prompt could be skipped entirely by the new "peer already
+      // declined" fast path (internal/conn/relay.go's RetryWithRelay step 2),
+      // which would make answerRelayPrompt hang waiting for a prompt that
+      // never happens.
+      const senderHeld = registerHeldDialog(senderPage);
       trackForDiagnostics(senderPage, "consent-cli-deny-sender");
 
       const xdg = temporaryDirectory("sp2p-relay-xdg-");
@@ -935,40 +1161,26 @@ test.describe("relay: consent", () => {
       const cli = watchCLI(child);
       trackCLIForDiagnostics(cli, "consent-cli-deny-receiver");
 
-      // Confirmed on real CI (internal/cli/machine.go's finish()): this
-      // CLI's own answerRelayPrompt("deny") and the browser sender's
-      // independent decline (which notifies the peer as soon as it
-      // happens, without waiting to learn the peer's own answer first --
-      // see the DECLINED-vs-"Receiver denied" asymmetric-messaging note in
-      // the main describe block above) are a genuine, unavoidable race with
-      // THREE possible outcomes, not two -- all correct, none hardcoded:
-      //  1. this CLI's own answered "deny" resolves first (code
-      //     "relay_denied", CLI_DENIED -- what an interactive user would see);
-      //  2. the peer's relay-denied signal is observed first
-      //     (internal/flow/helpers.go's <-deniedCh case, code
-      //     "operation_failed", "Peer denied relay connection"); or
-      //  3. the peer's signaling connection is *also* torn down (e.g. the
-      //     browser's own decline path closing its page/signaling shortly
-      //     after sending relay-denied) and <-peerLeftCh wins the same
-      //     select instead (helpers.go has this exact "Peer disconnected"
-      //     message at more than one such select, e.g. ~line 108 and ~152)
-      //     -- machine.go's finish() falls through to errorCode
-      //     "relay_not_allowed" here (relayResponse never got set to
-      //     "deny" on this path either, same as case 2, but
-      //     snapshot.RelayRequired is true by this point).
+      // Deny the CLI first, while the browser's own dialog is still held
+      // open (not yet declined): this makes the CLI's outcome deterministic
+      // — with relay consent split into pending/granted, both sides
+      // independently reach and answer their own prompt before either
+      // learns the other declined, so each side's own decline is always
+      // exactly its own {relay_denied, CLI_DENIED} / DECLINED text (see the
+      // design's message table: "Own decline: unchanged"). Only once the
+      // CLI's own decline is confirmed sent do we dismiss the browser's
+      // held dialog for its own, equally deterministic decline.
       await answerRelayPrompt(cli, "deny");
+      await cli.relayResponded;
+      senderHeld.resolve(false);
+
       expect(await cli.exited).toBe(1);
       const cliResult = cli.results[0];
-      expect(cliResult?.outcome).toBe("failed");
-      expect([
-        { code: "relay_denied", message: CLI_DENIED },
-        { code: "operation_failed", message: "Peer denied relay connection" },
-        { code: "relay_not_allowed", message: "Peer disconnected" },
-      ]).toContainEqual(cliResult?.error);
+      expect(cliResult).toEqual({ outcome: "failed", error: { code: "relay_denied", message: CLI_DENIED } });
 
       await expect(senderPage.locator(".error-message")).toBeVisible({ timeout: 60_000 });
       expect(await senderPage.locator(".error-message").textContent()).toBe(DECLINED);
-      expect(senderDialogs).toEqual([{ type: "confirm", message: RELAY_CONFIRM }]);
+      expect(senderHeld.dialogs).toEqual([{ type: "confirm", message: RELAY_CONFIRM }]);
 
       const after = turn.snapshot();
       expect(Object.keys(after.users).sort()).toEqual(Object.keys(before.users).sort());
@@ -981,4 +1193,36 @@ test.describe("relay: consent", () => {
       await senderBrowser.close();
     }
   });
+
+  // ── Consent split: one side accepts, the other declines ──────────────
+  //
+  // 8 tests = 4 pairings (chromium-chromium, cli-chromium, chromium-cli,
+  // cli-cli) x 2 (which side declines). Each proves the accepting side
+  // never starts a relay attempt (zero TURN allocations) and reports the
+  // peer's decline within 10s, instead of the old 15s (web) / 30s (CLI)
+  // misleading-timeout paths this design replaces. See runConsentSplit
+  // above and internal/conn/relay.go's design doc section 4.
+  const CONSENT_SPLIT_PAIRINGS: { label: string; sender: Peer; receiver: Peer }[] = [
+    { label: "chromium-chromium", sender: { kind: "browser", engine: "chromium" }, receiver: { kind: "browser", engine: "chromium" } },
+    { label: "cli-chromium", sender: { kind: "cli" }, receiver: { kind: "browser", engine: "chromium" } },
+    { label: "chromium-cli", sender: { kind: "browser", engine: "chromium" }, receiver: { kind: "cli" } },
+    { label: "cli-cli", sender: { kind: "cli" }, receiver: { kind: "cli" } },
+  ];
+
+  for (const { label, sender, receiver } of CONSENT_SPLIT_PAIRINGS) {
+    for (const decliner of ["sender", "receiver"] as const) {
+      // Tag exactly two of the eight: Go and web each as the accepting
+      // side once, so both implementations' consent-split path runs on
+      // every PR without the full 8-way matrix.
+      const details: { tag?: "@pr" } =
+        (label === "chromium-cli" && decliner === "receiver") ||
+        (label === "cli-chromium" && decliner === "receiver")
+          ? { tag: "@pr" }
+          : {};
+
+      test(`consent split: ${label}, ${decliner} declines`, details, async ({ playwright, relayEnv }) => {
+        await runConsentSplit({ playwright, relayEnv, turn, sender, receiver, label, decliner });
+      });
+    }
+  }
 });

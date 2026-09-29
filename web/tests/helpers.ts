@@ -138,6 +138,13 @@ export interface CLIWatch {
   // via answerRelayPrompt below rather than assuming a prompt happens.
   // Rejects if the process exits before a relay prompt ever occurs.
   relayRequired: Promise<string>;
+  // Resolves once the CLI's own "relay_response" event confirms it read
+  // back a response (internal/cli/machine.go's promptRelay loop) — distinct
+  // from answerRelayPrompt's fire-and-forget file write, this is the CLI's
+  // own acknowledgement, usable to sequence a consent-split test's steps
+  // ("wait until the accepting side has answered"). Rejects if the process
+  // exits before a response is observed.
+  relayResponded: Promise<void>;
   // Every response ("allow"/"deny") this CLIWatch has actually had written
   // for it via answerRelayPrompt, in call order.
   relayResponses: string[];
@@ -180,6 +187,10 @@ export function watchCLI(child: ChildProcess): CLIWatch {
   let rejectRelayRequired!: (error: Error) => void;
   const relayRequired = new Promise<string>((resolve, reject) => { resolveRelayRequired = resolve; rejectRelayRequired = reject; });
   void relayRequired.catch(() => {});
+  let resolveRelayResponded!: () => void;
+  let rejectRelayResponded!: (error: Error) => void;
+  const relayResponded = new Promise<void>((resolve, reject) => { resolveRelayResponded = resolve; rejectRelayResponded = reject; });
+  void relayResponded.catch(() => {});
   child.stdout?.on("data", bytes => {
     pending += bytes.toString();
     for (;;) {
@@ -193,6 +204,7 @@ export function watchCLI(child: ChildProcess): CLIWatch {
         transports.push(event.connection.method);
       }
       if (event.event === "relay_required" && event.response_file) resolveRelayRequired(event.response_file);
+      if (event.event === "relay_response") resolveRelayResponded();
       if (event.event === "result") {
         const result: { outcome: string; error?: { code: string; message: string } } = { outcome: event.outcome };
         if (event.error) result.error = { code: event.error.code, message: event.error.message };
@@ -205,14 +217,15 @@ export function watchCLI(child: ChildProcess): CLIWatch {
   });
   child.stderr?.on("data", bytes => { stderr.push(bytes.toString()); });
   const exited = new Promise<number | null>((resolve, reject) => {
-    child.once("error", error => { reject(error); rejectCode(error); rejectRelayRequired(error); });
+    child.once("error", error => { reject(error); rejectCode(error); rejectRelayRequired(error); rejectRelayResponded(error); });
     child.once("exit", status => {
       resolve(status);
       rejectCode(new Error("CLI exited before session creation"));
       rejectRelayRequired(new Error("CLI exited before a relay prompt occurred"));
+      rejectRelayResponded(new Error("CLI exited before a relay response was observed"));
     });
   });
-  return { code, exited, counts, transports, relayRequired, relayResponses, results, eventLog, stderr };
+  return { code, exited, counts, transports, relayRequired, relayResponded, relayResponses, results, eventLog, stderr };
 }
 
 // Answers a CLI relay-consent prompt (see watchCLI's relayRequired above),

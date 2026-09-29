@@ -15,12 +15,26 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-const PR_LABELS = ["chromium-chromium", "cli-chromium", "chromium-cli", "cli-cli"];
+const PR_LABELS = [
+  "chromium-chromium", "cli-chromium", "chromium-cli", "cli-cli",
+  // Consent split, tagged @pr (Go and web each as the accepting side once —
+  // see relay.spec.ts's CONSENT_SPLIT_PAIRINGS).
+  "consent-cli-chromium-receiver-declines", "consent-chromium-cli-receiver-declines",
+];
+const CONSENT_SPLIT_LABELS = [
+  "consent-chromium-chromium-sender-declines", "consent-chromium-chromium-receiver-declines",
+  "consent-cli-chromium-sender-declines", "consent-cli-chromium-receiver-declines",
+  "consent-chromium-cli-sender-declines", "consent-chromium-cli-receiver-declines",
+  "consent-cli-cli-sender-declines", "consent-cli-cli-receiver-declines",
+];
 const FULL_LABELS = [
-  ...PR_LABELS,
-  "firefox-chromium", "chromium-firefox", "cli-firefox", "firefox-cli",
-  "abandon-chromium-chromium", "quota8-chromium-chromium",
-  "consent-both-decline", "consent-cli-deny",
+  ...new Set([
+    "chromium-chromium", "cli-chromium", "chromium-cli", "cli-cli",
+    "firefox-chromium", "chromium-firefox", "cli-firefox", "firefox-cli",
+    "abandon-chromium-chromium", "quota8-chromium-chromium",
+    "consent-both-decline", "consent-cli-deny",
+    ...CONSENT_SPLIT_LABELS,
+  ]),
 ];
 
 function parseArgs(argv) {

@@ -5,6 +5,17 @@
 
 import { SignalClient, PROTOCOL_VERSION, Envelope } from "./signal";
 import { establishWebRTC, ICEServerConfig, splitIceServers } from "./webrtc";
+import {
+  RelayConsentWatch,
+  raceExit,
+  isAborted,
+  peerErrorMessage,
+  relayWaitingMessage,
+  relayTimeoutMessage,
+  RELAY_CONSENT_PENDING,
+  RELAY_CONSENT_GRANTED,
+  RELAY_DENIED_DECLINED,
+} from "./relay-consent";
 import { monitorTransfer } from "./diagnostics";
 import { confirmDataChannel } from "./handshake";
 import { negotiateParallelWebRTC, PARALLEL_MAX_LANES, PARALLEL_MIN_BYTES } from "./webrtc-parallel";
@@ -94,7 +105,10 @@ function getWsUrl(): string {
 
 // Establish a WebRTC connection with TURN relay fallback.
 // 1. First attempt: STUN only (no TURN relay)
-// 2. Relay retry: requests TURN credentials from server (last resort, requires explicit user consent)
+// 2. Relay retry: requests TURN credentials from server, coordinating a
+//    two-sided consent handshake with the peer (see relay-consent.ts's
+//    RelayConsentWatch — the same state machine as internal/conn/relay.go's
+//    RetryWithRelay). Relay is never used without this side's own consent.
 async function establishP2PWithRetry(
   sigClient: SignalClient,
   isSender: boolean,
@@ -104,84 +118,118 @@ async function establishP2PWithRetry(
   onStage: (detail: string) => void,
 ): Promise<{ dc: RTCDataChannel; pc: RTCPeerConnection }> {
   const { stun } = splitIceServers(iceServers);
+  const peerRole = isSender ? "receiver" : "sender";
 
-  // Pre-subscribe to relay-retry signal BEFORE the first attempt,
-  // so we don't miss the peer's signal if their attempt fails faster than ours.
-  const relayRetryPromise = sigClient.waitFor("relay-retry", 120000);
-  relayRetryPromise.catch(() => {});
-
-  // Watch for peer disconnection during P2P establishment.
-  let peerLeft = false;
-  const peerLeftPromise = sigClient.waitFor("peer-left", 300000);
-  peerLeftPromise.then(() => { peerLeft = true; }).catch(() => {});
-
-  // Attempt 1: STUN only.
-  log(`P2P attempt 1: STUN only (${stun.length} servers, isSender=${isSender})`);
+  // Watch relay-retry/relay-denied/peer-left before attempt 1, so a signal
+  // that arrives while attempt 1 is still running isn't missed.
+  const watch = new RelayConsentWatch(sigClient);
+  // peerFail() reports the watch's current abort condition using the same
+  // user-facing text CLI/rsync/tunnel use (see relay-consent.ts's message
+  // table) — neither this function's caller has a separate "OnError"
+  // channel, so the thrown Error's message IS what the user sees.
+  const peerFail = (): never => { throw new Error(peerErrorMessage(watch, peerRole)); };
   try {
-    return await establishWebRTC(sigClient, isSender, (_method, _state, detail) => { if (detail) onStage(detail); }, undefined, 15000, stun);
-  } catch (err) {
-    log(`P2P attempt 1 failed: ${(err as Error).message}`);
-    if (peerLeft || sigClient.closed) {
-      throw new Error("Peer disconnected");
+    // Attempt 1: STUN only.
+    log(`P2P attempt 1: STUN only (${stun.length} servers, isSender=${isSender})`);
+    try {
+      return await establishWebRTC(sigClient, isSender, (_method, _state, detail) => { if (detail) onStage(detail); }, undefined, 15000, stun);
+    } catch (err) {
+      log(`P2P attempt 1 failed: ${(err as Error).message}`);
+      if (watch.state === "left" || sigClient.closed) {
+        throw new Error("Peer disconnected");
+      }
+      // Fall through to relay retry if TURN available.
     }
-    // Fall through to relay retry if TURN available.
+
+    log(`P2P: direct connection failed, TURN available: ${turnAvailable}`);
+    if (!turnAvailable) {
+      throw new Error("Could not establish P2P connection (no TURN relay available)");
+    }
+
+    // Step 2: if the peer has already declined (or left, or signaling was
+    // lost) while attempt 1 was running, fail now — don't send relay-retry,
+    // don't prompt, don't fetch credentials.
+    if (isAborted(watch)) {
+      peerFail();
+    }
+
+    // Step 3: signal our pending consent and wait for TURN credentials,
+    // aborting if the peer declines/leaves or signaling is lost.
+    log("P2P: requesting TURN relay credentials");
+    onStage("Direct connection failed; requesting relay access");
+    const turnCredsPromise = sigClient.waitFor("turn-credentials", 30000);
+    turnCredsPromise.catch(() => {});
+    sigClient.discardHeld();
+    sigClient.send("relay-retry", { consent: RELAY_CONSENT_PENDING });
+
+    let turnCredsEnv;
+    try {
+      turnCredsEnv = await raceExit(watch, turnCredsPromise);
+    } catch (err) {
+      if (watch.exit.aborted) peerFail();
+      throw err;
+    }
+    const turnServers: RTCIceServer[] = (turnCredsEnv.payload?.iceServers || []).map(
+      (s: ICEServerConfig) => ({
+        urls: s.urls,
+        username: s.username,
+        credential: s.credential,
+      })
+    );
+    if (turnServers.length === 0) {
+      throw new Error("Server returned empty TURN credentials");
+    }
+    log(`P2P: received ${turnServers.length} TURN servers`);
+
+    // Step 4: ask the user for consent while the peer is being notified in
+    // parallel. confirm() blocks the page, so yield once after it returns —
+    // a message queued during the dialog (e.g. the peer's decline) needs a
+    // turn of the event loop to reach our handlers before we check state.
+    const allowed = await confirmRelay();
+    await new Promise((r) => setTimeout(r, 0));
+    if (!allowed) {
+      sigClient.send("relay-denied", { reason: RELAY_DENIED_DECLINED });
+      throw new Error("P2P connection failed and relay was declined");
+    }
+    // Our own consent, but the peer may have declined while we were
+    // prompting: check once more before committing to it.
+    if (isAborted(watch)) {
+      peerFail();
+    }
+    sigClient.send("relay-retry", { consent: RELAY_CONSENT_GRANTED });
+
+    // Step 5: wait for the peer's decision (bounded because a human may be
+    // answering on the other side).
+    log("P2P: waiting for peer to agree to relay retry");
+    onStage(relayWaitingMessage(peerRole));
+    const decision = await watch.waitForDecision(120000);
+    if (decision === "denied" || decision === "left" || decision === "closed") {
+      peerFail();
+    }
+    if (decision === "timeout") {
+      throw new Error(relayTimeoutMessage(peerRole));
+    }
+
+    // Step 6: brief abortable pause, then retry over the relay. A failure
+    // here that coincides with a decline/leave/loss reports that instead of
+    // the raw attempt-2 error.
+    try {
+      await raceExit(watch, new Promise((r) => setTimeout(r, 500)));
+    } catch {
+      peerFail();
+    }
+    log("P2P attempt 2: TURN relay");
+    try {
+      return await establishWebRTC(sigClient, isSender, (_method, _state, detail) => { if (detail) onStage(`Relay attempt: ${detail}`); }, undefined, 15000, [...stun, ...turnServers], watch.exit);
+    } catch (err) {
+      if (isAborted(watch)) {
+        peerFail();
+      }
+      throw err;
+    }
+  } finally {
+    watch.dispose();
   }
-
-  // Attempt 2: Relay retry with TURN (last resort, requires consent).
-  log(`P2P: direct connection failed, TURN available: ${turnAvailable}`);
-  if (!turnAvailable) {
-    throw new Error("Could not establish P2P connection (no TURN relay available)");
-  }
-
-  // Subscribe to turn-credentials BEFORE sending relay-retry so we don't miss
-  // the server's response.
-  const turnCredsPromise = sigClient.waitFor("turn-credentials", 30000);
-  turnCredsPromise.catch(() => {});
-
-  // Signal relay-retry BEFORE prompting the user. This notifies the peer
-  // immediately so they can show their own relay prompt in parallel with ours,
-  // rather than waiting for us to click OK first.
-  log("P2P: requesting TURN relay credentials");
-  onStage("Direct connection failed; requesting relay access");
-  sigClient.discardHeld();
-  sigClient.send("relay-retry", {});
-
-  // Ask user for consent while the peer is being notified in parallel.
-  const allowed = await confirmRelay();
-  if (!allowed) {
-    sigClient.send("relay-denied", {});
-    throw new Error("P2P connection failed and relay was declined");
-  }
-
-  // Wait for TURN credentials from the server.
-  const turnCredsEnv = await turnCredsPromise;
-  const turnServers: RTCIceServer[] = (turnCredsEnv.payload?.iceServers || []).map(
-    (s: ICEServerConfig) => ({
-      urls: s.urls,
-      username: s.username,
-      credential: s.credential,
-    })
-  );
-  if (turnServers.length === 0) {
-    throw new Error("Server returned empty TURN credentials");
-  }
-  log(`P2P: received ${turnServers.length} TURN servers`);
-
-  log("P2P: waiting for peer to agree to relay retry");
-  onStage("Waiting for peer to allow the relay");
-  const relayDeniedPromise = sigClient.waitFor("relay-denied", 120000);
-  relayDeniedPromise.catch(() => {});
-  const peerResult = await Promise.race([
-    relayRetryPromise.then(() => "agreed" as const),
-    relayDeniedPromise.then(() => "denied" as const),
-  ]);
-  if (peerResult === "denied") {
-    throw new Error("Receiver denied relay connection");
-  }
-  await new Promise((r) => setTimeout(r, 500));
-
-  log("P2P attempt 2: TURN relay");
-  return await establishWebRTC(sigClient, isSender, (_method, _state, detail) => { if (detail) onStage(`Relay attempt: ${detail}`); }, undefined, 15000, [...stun, ...turnServers]);
 }
 
 // ─── PLATFORM DETECTION ──────────────────────────────────────
