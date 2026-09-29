@@ -9,8 +9,9 @@ permissions:
 
 jobs:
   # Releases ship only commits whose Extended checks (extended.yml: shaped
-  # network, relay, engine matrix, N-2 compatibility) passed. Extended checks
-  # run on every push to main; wait for one still in progress.
+  # network, relay, engine matrix, N-2 compatibility, large transfer checks)
+  # passed. Extended checks run on every push to main; wait for one still in
+  # progress.
   extended-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 130

@@ -30,9 +30,10 @@ import { tmpdir } from "node:os";
 import type { Browser, BrowserContext } from "@playwright/test";
 import { expect } from "./fixtures";
 import {
-  browserProcessPids, chooseFileAtPath, cleanupTemporaryDirectories, isolatedServerTest as test,
-  observeConnections, receiveToDisk, temporaryDirectory, verifyDiskStreaming, watchCLI,
+  browserProcessPids, chooseFileAtPath, cleanupTemporaryDirectories, flushDiagnostics, isolatedServerTest as test,
+  observeConnections, receiveToDisk, temporaryDirectory, trackCLIForDiagnostics, trackForDiagnostics, verifyDiskStreaming, watchCLI,
 } from "./helpers";
+import type { CLIWatch } from "./helpers";
 
 test.skip(process.env.SP2P_LARGE_TEST !== "1", "set SP2P_LARGE_TEST=1 (see docs/testing.md) to run this suite");
 
@@ -47,9 +48,37 @@ const CONTROL_SIZE = Math.min(64 * 1024 * 1024, Math.max(4 * 1024 * 1024, Math.f
 const PARALLEL_THRESHOLD = 64 * 1024 * 1024; // internal/flow: tcpPreferThreshold/parallelMinFileSize; web: PARALLEL_MIN_BYTES
 
 // Generous: wan150 (75ms delay + 0.1% loss) plus a 1 GiB payload can take
-// several minutes; this bounds a single pairing's control+large run pair,
-// well under the "large" project's 30-minute Playwright test timeout.
+// several minutes. This is a per-expect()/per-wait timeout — each
+// ".complete" visibility check below and each waitForCLIExit call — not a
+// bound on a whole pairing test (which runs a control run and a large run
+// back to back). What actually bounds the whole test is the "large"
+// project's 30-minute Playwright test timeout (web/playwright.config.ts).
 const TRANSFER_TIMEOUT_MS = 20 * 60_000;
+
+// Bounds a CLI process's exit wait with a timer instead of relying solely
+// on the 30-minute test timeout to eventually catch a CLI hang — without
+// this, a CLI process that stalls after the browser/CLI counterpart already
+// reported ".complete" (or a code) would hang until the whole test times
+// out, with a far less specific failure than this gives. Most call sites
+// wait on a CLI process *after* the thing that actually gates transfer
+// completion (".complete", or — for runCLIToCLI's receiver, which has no
+// browser ".complete" to wait on — the receive itself) already succeeded,
+// so those only need a short bound for the process to actually exit
+// (CLI_EXIT_TIMEOUT_MS default); runCLIToCLI's receiver wait *is* that
+// completion gate, so it explicitly passes the full TRANSFER_TIMEOUT_MS.
+const CLI_EXIT_TIMEOUT_MS = 60_000;
+
+async function waitForCLIExit(cli: CLIWatch, label: string, timeoutMs = CLI_EXIT_TIMEOUT_MS): Promise<number | null> {
+  let timer!: ReturnType<typeof setTimeout>;
+  const timedOut = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label}: CLI process did not exit within ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([cli.exited, timedOut]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // ── Disk headroom ────────────────────────────────────────────────────────
 
@@ -116,21 +145,46 @@ function hashFileStreaming(path: string): Promise<string> {
 
 // ── Peak-memory sampling ─────────────────────────────────────────────────
 //
-// CLI process: on Linux, /proc/<pid>/status's VmHWM is the kernel's own
-// lifetime high-water mark for the process — a single read at any point
-// during its life reflects the true peak up to that point. Polled every
-// 50ms: a control-run receiver can exit in well under 500ms, and this
-// suite's whole point is comparing peaks between a fast control run and a
-// slow large run, so under-sampling the fast one would silently make the
-// relative ceiling too tight. Non-Linux (local macOS iteration only — CI
-// always runs this suite on ubuntu-latest) falls back to `ps -o rss=`, an
+// Both the CLI process and every pid in a browser's process tree are read
+// the same way: on Linux, /proc/<pid>/status's VmHWM is the kernel's own
+// lifetime high-water mark for that process — a single read at any point
+// during its life already reflects the true peak up to that point, no
+// matter when it's taken. Non-Linux (local macOS iteration only — CI always
+// runs this suite on ubuntu-latest) falls back to `ps -o rss=`, an
 // instantaneous sample rather than a true high-water mark, so it can
 // under-count between polls.
 //
+// CLI process: polled every 50ms via trackCLIPeakRSS. A control-run
+// receiver can exit in well under 500ms, and this suite's whole point is
+// comparing peaks between a fast control run and a slow large run, so
+// under-sampling the fast one would silently make the relative ceiling too
+// tight.
+//
 // Browser process tree: Chromium (browser + renderer + GPU + utility
-// processes) exposes no equivalent high-water-mark API, so this is always a
-// sampled maximum, summed across every pid in the tree, taken every ~2s
-// during the transfer (see docs/testing.md).
+// processes) exposes no single tree-wide high-water-mark API, but each
+// individual process's own VmHWM is still a true lifetime peak for that one
+// process — so rather than sampling the tree's *combined* RSS every tick
+// (which, on a period as coarse as 2s, can miss an entire short-lived
+// process: a fresh Chromium process can spawn, peak, and exit within one
+// sampling window — the clean 64 MiB control run's whole transfer lasts
+// only ~1-3s), startBrowserRSSSampling tracks each pid's own VmHWM
+// independently, keeps the maximum seen per pid, and sums those per-pid
+// maxima on stop(). Browsers are launched fresh per control/large run (see
+// launchReceiverContext below), so each *currently-live* pid's VmHWM at
+// stop() is that process's true peak for the whole run. The sum across pids
+// is still only an upper bound on the tree's actual simultaneous peak, not
+// a literal instant-in-time measurement — it adds together maxima each
+// process reached at its own point in time, which may not all have been the
+// same moment — but that's the right direction to be imprecise in for a
+// ceiling check: it can only overstate the tree's memory use, never
+// understate it, unlike the old per-tick VmRSS-sum method it replaced,
+// which really could miss an entire short-lived process's contribution
+// altogether. Ticking every 500ms still matters for two reasons VmHWM
+// itself doesn't cover: discovering a new pid (a renderer, GPU, or utility
+// process spawning partway through the run) promptly enough to track it at
+// all, and catching a process that grows after this loop's last read of it
+// but before it exits — VmHWM read at exit time isn't captured if the
+// process is already gone by the next tick.
 
 function readCLIPeakRSSBytes(pid: number): number | null {
   try {
@@ -162,42 +216,24 @@ function trackCLIPeakRSS(pid: number, intervalMs = 50): { stop(): number } {
   };
 }
 
-function readProcessTreeRSSBytes(pids: ReadonlySet<number>): number | null {
-  let total = 0;
-  let sawAny = false;
-  for (const pid of pids) {
-    try {
-      const status = readFileSync(`/proc/${pid}/status`, "utf8");
-      const match = /^VmRSS:\s+(\d+) kB$/m.exec(status);
-      if (match) { total += Number(match[1]) * 1024; sawAny = true; }
-    } catch { /* not Linux, or this pid has already exited */ }
-  }
-  if (sawAny) return total;
-  if (pids.size === 0) return null;
-  try {
-    const out = execSync(`ps -o rss= -p ${[...pids].join(",")}`, { encoding: "utf8" });
-    const lines = out.split("\n").map(line => line.trim()).filter(Boolean);
-    if (lines.length === 0) return null;
-    return lines.reduce((sum, line) => sum + Number(line) * 1024, 0);
-  } catch {
-    return null;
-  }
-}
-
-// Sums the process-tree RSS across every given Browser (a browser-to-browser
-// run launches the sender and receiver as two separate browser processes —
-// see launchReceiverContext below — so their trees are summed, not sampled
-// independently).
-function startBrowserRSSSampling(browsers: Browser[], intervalMs = 2000): { stop(): Promise<number> } {
-  let peak = 0;
+// Sums per-pid VmHWM maxima across every given Browser's process tree (a
+// browser-to-browser run launches the sender and receiver as two separate
+// browser processes — see launchReceiverContext below — so their trees are
+// tracked together, in one shared per-pid map, not independently).
+function startBrowserRSSSampling(browsers: Browser[], intervalMs = 500): { stop(): Promise<number> } {
+  const peakByPid = new Map<number, number>();
   let running = true;
   const tick = async () => {
     try {
       const pidSets = await Promise.all(browsers.map(b => browserProcessPids(b)));
       const pids = new Set<number>();
       for (const set of pidSets) for (const pid of set) pids.add(pid);
-      const bytes = readProcessTreeRSSBytes(pids);
-      if (bytes !== null) peak = Math.max(peak, bytes);
+      for (const pid of pids) {
+        const bytes = readCLIPeakRSSBytes(pid);
+        if (bytes === null) continue;
+        const prev = peakByPid.get(pid) ?? 0;
+        if (bytes > prev) peakByPid.set(pid, bytes);
+      }
     } catch { /* a browser is closing */ }
   };
   const loop = (async () => {
@@ -211,7 +247,9 @@ function startBrowserRSSSampling(browsers: Browser[], intervalMs = 2000): { stop
       running = false;
       await tick();
       await loop;
-      return peak;
+      let total = 0;
+      for (const bytes of peakByPid.values()) total += bytes;
+      return total;
     },
   };
 }
@@ -248,8 +286,12 @@ async function launchReceiverContext(playwright: any, launchOptions: any, baseUR
 // The large (1 GiB-scale) run's peak must not exceed 1.5x the control
 // (64 MiB-scale) run's peak plus 32 MiB slack, and must stay under an
 // absolute backstop — see docs/testing.md for the calibration this was
-// derived from.
-function assertMemoryScaling(label: string, controlPeakBytes: number, largePeakBytes: number, absoluteBackstopBytes: number): void {
+// derived from. `additiveCeilingBytes`, when given, adds a third check:
+// control + a fixed constant — see BROWSER_TREE_ADDITIVE_CEILING_BYTES
+// below for why the browser-tree checks need this and the CLI checks don't.
+function assertMemoryScaling(
+  label: string, controlPeakBytes: number, largePeakBytes: number, absoluteBackstopBytes: number, additiveCeilingBytes?: number,
+): void {
   // A sampler that never got a single successful reading would report 0,
   // which would otherwise pass both checks below vacuously (0 <= anything).
   expect(controlPeakBytes, `${label}: control peak RSS was never sampled (0 bytes) — the sampler likely failed`).toBeGreaterThan(0);
@@ -259,6 +301,13 @@ function assertMemoryScaling(label: string, controlPeakBytes: number, largePeakB
     largePeakBytes,
     `${label}: peak RSS ${largePeakBytes} bytes exceeds relative ceiling ${relativeCeiling} bytes (1.5x control ${controlPeakBytes} + 32 MiB) — looks like memory scaling with file size`,
   ).toBeLessThanOrEqual(relativeCeiling);
+  if (additiveCeilingBytes !== undefined) {
+    const additiveCeiling = controlPeakBytes + additiveCeilingBytes;
+    expect(
+      largePeakBytes,
+      `${label}: peak RSS ${largePeakBytes} bytes exceeds additive ceiling ${additiveCeiling} bytes (control ${controlPeakBytes} + ${additiveCeilingBytes} bytes) — looks like memory scaling with file size`,
+    ).toBeLessThanOrEqual(additiveCeiling);
+  }
   expect(
     largePeakBytes,
     `${label}: peak RSS ${largePeakBytes} bytes exceeds absolute backstop ${absoluteBackstopBytes} bytes`,
@@ -267,6 +316,25 @@ function assertMemoryScaling(label: string, controlPeakBytes: number, largePeakB
 
 const CLI_ABSOLUTE_BACKSTOP_BYTES = 512 * 1024 * 1024;
 const BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES = 2 * 1024 * 1024 * 1024;
+
+// The 1.5x-relative ceiling alone scales with Chromium's own fixed
+// per-process overhead (two-plus processes' baseline RSS, tens to
+// hundreds of MiB, gets multiplied by 1.5x right along with the real
+// per-byte signal it's meant to catch), so a browser tree's control peak
+// being unusually high — e.g. browser-to-browser's two full Chromium
+// instances — loosens its own large-run ceiling by more than the relative
+// check should really allow. This additive bound catches that: the large
+// run's peak may exceed the control run's peak by at most this many bytes,
+// regardless of how large the control peak itself is. Initial value: the
+// old VmRSS-snapshot method's observed max control→large delta across
+// pairings was ~161 MiB (see docs/testing.md); this adds headroom on top
+// rather than reusing that number outright, since the new per-process-VmHWM
+// method above is a sum of independent per-process maxima and so tends to
+// read at or above what the old combined-snapshot method reported for the
+// same run (see that method's own comment above) — this hasn't yet been
+// confirmed against a real run of the new method. See docs/testing.md for
+// whether/how it's been recalibrated since.
+const BROWSER_TREE_ADDITIVE_CEILING_BYTES = 256 * 1024 * 1024;
 
 // ── Perf recording ──────────────────────────────────────────────────────
 
@@ -309,7 +377,10 @@ test.afterAll(() => {
   if (sharedDir) rmSync(sharedDir, { recursive: true, force: true });
 });
 
-test.afterEach(() => { cleanupTemporaryDirectories(); });
+test.afterEach(async ({}, testInfo) => {
+  cleanupTemporaryDirectories();
+  await flushDiagnostics(testInfo);
+});
 
 // ── Pairing runners ──────────────────────────────────────────────────────
 
@@ -323,12 +394,16 @@ interface RunResult {
   transport?: string;
 }
 
-async function runBrowserToBrowser(playwright: any, launchOptions: any, baseURL: string, srcPath: string, size: number, hash: string): Promise<RunResult> {
+async function runBrowserToBrowser(
+  playwright: any, launchOptions: any, baseURL: string, srcPath: string, size: number, hash: string, runLabel: string,
+): Promise<RunResult> {
   const senderBrowser: Browser = await playwright.chromium.launch(launchOptions);
   const { context: receiverCtx, browser: receiverBrowser } = await launchReceiverContext(playwright, launchOptions, baseURL);
   try {
     const sender = await senderBrowser.newPage({ baseURL });
     const receiver = await receiverCtx.newPage();
+    trackForDiagnostics(sender, `${runLabel}-sender`);
+    trackForDiagnostics(receiver, `${runLabel}-receiver`);
     const senderCounts = observeConnections(sender);
     const receiverCounts = observeConnections(receiver);
     await receiveToDisk(receiver);
@@ -356,13 +431,16 @@ async function runBrowserToBrowser(playwright: any, launchOptions: any, baseURL:
   }
 }
 
-async function runBrowserToCLI(playwright: any, launchOptions: any, baseURL: string, cliBin: string, wsUrl: string, srcPath: string, size: number, hash: string): Promise<RunResult> {
+async function runBrowserToCLI(
+  playwright: any, launchOptions: any, baseURL: string, cliBin: string, wsUrl: string, srcPath: string, size: number, hash: string, runLabel: string,
+): Promise<RunResult> {
   // The browser here only sends (reads from disk via File.slice(), never
   // writes to OPFS), so the incognito-style in-memory-OPFS confound above
   // doesn't apply — a plain launch() is representative and simpler.
   const browser: Browser = await playwright.chromium.launch(launchOptions);
   try {
     const page = await browser.newPage({ baseURL });
+    trackForDiagnostics(page, `${runLabel}-browser`);
     const browserCounts = observeConnections(page);
     const dest = temporaryDirectory("sp2p-large-recv-");
     const sampling = startBrowserRSSSampling([browser]);
@@ -370,10 +448,11 @@ async function runBrowserToCLI(playwright: any, launchOptions: any, baseURL: str
     const code = await chooseFileAtPath(page, srcPath);
     const child = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-output", dest, code]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, `${runLabel}-cli-receiver`);
     const cliPeak = trackCLIPeakRSS(child.pid!);
     try {
       await expect(page.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
-      expect(await cli.exited).toBe(0);
+      expect(await waitForCLIExit(cli, `${runLabel}-cli-receiver`)).toBe(0);
       const durationMs = Date.now() - start;
       const browserTreePeakBytes = await sampling.stop();
       const cliPeakBytes = cliPeak.stop();
@@ -390,30 +469,42 @@ async function runBrowserToCLI(playwright: any, launchOptions: any, baseURL: str
         lanes: { browser: browserCounts[0], cli: cli.counts[0] },
       };
     } finally {
-      child.kill();
+      // SIGKILL, not the default SIGTERM: the CLI only treats SIGTERM as a
+      // graceful-cancel signal (signal.NotifyContext, cmd/sp2p/main.go) and
+      // a process stuck somewhere that ignores context cancellation would
+      // otherwise survive this kill — and then flushDiagnostics's `await
+      // cli.code` (helpers.ts), which only resolves on process exit for a
+      // receiver (it never gets a "session" event), would hang for the rest
+      // of the test's afterEach, defeating the point of adding diagnostics
+      // for exactly this kind of stall.
+      child.kill("SIGKILL");
     }
   } finally {
     await browser.close();
   }
 }
 
-async function runCLIToBrowser(playwright: any, launchOptions: any, baseURL: string, cliBin: string, wsUrl: string, srcPath: string, size: number, hash: string): Promise<RunResult> {
+async function runCLIToBrowser(
+  playwright: any, launchOptions: any, baseURL: string, cliBin: string, wsUrl: string, srcPath: string, size: number, hash: string, runLabel: string,
+): Promise<RunResult> {
   const { context, browser } = await launchReceiverContext(playwright, launchOptions, baseURL);
   try {
     const page = await context.newPage();
+    trackForDiagnostics(page, `${runLabel}-browser`);
     const browserCounts = observeConnections(page);
     await receiveToDisk(page);
     const sampling = startBrowserRSSSampling([browser]);
     const start = Date.now();
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-compress", "0", srcPath]);
     const cli = watchCLI(child);
+    trackCLIForDiagnostics(cli, `${runLabel}-cli-sender`);
     const cliPeak = trackCLIPeakRSS(child.pid!);
     try {
       const code = await cli.code;
       await page.goto(`/r#${code}`);
       await page.locator(".confirm-btn").click();
       await expect(page.locator(".complete")).toBeVisible({ timeout: TRANSFER_TIMEOUT_MS });
-      expect(await cli.exited).toBe(0);
+      expect(await waitForCLIExit(cli, `${runLabel}-cli-sender`)).toBe(0);
       const durationMs = Date.now() - start;
       const browserTreePeakBytes = await sampling.stop();
       const cliPeakBytes = cliPeak.stop();
@@ -428,14 +519,14 @@ async function runCLIToBrowser(playwright: any, launchOptions: any, baseURL: str
         lanes: { cli: cli.counts[0], browser: browserCounts[0] },
       };
     } finally {
-      child.kill();
+      child.kill("SIGKILL"); // see runBrowserToCLI's kill() comment above
     }
   } finally {
     await context.close();
   }
 }
 
-async function runCLIToCLI(cliBin: string, wsUrl: string, srcPath: string, size: number, hash: string): Promise<RunResult> {
+async function runCLIToCLI(cliBin: string, wsUrl: string, srcPath: string, size: number, hash: string, runLabel: string): Promise<RunResult> {
   const dest = temporaryDirectory("sp2p-large-recv-");
   const start = Date.now();
   // No -transport: auto races TCP and WebRTC, same as netem.spec.ts's
@@ -443,15 +534,21 @@ async function runCLIToCLI(cliBin: string, wsUrl: string, srcPath: string, size:
   // asserting a specific transport/lane count (see internal/conn/manager.go).
   const sender = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-compress", "0", srcPath]);
   const senderWatch = watchCLI(sender);
+  trackCLIForDiagnostics(senderWatch, `${runLabel}-cli-sender`);
   const senderPeak = trackCLIPeakRSS(sender.pid!);
   try {
     const code = await senderWatch.code;
     const receiver = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-output", dest, code]);
     const receiverWatch = watchCLI(receiver);
+    trackCLIForDiagnostics(receiverWatch, `${runLabel}-cli-receiver`);
     const receiverPeak = trackCLIPeakRSS(receiver.pid!);
     try {
-      expect(await receiverWatch.exited).toBe(0);
-      expect(await senderWatch.exited).toBe(0);
+      // This receiver wait is the pairing's actual completion gate (there's
+      // no browser ".complete" here), so it gets the full transfer timeout;
+      // the sender should already be finished by the time the receiver has
+      // everything, so it keeps waitForCLIExit's short default.
+      expect(await waitForCLIExit(receiverWatch, `${runLabel}-cli-receiver`, TRANSFER_TIMEOUT_MS)).toBe(0);
+      expect(await waitForCLIExit(senderWatch, `${runLabel}-cli-sender`)).toBe(0);
       const durationMs = Date.now() - start;
       const senderPeakBytes = senderPeak.stop();
       const receiverPeakBytes = receiverPeak.stop();
@@ -465,10 +562,10 @@ async function runCLIToCLI(cliBin: string, wsUrl: string, srcPath: string, size:
         lanes: { sender: senderWatch.counts[0] ?? 1, receiver: receiverWatch.counts[0] ?? 1 },
       };
     } finally {
-      receiver.kill();
+      receiver.kill("SIGKILL"); // see runBrowserToCLI's kill() comment above
     }
   } finally {
-    sender.kill();
+    sender.kill("SIGKILL");
   }
 }
 
@@ -476,36 +573,45 @@ async function runCLIToCLI(cliBin: string, wsUrl: string, srcPath: string, size:
 
 test.describe("large: 1 GiB transfer pairings (memory + integrity + stalls)", () => {
   test("browser to browser", async ({ playwright, launchOptions, baseURL }) => {
-    const control = await runBrowserToBrowser(playwright, launchOptions, baseURL!, controlSrcPath, CONTROL_SIZE, controlHash);
-    const large = await runBrowserToBrowser(playwright, launchOptions, baseURL!, largeSrcPath, LARGE_SIZE, largeHash);
+    const control = await runBrowserToBrowser(playwright, launchOptions, baseURL!, controlSrcPath, CONTROL_SIZE, controlHash, "browser-browser.control");
+    const large = await runBrowserToBrowser(playwright, launchOptions, baseURL!, largeSrcPath, LARGE_SIZE, largeHash, "browser-browser.large");
     // Written before the memory assertion so a failing run still leaves
     // numbers in the uploaded artifact for calibration/debugging.
     writeRecord("browser-browser.control", { pairing: "browser-browser", size: "control", ...control });
     writeRecord("browser-browser.large", { pairing: "browser-browser", size: "large", ...large });
-    assertMemoryScaling("browser-browser: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
+    assertMemoryScaling(
+      "browser-browser: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!,
+      BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES, BROWSER_TREE_ADDITIVE_CEILING_BYTES,
+    );
   });
 
   test("browser to CLI", async ({ playwright, launchOptions, baseURL, cliBin, wsUrl }) => {
-    const control = await runBrowserToCLI(playwright, launchOptions, baseURL!, cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash);
-    const large = await runBrowserToCLI(playwright, launchOptions, baseURL!, cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash);
+    const control = await runBrowserToCLI(playwright, launchOptions, baseURL!, cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash, "browser-cli.control");
+    const large = await runBrowserToCLI(playwright, launchOptions, baseURL!, cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash, "browser-cli.large");
     writeRecord("browser-cli.control", { pairing: "browser-cli", size: "control", ...control });
     writeRecord("browser-cli.large", { pairing: "browser-cli", size: "large", ...large });
-    assertMemoryScaling("browser-cli: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
+    assertMemoryScaling(
+      "browser-cli: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!,
+      BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES, BROWSER_TREE_ADDITIVE_CEILING_BYTES,
+    );
     assertMemoryScaling("browser-cli: CLI receiver", control.cliPeakBytes!.receiver, large.cliPeakBytes!.receiver, CLI_ABSOLUTE_BACKSTOP_BYTES);
   });
 
   test("CLI to browser", async ({ playwright, launchOptions, baseURL, cliBin, wsUrl }) => {
-    const control = await runCLIToBrowser(playwright, launchOptions, baseURL!, cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash);
-    const large = await runCLIToBrowser(playwright, launchOptions, baseURL!, cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash);
+    const control = await runCLIToBrowser(playwright, launchOptions, baseURL!, cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash, "cli-browser.control");
+    const large = await runCLIToBrowser(playwright, launchOptions, baseURL!, cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash, "cli-browser.large");
     writeRecord("cli-browser.control", { pairing: "cli-browser", size: "control", ...control });
     writeRecord("cli-browser.large", { pairing: "cli-browser", size: "large", ...large });
-    assertMemoryScaling("cli-browser: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
+    assertMemoryScaling(
+      "cli-browser: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!,
+      BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES, BROWSER_TREE_ADDITIVE_CEILING_BYTES,
+    );
     assertMemoryScaling("cli-browser: CLI sender", control.cliPeakBytes!.sender, large.cliPeakBytes!.sender, CLI_ABSOLUTE_BACKSTOP_BYTES);
   });
 
   test("CLI to CLI, transport auto", async ({ cliBin, wsUrl }) => {
-    const control = await runCLIToCLI(cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash);
-    const large = await runCLIToCLI(cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash);
+    const control = await runCLIToCLI(cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash, "cli-cli-auto.control");
+    const large = await runCLIToCLI(cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash, "cli-cli-auto.large");
     writeRecord("cli-cli-auto.control", { pairing: "cli-cli-auto", size: "control", ...control });
     writeRecord("cli-cli-auto.large", { pairing: "cli-cli-auto", size: "large", ...large });
     assertMemoryScaling("cli-cli-auto: sender", control.cliPeakBytes!.sender, large.cliPeakBytes!.sender, CLI_ABSOLUTE_BACKSTOP_BYTES);
