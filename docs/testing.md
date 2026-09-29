@@ -1178,6 +1178,18 @@ Verifying the received copy never loads the whole file into memory either:
   already generated on disk never needs to hold it in memory to select it)
   is all that's needed on that side.
 
+The two source files (and the shared temp directory holding them) are
+allocated with a plain `mkdtempSync`, not `helpers.ts`'s `temporaryDirectory`
+— that helper tracks every directory it returns in one shared, module-level
+list that `cleanupTemporaryDirectories()` (run from every spec's
+`test.afterEach`, including this one, to clean up each pairing's
+destination files) empties completely on every test. Using it for the
+shared source files too deleted them right after the first test in early
+development of this suite, breaking every pairing after the first — caught
+by running the full file locally rather than one test in isolation.
+`test.afterAll` removes the `mkdtempSync` directory explicitly once, after
+every test has run.
+
 ### Memory sampling and the scaling assertion
 
 Each pairing test runs the 64 MiB control transfer, then the 1 GiB large
@@ -1210,26 +1222,62 @@ both confirmed against a real CI run before being trusted (see
   `ubuntu-latest`), `readCLIPeakRSSBytes` polls `/proc/<pid>/status`'s
   `VmHWM` — the kernel's own lifetime high-water mark for the process, so a
   single read at any point during its life already reflects the true peak
-  up to that point; polling (every 500ms) just needs to catch one reading
+  up to that point; polling (every 50ms) just needs to catch one reading
   shortly before the process exits, since `/proc/<pid>` is gone by the time
-  Node's `"exit"` event fires (the child has already been reaped). Non-Linux
-  (local macOS iteration only) falls back to `ps -o rss=`, an instantaneous
-  sample rather than a true high-water mark, so local numbers can
-  under-count between polls — expect CI's numbers to be the accurate ones.
+  Node's `"exit"` event fires (the child has already been reaped). The
+  50ms interval matters more than it looks: a control-run CLI receiver can
+  exit in well under 500ms (92ms observed locally on a tiny control file),
+  and under-sampling the fast control run — not the slow large run — is
+  what would silently make the relative ceiling too tight, not too loose.
+  Non-Linux (local macOS iteration only) falls back to `ps -o rss=`, an
+  instantaneous sample rather than a true high-water mark, so local numbers
+  can under-count between polls — expect CI's numbers to be the accurate
+  ones.
 - **Browser process tree peak.** Chromium exposes no equivalent
   high-water-mark API, so this is always a sampled maximum: every ~2s during
-  the transfer, `startBrowserRSSSampling` re-lists every pid in the
-  browser's process tree (`browserProcessPids`, the same
+  the transfer, `startBrowserRSSSampling` re-lists every pid across every
+  given browser's process tree (`browserProcessPids`, the same
   `SystemInfo.getProcessInfo` CDP call `netem.spec.ts` uses for its UDP
-  socket check) and sums each one's `/proc/<pid>/status` `VmRSS` (or, on
-  macOS, `ps -o rss=` per pid). Each pairing test launches its own fresh
-  `playwright.chromium.launch(...)` per control/large run (rather than
-  reusing the project's shared `browser`/`page` fixtures), so one run's
-  sample is never polluted by another test's residual pages/processes.
-  Sampling stops right after `.complete` is asserted, before the
-  streaming-hash verification above runs in the same page — so the
-  in-page SHA-256 pass isn't itself counted as part of the transfer's
-  memory footprint.
+  socket check; summed across more than one `Browser` for
+  browser-to-browser, whose sender and receiver are two separate browser
+  processes — see below) and sums each one's `/proc/<pid>/status` `VmRSS`
+  (or, on macOS, `ps -o rss=` per pid). Each pairing test launches its own
+  fresh browser(s) per control/large run (rather than reusing the project's
+  shared `browser`/`page` fixtures), so one run's sample is never polluted
+  by another test's residual pages/processes. Sampling stops right after
+  `.complete` is asserted, before the streaming-hash verification above
+  runs in the same page — so the in-page SHA-256 pass isn't itself counted
+  as part of the transfer's memory footprint.
+- **A browser receiver page always runs inside `launchPersistentContext`,
+  never a plain `launch()` + `newPage()`.** Chromium's default context (no
+  explicit user-data directory) behaves like an incognito profile, and
+  backs origin storage — including OPFS, the real receive path
+  `receiveToDisk`/`verifyDiskStreaming` exercise — in memory rather than on
+  disk. That's invisible functionally (the write/read-back still round-trips
+  correctly) but fatal to this suite's actual purpose: writing a 1 GiB file
+  to an in-memory OPFS store inflates the browser process's RSS by roughly
+  the file's own size, which would fail the memory-scaling assertion on
+  every correct build — a false positive manufactured by the test harness,
+  not a real product regression, and not representative of a real user's
+  browser (a real, non-incognito Chrome profile backs OPFS with real disk
+  I/O, same as `launchPersistentContext`). Confirmed locally: writing
+  512 MiB to OPFS raised RSS by roughly 530 MiB under a plain
+  `launch()`+`newPage()`, versus roughly 43 MiB under
+  `launchPersistentContext` (backed by a real, `temporaryDirectory`-managed
+  profile directory) for the identical write. Only pages that *receive* use
+  this — `runBrowserToCLI`'s browser only sends (reads from disk via
+  `File.slice()`, never touches OPFS), so it stays on a plain `launch()`.
+  `browser-to-browser` therefore launches two separate browser processes
+  (a plain-launched sender, a persistent-context receiver) rather than two
+  pages sharing one browser, which is why its process-tree sampling sums
+  more than one `Browser`'s pids (see above) and why its reported browser-tree
+  peak runs meaningfully higher than the single-browser pairings' — two
+  Chromium instances' baseline overhead, not a bug.
+- **A zero peak fails loudly instead of passing vacuously.**
+  `assertMemoryScaling` asserts both the control and large peaks are
+  `> 0` before comparing them — a sampler that never got a single
+  successful reading would otherwise report `0`, which passes both the
+  relative and absolute checks trivially (`0 <= anything`).
 
 ### CI wiring
 
@@ -1245,7 +1293,19 @@ both confirmed against a real CI run before being trusted (see
   the `netem`/`netem-extended` jobs run `netem.spec.ts`. This is the plain
   `wan150` profile (75ms delay + 0.1% loss, uncapped rate), the same one
   the PR/push `netem` job uses — not `netem-extended`'s rate-capped
-  `wan150-cap`.
+  `wan150-cap`. Two things this leg needs that weren't automatic: `netns.sh
+  exec`'s allowlist of environment variables it forwards into the namespace
+  (see [Network setup](#network-setup) above — `sudo` resets almost
+  everything else) didn't include `SP2P_LARGE_TEST`/`SP2P_LARGE_TEST_SIZE_BYTES`
+  until this suite added them, and without it every test silently skips
+  inside the namespace (Playwright still exits 0) — caught by
+  `large-summary.mjs --gate` failing with all eight records MISSING on the
+  first real dispatch. And the `large` Playwright project's `launchOptions`
+  sets `--disable-features=WebRtcHideLocalIpsWithMdns` unconditionally (see
+  the `netem`/`relay`/`engine-matrix` projects for the same flag), since
+  `wan150`'s namespace has no mDNS resolution for the `.local` host
+  candidate names Chromium would otherwise gather on `dummy0` — harmless on
+  the `clean` leg, which isn't namespaced.
 
 Both matrix legs build web assets, the CLI/server binaries, and — unlike
 the `netem`/`relay` jobs, which don't need it — `dist/crypto-test.js`
@@ -1259,25 +1319,62 @@ otherwise skip building it, and `verifyDiskStreaming` above needs it on
 both legs. A `df -h` step logs disk headroom for the job log; the suite's
 own `large.spec.ts` module-level `df -k` check skips the whole suite
 outright (rather than failing opaquely with `ENOSPC` partway through) if
-the runner has less than 8 GB free. `test.afterEach(cleanupTemporaryDirectories)`
-removes each pairing's on-disk source/destination copies between tests, so
-the 1 GiB source and control files (generated once, in `test.beforeAll`)
-are the only files that persist across the whole run — cleaned up in
-`test.afterAll`.
+the runner has less than 10 GB free — a browser receiver's real on-disk
+profile (`launchPersistentContext` above) means the concurrent footprint
+within one pairing test is now roughly source file + destination copy +
+that same copy again inside the browser profile, all at the same size, not
+just source + destination. `test.afterEach(cleanupTemporaryDirectories)`
+removes each pairing's on-disk source/destination copies and browser
+profile directories between tests, so the 1 GiB source and control files
+(generated once, in `test.beforeAll` into a directory outside that
+tracking — see above) are the only files that persist across the whole
+run, cleaned up in `test.afterAll`.
 
 Numeric-only perf JSON — one record per pairing per size, `bytes`,
 `durationMs`, `mbps`, peak memory in bytes, lane counts, transport — is
 written to `test-results/perf-large/` (`large.spec.ts`'s `writeRecord`,
 the same pattern as `netem.spec.ts`'s `writePerfRecord` and
-`relay.spec.ts`'s equivalent) and rendered as a markdown table on
-`$GITHUB_STEP_SUMMARY` by `web/tests/large-summary.mjs --gate` (fails if
-any of the four pairings is missing a control or large record — the actual
-memory-scaling pass/fail comes from `expect()` inside `large.spec.ts`
-itself, not from this summary script). Only that `test-results/perf-large/**`
-directory is uploaded as an artifact (`large-perf-<profile>`); like
-`netem`/`relay`, this suite's Playwright project (`web/playwright.config.ts`)
-disables traces, screenshots, and video, since they'd capture transfer
-codes in a public artifact.
+`relay.spec.ts`'s equivalent) *before* that pairing's memory-scaling
+`expect()` calls, so a failing assertion still leaves both runs' numbers in
+the uploaded artifact instead of only in the failure message. Rendered as a
+markdown table on `$GITHUB_STEP_SUMMARY` by `web/tests/large-summary.mjs
+--gate` (fails if any of the four pairings is missing a control or large
+record — the actual memory-scaling pass/fail comes from `expect()` inside
+`large.spec.ts` itself, not from this summary script). `global-setup.ts`
+clears `test-results/perf-large/` up front when `SP2P_LARGE_TEST` is set,
+the same way it already does for the netem/relay suites' perf
+directories, so a stale local record can't hide a real MISSING pairing (CI
+always starts from a fresh checkout, so this only matters locally). Only
+that `test-results/perf-large/**` directory is uploaded as an artifact
+(`large-perf-<profile>`); like `netem`/`relay`, this suite's Playwright
+project (`web/playwright.config.ts`) disables traces, screenshots, and
+video, since they'd capture transfer codes in a public artifact.
+
+The four pairing tests use a plain `test.describe`, not `.describe.serial`:
+`playwright.config.ts`'s global `workers: 1`/`fullyParallel: false` already
+run every test in the file in order, so `.serial`'s only actual effect
+would be skipping the rest of the file after one failure — which would
+hide the CLI-involving pairings (the ones that actually catch the
+`os.ReadFile`-style mutation this suite exists to catch; see
+[Mutation check](#mutation-check) below) behind an unrelated
+browser-pairing failure.
+
+### Mutation check
+
+Confirms the memory-scaling assertion actually depends on the product
+streaming the file, not just on the transfer completing:
+`internal/flow/helpers.go`'s `PrepareInput`, for a single regular file,
+normally opens the file and returns it directly as the `io.Reader`
+(`os.Open`, streamed through `internal/transfer/sender.go`'s bounded
+256 KiB/8-deep-pipeline chunking). The mutation reads the whole file into
+memory first instead (`os.ReadFile` + `bytes.NewReader`), touching only the
+CLI *sender* path for a regular file — folders, stdin, and the receive path
+are untouched. Expected: the CLI-sender memory assertion fails on the
+1 GiB run for both CLI-involving pairings (`cli-browser`, `cli-cli-auto`);
+`browser-cli` (CLI is the *receiver* there) is unaffected, which is itself
+part of confirming the mutation is caught for the right reason.
+
+<!-- Filled in after a real throwaway-commit run on Extended checks; see the branch history for the mutation commit and its revert. -->
 
 ### Known limitations
 

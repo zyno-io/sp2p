@@ -130,6 +130,15 @@ export default defineConfig({
       testMatch: /large\.spec\.ts/,
       timeout: 30 * 60_000,
       use: {
+        // Applies to every playwright.chromium.launch(launchOptions)/
+        // launchPersistentContext(dir, {...launchOptions}) call in
+        // large.spec.ts via the `launchOptions` fixture. Needed for the
+        // wan150 leg (extended.yml's `large` job): inside that netns, mDNS
+        // can't resolve host candidates gathered on dummy0, exactly like
+        // the netem/relay/engine-matrix projects below — harmless outside
+        // the namespace (the `clean` leg), so applied unconditionally
+        // rather than only for one matrix leg.
+        launchOptions: { args: ["--disable-features=WebRtcHideLocalIpsWithMdns"] },
         // Traces/screenshots would capture transfer codes in a public
         // artifact — never collect them for this suite (only numeric perf
         // JSON is uploaded; see docs/testing.md).

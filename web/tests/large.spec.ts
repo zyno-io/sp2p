@@ -14,13 +14,20 @@
 //
 // Skipped unless SP2P_LARGE_TEST=1, which only the Extended checks `large`
 // job (.github/workflows/extended.yml) sets.
+//
+// Plain describe, not describe.serial: workers:1/fullyParallel:false
+// (playwright.config.ts) already run these tests in file order, so .serial
+// would only add "skip the rest of the file after one failure" — which
+// would hide the CLI-involving pairings (the ones that actually catch the
+// os.ReadFile-style mutation this suite is designed to catch) behind an
+// unrelated browser-pairing failure.
 
 import { execSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { createReadStream, createWriteStream, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, createWriteStream, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
-import type { Browser } from "@playwright/test";
+import type { Browser, BrowserContext } from "@playwright/test";
 import { expect } from "./fixtures";
 import {
   browserProcessPids, chooseFileAtPath, cleanupTemporaryDirectories, isolatedServerTest as test,
@@ -46,12 +53,15 @@ const TRANSFER_TIMEOUT_MS = 20 * 60_000;
 
 // ── Disk headroom ────────────────────────────────────────────────────────
 
-// The largest concurrent footprint within one pairing test is roughly:
-// 1 source file (large or control) + 1 destination file/OPFS copy of the
-// same size, plus the *other* size's files from the previous run not yet
-// cleaned up in the worst case. Require comfortable headroom rather than
-// compute this exactly — hosted-runner disks are the tight case this guards.
-const REQUIRED_FREE_BYTES = 8 * 1024 * 1024 * 1024;
+// A browser receiver now uses a real on-disk profile (launchPersistentContext
+// below — real, disk-backed OPFS storage, matching what a real user's
+// browser does), so the largest concurrent footprint within one pairing test
+// is roughly: 1 source file + 1 destination file/OPFS copy + 1 browser
+// profile directory holding that same OPFS copy again, all at the same
+// size, plus slack for the previous run's files not yet cleaned up. Require
+// comfortable headroom rather than compute this exactly — hosted-runner
+// disks are the tight case this guards.
+const REQUIRED_FREE_BYTES = 10 * 1024 * 1024 * 1024;
 
 function freeSpaceBytes(path: string): number | null {
   try {
@@ -108,12 +118,14 @@ function hashFileStreaming(path: string): Promise<string> {
 //
 // CLI process: on Linux, /proc/<pid>/status's VmHWM is the kernel's own
 // lifetime high-water mark for the process — a single read at any point
-// during its life reflects the true peak up to that point, so polling only
-// needs to catch a reading shortly before exit (the process is reaped, and
-// /proc/<pid> gone, by the time Node's "exit" event fires). Non-Linux
-// (local macOS iteration only — CI always runs this suite on ubuntu-latest)
-// falls back to `ps -o rss=`, an instantaneous sample rather than a true
-// high-water mark, so it can under-count between polls.
+// during its life reflects the true peak up to that point. Polled every
+// 50ms: a control-run receiver can exit in well under 500ms, and this
+// suite's whole point is comparing peaks between a fast control run and a
+// slow large run, so under-sampling the fast one would silently make the
+// relative ceiling too tight. Non-Linux (local macOS iteration only — CI
+// always runs this suite on ubuntu-latest) falls back to `ps -o rss=`, an
+// instantaneous sample rather than a true high-water mark, so it can
+// under-count between polls.
 //
 // Browser process tree: Chromium (browser + renderer + GPU + utility
 // processes) exposes no equivalent high-water-mark API, so this is always a
@@ -133,7 +145,7 @@ function readCLIPeakRSSBytes(pid: number): number | null {
   return null;
 }
 
-function trackCLIPeakRSS(pid: number, intervalMs = 500): { stop(): number } {
+function trackCLIPeakRSS(pid: number, intervalMs = 50): { stop(): number } {
   let peak = 0;
   const tick = () => {
     const bytes = readCLIPeakRSSBytes(pid);
@@ -172,15 +184,21 @@ function readProcessTreeRSSBytes(pids: ReadonlySet<number>): number | null {
   }
 }
 
-function startBrowserRSSSampling(browser: Browser, intervalMs = 2000): { stop(): Promise<number> } {
+// Sums the process-tree RSS across every given Browser (a browser-to-browser
+// run launches the sender and receiver as two separate browser processes —
+// see launchReceiverContext below — so their trees are summed, not sampled
+// independently).
+function startBrowserRSSSampling(browsers: Browser[], intervalMs = 2000): { stop(): Promise<number> } {
   let peak = 0;
   let running = true;
   const tick = async () => {
     try {
-      const pids = await browserProcessPids(browser);
+      const pidSets = await Promise.all(browsers.map(b => browserProcessPids(b)));
+      const pids = new Set<number>();
+      for (const set of pidSets) for (const pid of set) pids.add(pid);
       const bytes = readProcessTreeRSSBytes(pids);
       if (bytes !== null) peak = Math.max(peak, bytes);
-    } catch { /* browser closing */ }
+    } catch { /* a browser is closing */ }
   };
   const loop = (async () => {
     while (running) {
@@ -198,6 +216,33 @@ function startBrowserRSSSampling(browser: Browser, intervalMs = 2000): { stop():
   };
 }
 
+// ── Browser launch helpers ──────────────────────────────────────────────
+
+// Chromium's default browser.newPage()/newContext() (no explicit userDataDir)
+// behaves like an incognito profile: origin storage, including OPFS, is
+// memory-backed rather than disk-backed there. That's invisible functionally
+// (receiveToDisk/verifyDiskStreaming above still read back exactly what was
+// written) but fatal to this suite's memory measurement specifically: writing
+// a 1 GiB file to an in-memory OPFS store inflates the browser process's RSS
+// by roughly the file's own size, which would fail the memory-scaling
+// assertion on every correct build — a false positive from the test harness,
+// not a real product regression, and not representative of a real user's
+// browser (a real, non-incognito Chrome profile backs OPFS with real disk
+// I/O). launchPersistentContext gives every page in the returned context a
+// real on-disk profile, so OPFS there is disk-backed exactly like a real
+// user's — confirmed locally: writing 512 MiB to OPFS raised RSS by ~530 MiB
+// under a plain launch()+newPage(), vs. ~43 MiB under launchPersistentContext
+// for the same write. Used for every browser page that *receives* in this
+// suite (the one side that writes to OPFS); a browser that only *sends*
+// (runBrowserToCLI) never writes to OPFS, so a plain launch() is fine there.
+async function launchReceiverContext(playwright: any, launchOptions: any, baseURL: string): Promise<{ context: BrowserContext; browser: Browser; profileDir: string }> {
+  const profileDir = temporaryDirectory("sp2p-large-profile-");
+  const context: BrowserContext = await playwright.chromium.launchPersistentContext(profileDir, { ...launchOptions, baseURL });
+  const browser = context.browser();
+  if (!browser) throw new Error("launchPersistentContext: context.browser() was null — can't sample this context's process tree");
+  return { context, browser, profileDir };
+}
+
 // ── Memory-scaling assertion ────────────────────────────────────────────
 
 // The large (1 GiB-scale) run's peak must not exceed 1.5x the control
@@ -205,6 +250,10 @@ function startBrowserRSSSampling(browser: Browser, intervalMs = 2000): { stop():
 // absolute backstop — see docs/testing.md for the calibration this was
 // derived from.
 function assertMemoryScaling(label: string, controlPeakBytes: number, largePeakBytes: number, absoluteBackstopBytes: number): void {
+  // A sampler that never got a single successful reading would report 0,
+  // which would otherwise pass both checks below vacuously (0 <= anything).
+  expect(controlPeakBytes, `${label}: control peak RSS was never sampled (0 bytes) — the sampler likely failed`).toBeGreaterThan(0);
+  expect(largePeakBytes, `${label}: large peak RSS was never sampled (0 bytes) — the sampler likely failed`).toBeGreaterThan(0);
   const relativeCeiling = 1.5 * controlPeakBytes + 32 * 1024 * 1024;
   expect(
     largePeakBytes,
@@ -235,12 +284,19 @@ function mbps(bytes: number, durationMs: number): number {
 
 // ── Fixtures (source files, generated once for the whole run) ──────────────
 
+// Deliberately NOT allocated via helpers.ts's temporaryDirectory: that
+// tracks every directory in one shared, module-level list that
+// cleanupTemporaryDirectories() (below, run from afterEach) empties
+// completely on every test — which would delete these two source files
+// (needed by every pairing test in this file) right after the first test.
+// A plain mkdtempSync, cleaned explicitly in afterAll below, outlives each
+// individual test's afterEach.
 let sharedDir: string;
 let largeSrcPath: string, largeHash: string;
 let controlSrcPath: string, controlHash: string;
 
 test.beforeAll(async () => {
-  sharedDir = join(temporaryDirectory("sp2p-large-src-"));
+  sharedDir = mkdtempSync(join(tmpdir(), "sp2p-large-src-"));
   largeSrcPath = join(sharedDir, "large-src.bin");
   controlSrcPath = join(sharedDir, "control-src.bin");
   [largeHash, controlHash] = await Promise.all([
@@ -268,14 +324,15 @@ interface RunResult {
 }
 
 async function runBrowserToBrowser(playwright: any, launchOptions: any, baseURL: string, srcPath: string, size: number, hash: string): Promise<RunResult> {
-  const browser: Browser = await playwright.chromium.launch(launchOptions);
+  const senderBrowser: Browser = await playwright.chromium.launch(launchOptions);
+  const { context: receiverCtx, browser: receiverBrowser } = await launchReceiverContext(playwright, launchOptions, baseURL);
   try {
-    const sender = await browser.newPage({ baseURL });
-    const receiver = await browser.newPage({ baseURL });
+    const sender = await senderBrowser.newPage({ baseURL });
+    const receiver = await receiverCtx.newPage();
     const senderCounts = observeConnections(sender);
     const receiverCounts = observeConnections(receiver);
     await receiveToDisk(receiver);
-    const sampling = startBrowserRSSSampling(browser);
+    const sampling = startBrowserRSSSampling([senderBrowser, receiverBrowser]);
     const start = Date.now();
     const code = await chooseFileAtPath(sender, srcPath);
     await receiver.goto(`/r#${code}`);
@@ -294,17 +351,21 @@ async function runBrowserToBrowser(playwright: any, launchOptions: any, baseURL:
       lanes: { sender: senderCounts[0], receiver: receiverCounts[0] },
     };
   } finally {
-    await browser.close();
+    await senderBrowser.close();
+    await receiverCtx.close();
   }
 }
 
 async function runBrowserToCLI(playwright: any, launchOptions: any, baseURL: string, cliBin: string, wsUrl: string, srcPath: string, size: number, hash: string): Promise<RunResult> {
+  // The browser here only sends (reads from disk via File.slice(), never
+  // writes to OPFS), so the incognito-style in-memory-OPFS confound above
+  // doesn't apply — a plain launch() is representative and simpler.
   const browser: Browser = await playwright.chromium.launch(launchOptions);
   try {
     const page = await browser.newPage({ baseURL });
     const browserCounts = observeConnections(page);
     const dest = temporaryDirectory("sp2p-large-recv-");
-    const sampling = startBrowserRSSSampling(browser);
+    const sampling = startBrowserRSSSampling([browser]);
     const start = Date.now();
     const code = await chooseFileAtPath(page, srcPath);
     const child = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-output", dest, code]);
@@ -337,12 +398,12 @@ async function runBrowserToCLI(playwright: any, launchOptions: any, baseURL: str
 }
 
 async function runCLIToBrowser(playwright: any, launchOptions: any, baseURL: string, cliBin: string, wsUrl: string, srcPath: string, size: number, hash: string): Promise<RunResult> {
-  const browser: Browser = await playwright.chromium.launch(launchOptions);
+  const { context, browser } = await launchReceiverContext(playwright, launchOptions, baseURL);
   try {
-    const page = await browser.newPage({ baseURL });
+    const page = await context.newPage();
     const browserCounts = observeConnections(page);
     await receiveToDisk(page);
-    const sampling = startBrowserRSSSampling(browser);
+    const sampling = startBrowserRSSSampling([browser]);
     const start = Date.now();
     const child = spawn(cliBin, ["send", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-compress", "0", srcPath]);
     const cli = watchCLI(child);
@@ -370,7 +431,7 @@ async function runCLIToBrowser(playwright: any, launchOptions: any, baseURL: str
       child.kill();
     }
   } finally {
-    await browser.close();
+    await context.close();
   }
 }
 
@@ -413,39 +474,41 @@ async function runCLIToCLI(cliBin: string, wsUrl: string, srcPath: string, size:
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
-test.describe.serial("large: 1 GiB transfer pairings (memory + integrity + stalls)", () => {
+test.describe("large: 1 GiB transfer pairings (memory + integrity + stalls)", () => {
   test("browser to browser", async ({ playwright, launchOptions, baseURL }) => {
     const control = await runBrowserToBrowser(playwright, launchOptions, baseURL!, controlSrcPath, CONTROL_SIZE, controlHash);
     const large = await runBrowserToBrowser(playwright, launchOptions, baseURL!, largeSrcPath, LARGE_SIZE, largeHash);
-    assertMemoryScaling("browser-browser: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
+    // Written before the memory assertion so a failing run still leaves
+    // numbers in the uploaded artifact for calibration/debugging.
     writeRecord("browser-browser.control", { pairing: "browser-browser", size: "control", ...control });
     writeRecord("browser-browser.large", { pairing: "browser-browser", size: "large", ...large });
+    assertMemoryScaling("browser-browser: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
   });
 
   test("browser to CLI", async ({ playwright, launchOptions, baseURL, cliBin, wsUrl }) => {
     const control = await runBrowserToCLI(playwright, launchOptions, baseURL!, cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash);
     const large = await runBrowserToCLI(playwright, launchOptions, baseURL!, cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash);
-    assertMemoryScaling("browser-cli: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
-    assertMemoryScaling("browser-cli: CLI receiver", control.cliPeakBytes!.receiver, large.cliPeakBytes!.receiver, CLI_ABSOLUTE_BACKSTOP_BYTES);
     writeRecord("browser-cli.control", { pairing: "browser-cli", size: "control", ...control });
     writeRecord("browser-cli.large", { pairing: "browser-cli", size: "large", ...large });
+    assertMemoryScaling("browser-cli: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
+    assertMemoryScaling("browser-cli: CLI receiver", control.cliPeakBytes!.receiver, large.cliPeakBytes!.receiver, CLI_ABSOLUTE_BACKSTOP_BYTES);
   });
 
   test("CLI to browser", async ({ playwright, launchOptions, baseURL, cliBin, wsUrl }) => {
     const control = await runCLIToBrowser(playwright, launchOptions, baseURL!, cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash);
     const large = await runCLIToBrowser(playwright, launchOptions, baseURL!, cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash);
-    assertMemoryScaling("cli-browser: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
-    assertMemoryScaling("cli-browser: CLI sender", control.cliPeakBytes!.sender, large.cliPeakBytes!.sender, CLI_ABSOLUTE_BACKSTOP_BYTES);
     writeRecord("cli-browser.control", { pairing: "cli-browser", size: "control", ...control });
     writeRecord("cli-browser.large", { pairing: "cli-browser", size: "large", ...large });
+    assertMemoryScaling("cli-browser: browser tree", control.browserTreePeakBytes!, large.browserTreePeakBytes!, BROWSER_TREE_ABSOLUTE_BACKSTOP_BYTES);
+    assertMemoryScaling("cli-browser: CLI sender", control.cliPeakBytes!.sender, large.cliPeakBytes!.sender, CLI_ABSOLUTE_BACKSTOP_BYTES);
   });
 
   test("CLI to CLI, transport auto", async ({ cliBin, wsUrl }) => {
     const control = await runCLIToCLI(cliBin, wsUrl, controlSrcPath, CONTROL_SIZE, controlHash);
     const large = await runCLIToCLI(cliBin, wsUrl, largeSrcPath, LARGE_SIZE, largeHash);
-    assertMemoryScaling("cli-cli-auto: sender", control.cliPeakBytes!.sender, large.cliPeakBytes!.sender, CLI_ABSOLUTE_BACKSTOP_BYTES);
-    assertMemoryScaling("cli-cli-auto: receiver", control.cliPeakBytes!.receiver, large.cliPeakBytes!.receiver, CLI_ABSOLUTE_BACKSTOP_BYTES);
     writeRecord("cli-cli-auto.control", { pairing: "cli-cli-auto", size: "control", ...control });
     writeRecord("cli-cli-auto.large", { pairing: "cli-cli-auto", size: "large", ...large });
+    assertMemoryScaling("cli-cli-auto: sender", control.cliPeakBytes!.sender, large.cliPeakBytes!.sender, CLI_ABSOLUTE_BACKSTOP_BYTES);
+    assertMemoryScaling("cli-cli-auto: receiver", control.cliPeakBytes!.receiver, large.cliPeakBytes!.receiver, CLI_ABSOLUTE_BACKSTOP_BYTES);
   });
 });
