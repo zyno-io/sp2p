@@ -3,12 +3,10 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -163,19 +161,10 @@ func (r *streamReporter) promptRelay(ctx context.Context) conn.RelayAnswer {
 		fmt.Fprintln(os.Stderr, "Relay requires consent; use --allow-relay when running without a terminal.")
 		return conn.RelayUnavailable
 	}
-	defer tty.Close()
-	stop := context.AfterFunc(ctx, func() { tty.Close() })
-	defer stop()
 	fmt.Fprint(os.Stderr, "Direct connection failed. Allow the encrypted TURN relay? [y/N]: ")
-	scanner := bufio.NewScanner(tty)
-	if !scanner.Scan() {
-		return conn.RelayUnavailable
-	}
-	answer := strings.ToLower(strings.TrimSpace(scanner.Text()))
-	if answer == "y" || answer == "yes" {
-		return conn.RelayAllow
-	}
-	return conn.RelayDeny
+	// See send.go's readRelayAnswer for why this reads on a goroutine
+	// instead of canceling ctx to close tty out from under a blocked read.
+	return readRelayAnswer(ctx, tty)
 }
 
 func (r *streamReporter) subprocessWriter(name string, human io.Writer) io.Writer {

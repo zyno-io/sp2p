@@ -242,14 +242,22 @@ func Send(ctx context.Context, cfg SendConfig, h Handler) error {
 	attemptCtx := relayWatch.AttemptContext(ctx)
 	estResult, err := conn.Establish(attemptCtx, connCfg)
 	if relayWatch.PeerLeft() {
-		if estResult != nil {
-			estResult.Conn.Close()
-			if estResult.TCPResult != nil && estResult.TCPResult.Cleanup != nil {
-				estResult.TCPResult.Cleanup()
-			}
-		}
+		closeEstablishResult(estResult)
 		h.OnError("Receiver disconnected")
 		return fmt.Errorf("peer disconnected")
+	}
+	if err != nil && ctx.Err() == nil {
+		if wErr := relayWatch.Err(); wErr != nil {
+			// Attempt 1 was cut short by (or, for signaling loss, merely
+			// coincided with) something other than a plain peer-left
+			// (handled above) or genuine cancellation of ctx itself: report
+			// what actually happened — e.g. "the receiver declined the
+			// relay" or "Signaling server disconnected" — instead of the
+			// bare context-canceled attemptCtx's own cancellation would
+			// otherwise surface.
+			closeEstablishResult(estResult)
+			return reportRelayWatchErr(h, wErr, "receiver")
+		}
 	}
 	if err != nil && turnAvailable && cfg.Transport != conn.TransportTCP {
 		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.

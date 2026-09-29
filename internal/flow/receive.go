@@ -217,14 +217,16 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	attemptCtx := relayWatch.AttemptContext(ctx)
 	estResult, err := conn.Establish(attemptCtx, connCfg)
 	if relayWatch.PeerLeft() {
-		if estResult != nil {
-			estResult.Conn.Close()
-			if estResult.TCPResult != nil && estResult.TCPResult.Cleanup != nil {
-				estResult.TCPResult.Cleanup()
-			}
-		}
+		closeEstablishResult(estResult)
 		h.OnError("Sender disconnected")
 		return nil, fmt.Errorf("peer disconnected")
+	}
+	if err != nil && ctx.Err() == nil {
+		if wErr := relayWatch.Err(); wErr != nil {
+			// See flow/send.go's identical check for why.
+			closeEstablishResult(estResult)
+			return nil, reportRelayWatchErr(h, wErr, "sender")
+		}
 	}
 	if err != nil && turnAvailable && cfg.Transport != conn.TransportTCP {
 		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.

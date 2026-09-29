@@ -64,10 +64,7 @@ func iceServersToConn(servers []signal.ICEServer) ([]string, []conn.TURNServer) 
 // retryWithRelay attempts to establish a connection using TURN relay servers
 // after direct methods have failed. It is a thin wrapper around
 // conn.RetryWithRelay: it builds a RelayOptions from h, then maps the
-// returned error to the right user-facing text (naming the peer's role) and
-// reports it via h.OnError. It never calls h.OnError for a context
-// cancellation — that's the caller's (or the user's Ctrl+C's) business, not
-// a relay-consent outcome.
+// returned error to the right user-facing text via reportRelayWatchErr.
 func retryWithRelay(ctx context.Context, sigClient *signal.Client, w *conn.RelayWatch, relayOK bool, h Handler, cfg conn.ConnectConfig, peerRole string) (*conn.EstablishResult, error) {
 	h.OnVerbose("direct connection failed, attempting TURN relay fallback")
 
@@ -77,11 +74,37 @@ func retryWithRelay(ctx context.Context, sigClient *signal.Client, w *conn.Relay
 		OnLog:   h.OnVerbose,
 		OnReset: h.OnConnectionMethodsReset,
 	})
-	if err == nil {
-		return result, nil
+	if err != nil {
+		return nil, reportRelayWatchErr(h, err, peerRole)
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return nil, err
+	return result, nil
+}
+
+// closeEstablishResult releases a partially- or fully-established
+// connection attempt's resources. Safe to call with a nil result.
+func closeEstablishResult(estResult *conn.EstablishResult) {
+	if estResult == nil {
+		return
+	}
+	estResult.Conn.Close()
+	if estResult.TCPResult != nil && estResult.TCPResult.Cleanup != nil {
+		estResult.TCPResult.Cleanup()
+	}
+}
+
+// reportRelayWatchErr maps a relay-consent error — from conn.RetryWithRelay,
+// or from a RelayWatch's own Err() when attempt 1 was cut short before ever
+// reaching relay retry (e.g. the peer already declined, or signaling was
+// lost, while attempt 1 was still running) — to the right user-facing text
+// naming the peer's role, reports it via h.OnError, and returns err
+// unchanged so callers can keep propagating it.
+//
+// It never calls h.OnError for a context cancellation — that's the
+// caller's (or the user's Ctrl+C's) business, not a relay-consent outcome.
+// A nil err passes through unchanged.
+func reportRelayWatchErr(h Handler, err error, peerRole string) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 
 	var declined *conn.PeerDeclinedRelayError
@@ -98,10 +121,12 @@ func retryWithRelay(ctx context.Context, sigClient *signal.Client, w *conn.Relay
 		h.OnError(fmt.Sprintf("Timed out waiting for the %s to allow the relay.", peerRole))
 	case errors.Is(err, conn.ErrSignalingLost):
 		h.OnError("Signaling server disconnected")
+	case errors.Is(err, conn.ErrTURNCredentialsTimeout):
+		h.OnError("Server did not provide TURN credentials")
 	case errors.Is(err, conn.ErrRelayNotAllowed):
 		h.OnError("Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay.")
 	}
-	return nil, err
+	return err
 }
 
 // buildRelayPrompt adapts h's relay prompt to conn.RelayOptions.Prompt,

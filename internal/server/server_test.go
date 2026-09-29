@@ -1316,11 +1316,20 @@ func setupPeers(t *testing.T, wsURL string) (sender, receiver *websocket.Conn) {
 // still gets the same cached TURN credentials as the first.
 func TestSignal_RelayConsentPayloadsPassThroughUnchanged(t *testing.T) {
 	wantURLs := []string{"turn:relay.example.com:3478"}
+	// Ephemeral (TURNGen), not StaticTURN: a static credential is the same
+	// object on every issuance regardless of whether turnOnce's per-session
+	// caching actually runs, so it can't tell a working cache from a
+	// broken one. An ephemeral credential embeds a fresh expiry timestamp
+	// on every real Generate call, so "the second relay-retry returns the
+	// SAME credentials" below only holds if turnOnce actually suppressed a
+	// second Generate call.
 	_, wsURL := startTestServerWithConfig(t, Config{
 		Addr:    ":0",
 		BaseURL: "http://localhost",
-		StaticTURN: []signal.ICEServer{
-			{URLs: wantURLs, Username: "u", Credential: "p"},
+		TURNGen: &TURNCredentialGenerator{
+			URLs:   wantURLs,
+			Secret: "consent-passthrough-secret",
+			TTL:    5 * time.Minute,
 		},
 	})
 	sender, receiver := setupPeers(t, wsURL)

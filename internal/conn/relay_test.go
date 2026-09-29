@@ -506,6 +506,35 @@ func TestRelayWatch_DeclineBeatsSignalingLoss(t *testing.T) {
 	}
 }
 
+// TestRelayWatch_DrainConsumesBufferedDeclineBeforeMarkingLost directly
+// exercises run()'s own drain() call (internal/conn/relay.go's
+// `case <-w.client.Done(): w.drain(); w.setLost()`), which is what
+// guarantees a decline already buffered in w.ch ahead of a disconnect is
+// processed before the connection is marked lost — a real network replay
+// of "send relay-denied then close" cannot reliably force run()'s select
+// to actually race w.ch against client.Done() (message delivery on the
+// same readLoop goroutine happens-before the close is even detected, so
+// w.ch is consumed on its own well before client.Done() ever becomes
+// ready in practice); this instead drives the exact same code run() calls
+// against a directly-populated w.ch, which fails immediately and
+// deterministically if drain()'s call or body were ever removed.
+func TestRelayWatch_DrainConsumesBufferedDeclineBeforeMarkingLost(t *testing.T) {
+	w := freshWatchState()
+	w.ch = make(chan *signal.Envelope, 4)
+	env, err := signal.NewEnvelope(signal.TypeRelayDenied, signal.RelayDenied{Reason: signal.RelayDeniedDeclined})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.ch <- env
+
+	w.drain()
+	w.setLost()
+
+	if got := w.Err(); !errors.Is(got, ErrPeerDeclinedRelay) {
+		t.Fatalf("Err() = %v, want ErrPeerDeclinedRelay (drain() must consume the buffered decline before setLost())", got)
+	}
+}
+
 // ── Case 10: local Deny/Unavailable send the right reason ──────────────────
 
 func TestRetryWithRelay_LocalDenySendsDeclinedReason(t *testing.T) {
@@ -562,6 +591,101 @@ func TestRelayWatch_UnknownConsentIsPending(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	if w.Granted() {
 		t.Fatal("unknown consent value was treated as granted")
+	}
+}
+
+// ── AttemptContext: cancels on peer signals, NOT on bare signaling loss ───
+
+func TestRelayWatch_AttemptContextCancelsOnRelayRetry(t *testing.T) {
+	h := newRelayHub(t)
+	w := WatchRelay(h.client)
+	defer w.Close()
+
+	attemptCtx := w.AttemptContext(context.Background())
+	select {
+	case <-attemptCtx.Done():
+		t.Fatal("AttemptContext canceled before any signal arrived")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	h.send(signal.TypeRelayRetry, signal.RelayRetry{Consent: signal.RelayConsentPending})
+	select {
+	case <-attemptCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("AttemptContext was not canceled by relay-retry")
+	}
+}
+
+func TestRelayWatch_AttemptContextCancelsOnRelayDenied(t *testing.T) {
+	h := newRelayHub(t)
+	w := WatchRelay(h.client)
+	defer w.Close()
+
+	attemptCtx := w.AttemptContext(context.Background())
+	h.send(signal.TypeRelayDenied, signal.RelayDenied{Reason: signal.RelayDeniedDeclined})
+	select {
+	case <-attemptCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("AttemptContext was not canceled by relay-denied")
+	}
+}
+
+func TestRelayWatch_AttemptContextCancelsOnPeerLeft(t *testing.T) {
+	h := newRelayHub(t)
+	w := WatchRelay(h.client)
+	defer w.Close()
+
+	attemptCtx := w.AttemptContext(context.Background())
+	h.send(signal.TypePeerLeft, struct{}{})
+	select {
+	case <-attemptCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("AttemptContext was not canceled by peer-left")
+	}
+}
+
+// TestRelayWatch_AttemptContextIgnoresBareSignalingLoss is the regression
+// guard for attempt 1 not being cut short by signaling merely dropping:
+// attempt 1 (WebRTC via STUN, or symmetric TCP with LAN/UPnP addresses) can
+// need no further signaling once candidates/direct endpoints are already
+// exchanged — this package's own callers close signaling right after key
+// confirmation specifically because it becomes disposable that early — so
+// AttemptContext must not cancel attempt 1 just because signaling itself
+// drops. Only an explicit peer relay-retry/relay-denied/peer-left should.
+func TestRelayWatch_AttemptContextIgnoresBareSignalingLoss(t *testing.T) {
+	h := newRelayHub(t)
+	w := WatchRelay(h.client)
+	defer w.Close()
+
+	attemptCtx := w.AttemptContext(context.Background())
+	h.closeConn()
+
+	// The watch itself must still learn about the loss — Err() reports it
+	// once the caller checks after attempt 1 concludes on its own — ...
+	waitForCondition(t, func() bool { return w.Err() != nil })
+	if !errors.Is(w.Err(), ErrSignalingLost) {
+		t.Fatalf("Err() = %v, want ErrSignalingLost", w.Err())
+	}
+	// ... but AttemptContext itself must NOT have been canceled by it.
+	select {
+	case <-attemptCtx.Done():
+		t.Fatal("AttemptContext was canceled by bare signaling loss")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestRelayWatch_AttemptContextCancelsOnParentDone(t *testing.T) {
+	h := newRelayHub(t)
+	w := WatchRelay(h.client)
+	defer w.Close()
+
+	parent, cancel := context.WithCancel(context.Background())
+	attemptCtx := w.AttemptContext(parent)
+	cancel()
+	select {
+	case <-attemptCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("AttemptContext was not canceled when parent was")
 	}
 }
 

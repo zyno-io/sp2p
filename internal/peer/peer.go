@@ -357,6 +357,17 @@ func establish(ctx context.Context, client *signal.Client, cfg Config, connCfg c
 	if err == nil {
 		return result, nil
 	}
+	if ctx.Err() == nil {
+		if wErr := relayWatch.Err(); wErr != nil {
+			// Attempt 1 was cut short by (or, for signaling loss, merely
+			// coincided with) something other than a plain peer-left
+			// (handled above) or genuine cancellation of ctx itself: report
+			// what actually happened instead of the bare context-canceled
+			// attemptCtx's own cancellation would otherwise surface.
+			closeEstablishResult(result)
+			return nil, mapRelayErr(wErr)
+		}
+	}
 	if !turnAvailable || cfg.Transport == conn.TransportTCP {
 		return nil, err
 	}
@@ -397,6 +408,8 @@ func mapRelayErr(err error) error {
 		return &relayTextError{text: "timed out waiting for the peer to allow the relay", err: err}
 	case errors.Is(err, conn.ErrSignalingLost):
 		return &relayTextError{text: "signaling connection lost", err: err}
+	case errors.Is(err, conn.ErrTURNCredentialsTimeout):
+		return &relayTextError{text: "server did not provide TURN credentials", err: err}
 	case errors.Is(err, conn.ErrRelayNotAllowed):
 		return &relayTextError{text: "direct connection failed and relay was not allowed", err: err}
 	}

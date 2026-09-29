@@ -213,6 +213,66 @@ func TestRetryWithRelay_ErrorTextNamesPeerRole(t *testing.T) {
 	}
 }
 
+// TestReportRelayWatchErr covers the full mapping table directly (rather
+// than only through retryWithRelay's network-facing wrapper above),
+// including the credential-timeout case restored by this fix and the case
+// (declined/lost during attempt 1, before relay retry is ever reached)
+// that reportRelayWatchErr exists specifically to serve.
+func TestReportRelayWatchErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"peer declined", &conn.PeerDeclinedRelayError{Reason: signal.RelayDeniedDeclined}, "Direct connection failed and the receiver declined the relay."},
+		{"peer unavailable", &conn.PeerDeclinedRelayError{Reason: signal.RelayDeniedUnavailable}, "Direct connection failed and the receiver could not be asked to allow the relay. They can rerun sp2p with -allow-relay."},
+		{"peer left", conn.ErrPeerLeft, "Peer disconnected"},
+		{"decision timeout", conn.ErrPeerRelayTimeout, "Timed out waiting for the receiver to allow the relay."},
+		{"signaling lost", conn.ErrSignalingLost, "Signaling server disconnected"},
+		{"credential timeout", conn.ErrTURNCredentialsTimeout, "Server did not provide TURN credentials"},
+		{"relay not allowed", conn.ErrRelayNotAllowed, "Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &relayRoleTestHandler{errs: make(chan string, 1)}
+			got := reportRelayWatchErr(h, tc.err, "receiver")
+			if got != tc.err {
+				t.Fatalf("reportRelayWatchErr returned %v, want the original error unchanged", got)
+			}
+			select {
+			case msg := <-h.errs:
+				if msg != tc.want {
+					t.Fatalf("OnError message = %q, want %q", msg, tc.want)
+				}
+			default:
+				t.Fatal("OnError was never called")
+			}
+		})
+	}
+}
+
+// TestReportRelayWatchErr_ContextCancellationPassesThroughSilently checks
+// that a context cancellation is never reported via OnError — that's the
+// caller's (or the user's Ctrl+C's) business, not a relay-consent outcome
+// — and that a nil error passes through as nil.
+func TestReportRelayWatchErr_ContextCancellationPassesThroughSilently(t *testing.T) {
+	h := &relayRoleTestHandler{errs: make(chan string, 1)}
+	if got := reportRelayWatchErr(h, context.Canceled, "receiver"); got != context.Canceled {
+		t.Fatalf("reportRelayWatchErr(context.Canceled) = %v, want unchanged", got)
+	}
+	if got := reportRelayWatchErr(h, context.DeadlineExceeded, "receiver"); got != context.DeadlineExceeded {
+		t.Fatalf("reportRelayWatchErr(context.DeadlineExceeded) = %v, want unchanged", got)
+	}
+	if got := reportRelayWatchErr(h, nil, "receiver"); got != nil {
+		t.Fatalf("reportRelayWatchErr(nil) = %v, want nil", got)
+	}
+	select {
+	case msg := <-h.errs:
+		t.Fatalf("OnError was called unexpectedly with %q", msg)
+	default:
+	}
+}
+
 func sendTestEnvelope(t *testing.T, ctx context.Context, c *websocket.Conn, msgType string, payload any) {
 	t.Helper()
 	env, err := signal.NewEnvelope(msgType, payload)

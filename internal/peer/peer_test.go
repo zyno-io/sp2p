@@ -55,6 +55,12 @@ func TestMapRelayErr(t *testing.T) {
 			wantMsg: "signaling connection lost",
 		},
 		{
+			name:    "credential timeout",
+			err:     conn.ErrTURNCredentialsTimeout,
+			wantIs:  conn.ErrTURNCredentialsTimeout,
+			wantMsg: "server did not provide TURN credentials",
+		},
+		{
 			name:    "own relay not allowed",
 			err:     conn.ErrRelayNotAllowed,
 			wantIs:  conn.ErrRelayNotAllowed,

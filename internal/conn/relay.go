@@ -38,6 +38,9 @@ var (
 	// ErrPeerRelayTimeout means the peer did not reach a relay decision
 	// within RelayOptions.DecisionWait.
 	ErrPeerRelayTimeout = errors.New("peer did not decide on relay in time")
+	// ErrTURNCredentialsTimeout means the signaling server did not deliver
+	// TURN credentials within RelayOptions.CredentialWait.
+	ErrTURNCredentialsTimeout = errors.New("timeout waiting for TURN credentials")
 	// ErrPeerLeft means the peer disconnected while relay consent/retry was
 	// in progress.
 	ErrPeerLeft = errors.New("peer disconnected")
@@ -298,9 +301,22 @@ func (w *RelayWatch) Err() error {
 
 // AttemptContext returns a context for connection attempt 1: it is canceled
 // when parent is done, or the instant the peer's first relay-retry or
-// relay-denied message, a peer-left, or signaling loss arrives — so both
-// sides reach the relay retry/prompt step at roughly the same time instead
-// of each waiting out its own attempt-1 timeout.
+// relay-denied message, or a peer-left, arrives — so both sides reach the
+// relay retry/prompt step at roughly the same time instead of each waiting
+// out its own attempt-1 timeout.
+//
+// Deliberately NOT included: bare signaling loss (client.Done() with none
+// of the above). Attempt 1 (WebRTC via STUN, or symmetric TCP with
+// LAN/UPnP addresses) can need no further signaling once candidates/direct
+// endpoints are already exchanged — the rest of this package closes
+// signaling right after key confirmation specifically because it becomes
+// disposable that early — so cutting attempt 1 short the instant signaling
+// merely drops would trade an attempt that might still succeed for a
+// guaranteed failure. Establish's own internal timeout still bounds the
+// wait either way, and if attempt 1 does fail while signaling turns out to
+// be lost, the caller's own post-Establish check (using Err(), which still
+// reports signaling loss) reports that accurately instead of leaving it
+// misattributed.
 //
 // The returned context's watcher goroutine exits when parent is done (it
 // does not otherwise leak beyond the lifetime of parent).
@@ -309,7 +325,8 @@ func (w *RelayWatch) AttemptContext(parent context.Context) context.Context {
 	go func() {
 		select {
 		case <-w.retryCh:
-		case <-w.abortCh:
+		case <-w.declinedCh:
+		case <-w.leftCh:
 		case <-parent.Done():
 		}
 		cancel()
@@ -413,7 +430,7 @@ func RetryWithRelay(ctx context.Context, c *signal.Client, w *RelayWatch, cfg Co
 	case <-w.abortCh:
 		return nil, w.Err()
 	case <-time.After(o.CredentialWait):
-		return nil, fmt.Errorf("timeout waiting for TURN credentials")
+		return nil, ErrTURNCredentialsTimeout
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
