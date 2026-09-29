@@ -72,3 +72,5 @@ V2 compatibility is **not security-equivalent to v3**. It omits connection-candi
 Use a supported patched Go toolchain for every static binary/container rebuild. The remediation selects Go 1.27.0; security fixes still apply only to the latest SP2P release.
 
 Forwarded client identities require explicit trusted proxy IPs/CIDRs. TURN issuance is cached and rate-limited, but public anonymous relay use still needs coturn quotas, an egress firewall, monitoring, and staging checks of allocation expiry and refresh. Review [the example relay policy](deploy/turnserver.conf.example) and [migration guidance](README.md#proxy-container-and-relay-migration). Do not expose it unchanged.
+
+Relay consent between peers is coordinated over unauthenticated signaling (additive `relay-retry`/`relay-denied` payload fields), but is enforced locally on each side: a malicious server can at most forge a peer's consent/decline signal, which only causes a failed connection it could already cause — neither side ever relays without its own, locally-obtained consent.

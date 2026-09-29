@@ -285,6 +285,8 @@ printf 'allow\n' > /tmp/sp2p-relay-response-example
 
 SP2P emits `relay_response` and removes the file. If the peer or signaling connection ends first, it emits `relay_prompt_canceled` and removes the file; never reuse the path. Relay traffic remains end-to-end encrypted, but the relay observes connection metadata. Use `--allow-relay` only when policy authorizes relay without a per-session decision. Unattended human mode cannot use the response-file mechanism and should fail unless `--allow-relay` is already authorized.
 
+Answering `deny` tells the peer, not just this side: it sends a `relay-denied` signal so the peer's own attempt stops promptly with a clear "peer declined" error instead of a timeout. If the *peer* declines (or cannot be asked) first, this side's own `relay_required` prompt is skipped entirely and the `result` event reports `error.code: "peer_relay_denied"` — do not write to a response file that never arrives; a missing `relay_required` event within the expected window means the peer already decided.
+
 ## Agent handoff prompts
 
 Replace bracketed values before acting. The creator must communicate the secret code privately, and both agents must wait for `result` rather than treating connection as completion.

@@ -52,6 +52,11 @@ If no direct connection can be made, an encrypted TURN relay is offered
 (after confirmation, unless
 .B \-allow\-relay
 is given).
+Relay requires consent from
+.I both
+sides: if the other side declines, or cannot be asked, this side is told so
+directly instead of timing out, and no relay connection is attempted by
+either side.
 .PP
 There are three kinds of session:
 .IP \(bu 2
@@ -575,6 +580,19 @@ Write
 or
 .B deny
 to that file to answer the prompt; SP2P removes it after reading.
+Answering
+.B deny
+also tells the peer, so its own attempt fails promptly with a clear
+message instead of timing out.
+If the peer declines (or cannot be asked) first, this side's own
+.B relay_required
+prompt may never appear at all, and the terminal
+.B result
+event reports error code
+.BR peer_relay_denied .
+A prompt already open when the peer declines is canceled: a
+.B relay_prompt_canceled
+event is emitted and the response file is removed.
 .PP
 In human rsync client modes, the child's stdin, stdout, and stderr are attached
 normally and SP2P preserves its numeric exit status.

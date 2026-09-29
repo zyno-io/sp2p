@@ -946,25 +946,50 @@ The negative controls (extended-checks only) dismiss/deny consent instead:
   `"P2P connection failed and relay was declined"` (own-side decline is
   checked before this side even learns the peer's answer — see
   `establishP2PWithRetry`) and zero TURN allocations are ever created.
+  Both dialogs are held open (`registerHeldDialog`) until both have
+  appeared, then dismissed together, so the test is deterministic instead
+  of racing the two independent per-side assertions against each other.
 - **A CLI receiver denies, and the browser sender independently declines**
   — the CLI's terminal result is exactly
   `{outcome: "failed", error: {code: "relay_denied", message: "Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay."}}`
   with exit code 1; the browser shows the same
-  `"...relay was declined"` message.
+  `"...relay was declined"` message. The browser's dialog is held open
+  until the CLI's own decline is confirmed sent (`answerRelayPrompt` then
+  `cli.relayResponded`), which is *why* this is deterministic: with the
+  peer-already-declined fast path below, an unheld dialog could let the
+  browser decline first and skip the CLI's prompt entirely, making
+  `answerRelayPrompt` hang waiting for a `relay_required` event that never
+  comes.
 
-**Known asymmetric-consent-messaging gap, found while writing this suite:**
-each side's own `confirm()`/prompt decision is checked *before* that side
-learns whether its peer already agreed or declined — `relay-retry` is sent
-to the peer before showing the local prompt specifically so both prompts
-can appear in parallel, but the side that already sent `relay-retry` and
-then declines "wins" the peer's `agree-vs-deny` race as "agreed" from the
-*other* peer's perspective. So if peer A declines while peer B is still
-about to accept, B never sees "peer denied" — it proceeds to attempt 2,
-allocates a TURN relay, and then fails on a plain timeout/disconnect
-instead of a clear "peer declined the relay" message. Consent itself is
-still correctly enforced (the declining side never allocates), but the
-*other* side's error message is misleading. This is a product-behavior
-finding, not a test bug; it isn't fixed here.
+**Two-phase consent, and the split tests that prove it.** Consent is split
+into two stages carried as additive payload fields on the existing
+`relay-retry`/`relay-denied` messages (`internal/conn/relay.go`'s
+`RelayWatch`/`RetryWithRelay`; `web/src/relay-consent.ts`'s
+`RelayConsentWatch` is the same state machine in TypeScript): a side sends
+`relay-retry{consent:"pending"}` the instant its own direct attempt fails
+(so the peer learns immediately and can prompt in parallel), then either
+`relay-retry{consent:"granted"}` after its own prompt says yes, or
+`relay-denied{reason}` if it says no. Critically, **a side never starts (or
+even requests) TURN credentials for attempt 2 until it has learned the
+peer's decision is `granted`** — this replaces the old "whoever sent
+`relay-retry` first is assumed to have agreed" behavior, which made a fast
+accepter allocate a real TURN relay and then fail on a bare timeout instead
+of a clear "peer declined" message whenever the peer actually declined.
+Old (≤0.6.2) peers are unaffected: their bare `relay-retry {}` /
+`relay-denied {}` payloads are always treated as `granted`/`declined`
+respectively, matching their original go-immediately behavior.
+`relay.spec.ts`'s 8 **consent split** tests (`consent split: <pairing>,
+<sender|receiver> declines`) prove this directly, for all 4 pairings x
+both declining sides: the accepting side allows immediately, the decliner
+holds its own prompt open until the accepter has visibly committed to
+waiting for it (a browser's `.step-p2p` text, or a CLI's `relay_response`
+event — see `runConsentSplit`), then declines. Each test asserts the
+accepting side reports the peer's decline within 10s (well under the old
+15s/30s misleading-timeout paths), with **zero TURN allocations** on
+either side — proving the accepting side genuinely waited rather than
+having already allocated by the time it learned of the decline. Two of the
+eight (one with Go, one with web as the accepting side) are tagged `@pr`
+and run on every PR; all eight run in extended checks.
 
 ### Leak check
 
@@ -1074,24 +1099,33 @@ the underlying race isn't specific to the larger `relay-full` job).
   actually moves, the shim just needs to exist so the confirm click's
   awaited promise resolves immediately instead of hanging on a real,
   unresolvable native API call.
-- **The CLI-denial race (fixed and confirmed):** `"CLI receiver denies,
-  browser sender declines"` failed once with `cli.results[0].error` =
+- **The CLI-denial race (since eliminated by the relay-consent redesign,
+  not just papered over):** at the time, `"CLI receiver denies, browser
+  sender declines"` failed once with `cli.results[0].error` =
   `{code: "operation_failed", message: "Peer denied relay connection"}`
   instead of the hardcoded `{code: "relay_denied", message: CLI_DENIED}`
-  — a genuine, unavoidable race (not a bug): this CLI's own
-  `answerRelayPrompt("deny")` (written to a file the CLI polls every
-  100ms) and the browser sender's independent decline (which notifies the
-  peer immediately, without waiting to learn the peer's own answer first
-  — see the asymmetric-consent-messaging note above) can arrive in either
-  order. `internal/cli/machine.go`'s `finish()` reports `relay_denied`
-  only if `promptRelay`'s own file-read set `r.relayResponse` first; if
-  the peer's `relay-denied` signal is observed first instead
-  (`internal/flow/helpers.go`'s `<-deniedCh` case), the error is
-  `operation_failed` / `"Peer denied relay connection"` instead. Both are
-  a correct "consent was denied, nothing relayed" outcome. The test now
-  asserts that shared shape (outcome, exit code, zero allocations, one of
-  the two known error shapes) instead of one hardcoded race winner, and
-  has passed cleanly on every run since.
+  — a genuine, unavoidable race under the *old* single-phase consent
+  design (not a test bug): this CLI's own `answerRelayPrompt("deny")`
+  (written to a file the CLI polls every 100ms) and the browser sender's
+  independent decline could arrive in either order, because a side's
+  `relay-retry` doubled as both "I'm asking" and "I agree", sent *before*
+  its own local prompt — so a fast peer could already look "agreed" to
+  the other side by the time either prompt resolved. The test was patched
+  at the time to assert a shared shape across both known outcomes instead
+  of one hardcoded race winner.
+
+  The relay-consent redesign (`internal/conn/relay.go`'s
+  `RelayWatch`/`RetryWithRelay`; `web/src/relay-consent.ts`'s
+  `RelayConsentWatch`) removed the race at its root by splitting consent
+  into `relay-retry{consent:"pending"}` (asking) and a separate, later
+  `relay-retry{consent:"granted"}` or `relay-denied{reason}` (deciding) —
+  a side never looks "agreed" until it actually has agreed. Both this test
+  and the 8 new **consent split** tests (see "Two-phase consent" above)
+  now assert one exact, deterministic outcome instead of a shared shape
+  across possible races, and hold the browser's dialog open
+  (`registerHeldDialog`) until the CLI's own denial is confirmed sent —
+  removing the race from the test's own sequencing too, not just from the
+  product.
 - **A `testturnd -allocation-lifetime 8s` fix for the CLI↔CLI allocation
   leak (below) was tried, worked for its target, and was reverted after
   it broke every Firefox pairing.** With the short lifetime wired into

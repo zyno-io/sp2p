@@ -313,7 +313,7 @@ The essentials:
 
 - **The code is a secret.** Share it only with the intended peer and keep it out of public logs. Only the creating side (`send`, `rsync send`, `tunnel serve`) emits it, and only file transfers include a browser `share_url`.
 - **Wait for `result`.** An `error` event is diagnostic, not terminal. Keep reading until the single `result` event arrives.
-- **Relay needs consent.** When a direct connection fails, JSON mode emits `relay_required` with the path of a temporary response file. Write `allow` or `deny` to that file. Pass `-allow-relay` to skip the prompt entirely.
+- **Relay needs consent from both sides.** When a direct connection fails, JSON mode emits `relay_required` with the path of a temporary response file. Write `allow` or `deny` to that file. Pass `-allow-relay` to skip the prompt entirely. Denying also tells the peer, so its own attempt fails promptly instead of timing out; if the peer declines (or can't be asked) first, this side's own `relay_required` prompt may never appear, and `result` reports error code `peer_relay_denied`.
 - **`-status-file PATH`** atomically maintains a private JSON snapshot of the latest state for other processes to poll. The creator's snapshot contains the code.
 - **Rsync and tunnel events** also carry `service` and `mode`, a `ready` event when the local listener or daemon is up, cumulative `bytes_sent` and `bytes_received`, and base64 `subprocess_output` events for rsync's own output.
 - **Self-hosted servers:** pass the guide's origin to `-server` on both peers so they meet on the same signaling server.
@@ -648,6 +648,14 @@ sp2p receive -allow-relay abc123-xYz456
 
 In JSON mode, SP2P creates a temporary owner-only response file and emits its path in a `relay_required` event. An agent writes `allow` or `deny` to that file to answer the prompt, and SP2P removes the file after reading it. In human mode, if no TTY is available and `-allow-relay` is not set, TURN is skipped and the connection fails with a message suggesting the flag.
 
+**Relay requires consent from both sides**, independently. Neither side relays without its own consent, and each side finds out promptly if the other declines or can't be asked, rather than allocating a relay and then timing out:
+
+- If the peer declines: `Direct connection failed and the {receiver|sender} declined the relay.` (JSON: `peer_relay_denied`)
+- If the peer couldn't be asked (no TTY, or a machine-mode response-file error): `...could not be asked to allow the relay. They can rerun sp2p with -allow-relay.` (JSON: also `peer_relay_denied`)
+- If the peer doesn't decide within 2 minutes: `Timed out waiting for the {receiver|sender} to allow the relay.`
+
+This is fully compatible with peers on v0.6.2 or earlier, which only ever send an unconditional "I agree" — a new client treats that the same as an explicit grant.
+
 **Credential delivery:** TURN credentials are omitted from the initial handshake. After pairing and retry pacing, both participants share one cached issuance for that session; repeated requests never renew it. Ephemeral usernames bind expiry to an opaque session ID. The TTL defaults to 5 minutes and cannot exceed one hour. New issuances are limited to 120 per minute globally and 12 per minute per sender IP. These are abuse bounds, not user authentication: anonymous clients can create new sessions and reuse legitimately issued credentials elsewhere until expiry. Static credentials are reusable by design and need an external relay policy.
 
 ### Trust Model
@@ -655,7 +663,7 @@ In JSON mode, SP2P creates a temporary owner-only response file and emits its pa
 - The signaling server relays metadata only (public keys, ICE candidates, session management) and stores encrypted file-info blobs it cannot decrypt
 - **File data flows directly between peers** when a direct connection succeeds
 - If a TURN relay is used, encrypted data routes through the relay but remains E2E encrypted and unreadable by the relay
-- TURN relay requires explicit consent (`-allow-relay` or an interactive prompt)
+- TURN relay requires explicit consent (`-allow-relay` or an interactive prompt) from **both** peers independently; a decline (or "can't be asked") on either side is reported to the other promptly, and neither side relays without its own consent
 - The server cannot derive encryption keys (it never sees the seed portion of the transfer code)
 - Ephemeral key pairs are generated per session and never reused
 - Browser JavaScript and bootstrap scripts must be trusted. Their host can replace them with code that exposes secrets or files, and a verifier fetched from that same compromised host cannot fix this. Independently verified CLI or package installations have a stronger endpoint trust boundary.
