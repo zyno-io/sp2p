@@ -55,8 +55,13 @@ is given).
 Relay requires consent from
 .I both
 sides: if the other side declines, or cannot be asked, this side is told so
-directly instead of timing out, and no relay connection is attempted by
-either side.
+directly instead of timing out.
+Between two current versions, neither side ever attempts (or allocates) a
+relay connection until both have consented.
+Against a peer on v0.6.2 or earlier, which always agrees immediately,
+this side's own consent alone can start a relay attempt before that
+peer's real decision arrives; a later decline from that peer still
+aborts it promptly.
 .PP
 There are three kinds of session:
 .IP \(bu 2

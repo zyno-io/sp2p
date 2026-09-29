@@ -1172,6 +1172,7 @@ test.describe("relay: consent", () => {
       // held dialog for its own, equally deterministic decline.
       await answerRelayPrompt(cli, "deny");
       await cli.relayResponded;
+      await senderHeld.opened;
       senderHeld.resolve(false);
 
       expect(await cli.exited).toBe(1);

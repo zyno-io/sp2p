@@ -1011,14 +1011,17 @@ into two stages carried as additive payload fields on the existing
 `RelayWatch`/`RetryWithRelay`; `web/src/relay-consent.ts`'s
 `RelayConsentWatch` is the same state machine in TypeScript): a side sends
 `relay-retry{consent:"pending"}` the instant its own direct attempt fails
-(so the peer learns immediately and can prompt in parallel), then either
+(so the peer learns immediately and can prompt in parallel; this also
+requests TURN credentials from the server right away — that's just a
+credential fetch, not an allocation), then either
 `relay-retry{consent:"granted"}` after its own prompt says yes, or
-`relay-denied{reason}` if it says no. Critically, **a side never starts (or
-even requests) TURN credentials for attempt 2 until it has learned the
-peer's decision is `granted`** — this replaces the old "whoever sent
-`relay-retry` first is assumed to have agreed" behavior, which made a fast
-accepter allocate a real TURN relay and then fail on a bare timeout instead
-of a clear "peer declined" message whenever the peer actually declined.
+`relay-denied{reason}` if it says no. Critically, **a side never starts
+attempt 2 — and so never allocates anything on the TURN server — until it
+has learned the peer's decision is `granted`** — this replaces the old
+"whoever sent `relay-retry` first is assumed to have agreed" behavior,
+which made a fast accepter allocate a real TURN relay and then fail on a
+bare timeout instead of a clear "peer declined" message whenever the peer
+actually declined.
 Old (≤0.6.2) peers are unaffected: their bare `relay-retry {}` /
 `relay-denied {}` payloads are always treated as `granted`/`declined`
 respectively, matching their original go-immediately behavior.

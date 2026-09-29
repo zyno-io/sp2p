@@ -654,7 +654,7 @@ In JSON mode, SP2P creates a temporary owner-only response file and emits its pa
 - If the peer couldn't be asked (no TTY, or a machine-mode response-file error): `...could not be asked to allow the relay. They can rerun sp2p with -allow-relay.` (JSON: also `peer_relay_denied`)
 - If the peer doesn't decide within 2 minutes: `Timed out waiting for the {receiver|sender} to allow the relay.`
 
-This is fully compatible with peers on v0.6.2 or earlier, which only ever send an unconditional "I agree" — a new client treats that the same as an explicit grant.
+This is fully compatible with peers on v0.6.2 or earlier, which only ever send an unconditional "I agree" before their own prompt is even shown — a new client treats that the same as an explicit grant. Against such an old peer specifically (not between two updated peers), that means the new side can start its own relay attempt — and briefly allocate — before the old peer's real decision arrives; if the old peer then declines, the new side still aborts promptly instead of timing out.
 
 **Credential delivery:** TURN credentials are omitted from the initial handshake. After pairing and retry pacing, both participants share one cached issuance for that session; repeated requests never renew it. Ephemeral usernames bind expiry to an opaque session ID. The TTL defaults to 5 minutes and cannot exceed one hour. New issuances are limited to 120 per minute globally and 12 per minute per sender IP. These are abuse bounds, not user authentication: anonymous clients can create new sessions and reuse legitimately issued credentials elsewhere until expiry. Static credentials are reusable by design and need an external relay policy.
 
