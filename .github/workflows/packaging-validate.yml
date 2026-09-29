@@ -173,6 +173,9 @@ jobs:
           APK_SIGNING_KEY: /dev/null
           SP2P_VERSION: ${{ env.VERSION }}
       - if: env.MODE == 'snapshot'
+        name: THROWAWAY MUTATION CHECK — rename the Windows amd64 archive
+        run: mv dist/sp2p_windows_amd64.zip dist/sp2p_windows_x86_64.zip
+      - if: env.MODE == 'snapshot'
         name: Checksum like release.yml's publish-release job
         run: |
           cd dist
