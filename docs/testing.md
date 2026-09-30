@@ -437,10 +437,9 @@ Filtering lane candidates to the primary connection's IPs only improved
 this to 12 of 20, because the reply source flips on the *same* pair. The
 real fix is in pion/ice: fail the nominated pair over when its reply is
 asymmetric and another valid pair exists, plus the RFC 8445 §7.3.1.4
-re-check of a Failed pair. That fix is upstream as
-[pion/ice#1019](https://github.com/pion/ice/pull/1019) (v4) and
-[pion/ice#1020](https://github.com/pion/ice/pull/1020) (main). Until it
-ships in a pion/webrtc v4 release, `go.mod` replaces `pion/ice/v4` with
+re-check of a Failed pair. That fix is proposed upstream as
+[pion/ice#1020](https://github.com/pion/ice/pull/1020) (against `main`,
+ice v5). Until the pion/webrtc version sp2p uses includes it, `go.mod` replaces `pion/ice/v4` with
 `github.com/zynoconsulting/ice/v4` (v4.4.2 plus that commit). With it, all
 four CLI↔browser `engines` cells passed 20 of 20 on the same Mac.
 

@@ -41,5 +41,6 @@ require (
 
 // Temporary: pion/ice v4.4.2 plus a fix for the controlling agent retrying an
 // asymmetric nomination forever (WebKit on multi-homed macOS loses lanes).
-// Remove once https://github.com/pion/ice/pull/1019 ships in a pion/webrtc v4 release.
+// Upstream: https://github.com/pion/ice/pull/1020 (ice v5). Remove once the pion/webrtc
+// version we use includes that fix.
 replace github.com/pion/ice/v4 => github.com/zynoconsulting/ice/v4 v4.4.3-0.20260930020559-1ef47fb1e5ff
