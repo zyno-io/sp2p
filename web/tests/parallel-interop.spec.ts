@@ -68,6 +68,7 @@ for (const blockedExtras of [0, 1, 3, 7]) {
 test("browser parallel WebRTC sender interoperates with CLI receiver", async ({ page, cliBin, wsUrl }) => {
   const dest = temporaryDirectory("sp2p-parallel-recv-");
   const counts = observeConnections(page);
+  trackForDiagnostics(page, "sender");
   const code = await choose(page);
   const child = spawn(cliBin, ["receive", "-format", "json", "-server", wsUrl, "-transport", "webrtc", "-output", dest, code]);
   const cli = watchCLI(child);

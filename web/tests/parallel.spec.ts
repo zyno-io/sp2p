@@ -405,6 +405,18 @@ test("a lane that fails to gather its description is closed immediately, not lef
       { confirm: new Uint8Array(32) } as DerivedKeys, new Uint8Array(32), new Uint8Array(32), false, 2);
     await p.send[0].writeFrame(0x0e, json({ step: "hello", version: 1, count: 2, nonce: Buffer.alloc(32).toString("base64") }));
     const accept = await read(); expect(accept).toEqual({ step: "accept", count: 2 });
+    // Start the clock before the offer/answer round trip, not right before
+    // `await result`: without hardening, the stall this test guards against
+    // (the failed lane's own wait() sitting on its 8s timer) happens at
+    // Promise.all(lanes.map(lane => lane?.wait() ...)) inside
+    // negotiateParallelWebRTC — which must complete before it can send its
+    // own "ready" below — so it would show up in the read()s that follow,
+    // not in `await result` itself (which resolves almost immediately once
+    // the commit round trip is done). A timer started only after all of
+    // that has already completed would pass whether or not the lane was
+    // ever closed promptly, just 8s slower — exactly the gap this test
+    // exists to close.
+    const start = Date.now();
     await p.send[0].writeFrame(0x0e, json({ step: "offer", id: 1, sdp: "v=0" }));
     const answer = await read();
     expect(answer).toEqual({ step: "answer", id: 1, sdp: "" }); // gather failed: nothing to offer back
@@ -413,7 +425,6 @@ test("a lane that fails to gather its description is closed immediately, not lef
     await p.send[0].writeFrame(0x0e, json({ step: "commit", mask: 0 }));
     const committed = await read(); expect(committed.mask).toBe(0);
 
-    const start = Date.now();
     const primary = await result;
     expect(Date.now() - start).toBeLessThan(2000); // never waits out wait()'s 8s timer
     expect(closed).toBeGreaterThan(0); // the lane's own pc.close() ran promptly, not after 8s
