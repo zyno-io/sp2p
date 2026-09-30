@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1322,15 +1323,23 @@ func TestSignal_RelayConsentPayloadsPassThroughUnchanged(t *testing.T) {
 	// broken one. An ephemeral credential embeds a fresh expiry timestamp
 	// on every real Generate call, so "the second relay-retry returns the
 	// SAME credentials" below only holds if turnOnce actually suppressed a
-	// second Generate call.
+	// second Generate call — but that alone isn't reliable either: Generate's
+	// output is only as distinguishable as its one-second (Unix timestamp)
+	// resolution, and this test's whole exchange can complete within the
+	// same wall-clock second, so two real Generate calls could still
+	// produce byte-identical output. generateCalls (via onGenerate) counts
+	// real Generate calls directly, independent of that timing coincidence.
+	var generateCalls atomic.Int32
+	turnGen := &TURNCredentialGenerator{
+		URLs:       wantURLs,
+		Secret:     "consent-passthrough-secret",
+		TTL:        5 * time.Minute,
+		onGenerate: func() { generateCalls.Add(1) },
+	}
 	_, wsURL := startTestServerWithConfig(t, Config{
 		Addr:    ":0",
 		BaseURL: "http://localhost",
-		TURNGen: &TURNCredentialGenerator{
-			URLs:   wantURLs,
-			Secret: "consent-passthrough-secret",
-			TTL:    5 * time.Minute,
-		},
+		TURNGen: turnGen,
 	})
 	sender, receiver := setupPeers(t, wsURL)
 
@@ -1399,6 +1408,13 @@ func TestSignal_RelayConsentPayloadsPassThroughUnchanged(t *testing.T) {
 	}
 	if repeatedRR.Consent != signal.RelayConsentGranted {
 		t.Fatalf("relayed consent = %q, want granted", repeatedRR.Consent)
+	}
+
+	// The real assertion that the credential-equality check above can't
+	// make on its own: Generate itself was only ever called once. Without
+	// turnOnce, the second relay-retry above would call it again.
+	if calls := generateCalls.Load(); calls != 1 {
+		t.Fatalf("Generate called %d times, want exactly 1 (turnOnce should have cached the first issuance)", calls)
 	}
 }
 

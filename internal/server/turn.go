@@ -25,12 +25,26 @@ type TURNCredentialGenerator struct {
 	URLs   []string
 	Secret string
 	TTL    time.Duration
+
+	// onGenerate, when set, is called synchronously at the start of every
+	// Generate call. It exists purely so tests can count real Generate
+	// calls directly, to detect whether session.turnOnce actually
+	// suppressed a repeat issuance: Generate's own output is only as
+	// distinguishable as its one-second (Unix timestamp) resolution — two
+	// calls within the same wall-clock second produce byte-identical
+	// output whether or not caching ran, so comparing credentials alone
+	// can't tell a working cache from a broken one in a fast test. Nil in
+	// production.
+	onGenerate func()
 }
 
 // Generate produces a fresh ICEServer with ephemeral credentials.
 // The username is the Unix expiry timestamp; the credential is
 // HMAC-SHA1(secret, username) encoded as base64.
 func (g *TURNCredentialGenerator) Generate(sessionID ...string) signal.ICEServer {
+	if g.onGenerate != nil {
+		g.onGenerate()
+	}
 	expiry := time.Now().Add(g.TTL).Unix()
 	username := strconv.FormatInt(expiry, 10)
 	if len(sessionID) != 0 {
