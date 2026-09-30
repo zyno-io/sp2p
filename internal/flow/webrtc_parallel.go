@@ -106,7 +106,15 @@ func resolveHelloRequest(hello webRTCParallelControl) (int, error) {
 // into the selected set. Every diagnostic surface (the JSON parallel_lanes
 // event, docs, the man page) only ever needs to understand these five
 // buckets — raw Go/Pion error text, which can contain addresses, never
-// crosses into a report; it only ever reaches OnVerbose.
+// crosses into a report: classifyLaneError only reads it to pick a bucket,
+// and the text itself is discarded, not retained or logged anywhere,
+// including via Handler.OnVerbose. That's a deliberate choice about this
+// one data source, not a claim that OnVerbose itself is address-free in
+// general — internal/conn already logs addresses there (e.g. dialed/local
+// TCP addresses) as ordinary human-facing (-v) diagnostics. The distinction
+// matters because machine mode's JSON "log" event forwards OnVerbose output
+// verbatim whenever -v is set, and raw lane error text is judged not worth
+// that exposure.
 type LaneFailureClass string
 
 const (
@@ -233,6 +241,14 @@ func stageForWaitError(err error) string {
 // real WebRTC connection — the one discard site reachable without a lane
 // ever having been created. Nil in production.
 var testLaneFault func(id int) error
+
+// testLaneDescriptionFault, when set by a test in this package, overrides
+// the result of a lane's own Description() call for a given id — letting a
+// test force the "our own gather/sdp-size failure" path deterministically
+// (ok == true) instead of depending on a real WebRTC gather actually
+// failing. ok == false leaves Description's real result alone. Nil in
+// production.
+var testLaneDescriptionFault func(id int) (sdp string, err error, ok bool)
 
 func negotiateWebRTC(ctx context.Context, primary *conn.WebRTCConn, encrypted *crypto.EncryptedStream,
 	keys *crypto.DerivedKeys, senderPub, receiverPub []byte, sender bool, count int,
@@ -368,6 +384,11 @@ func negotiateWebRTC(ctx context.Context, primary *conn.WebRTCConn, encrypted *c
 			go func(id int, lane *conn.WebRTCLane) {
 				defer gather.Done()
 				sdp, e := lane.Description(ctx, sender)
+				if testLaneDescriptionFault != nil {
+					if fSDP, fErr, ok := testLaneDescriptionFault(id); ok {
+						sdp, e = fSDP, fErr
+					}
+				}
 				if e != nil {
 					failures.addErr(id, stageGather, e, lane.Trace(), lane.PairTypes())
 					return
@@ -381,6 +402,26 @@ func negotiateWebRTC(ctx context.Context, primary *conn.WebRTCConn, encrypted *c
 		}
 	}
 	gather.Wait()
+	// A lane whose own description gathering failed above (stageGather or
+	// stageSDPSize) never got a description recorded: close and drop it
+	// here, now that every gather goroutine has finished (gather.Wait()
+	// above) so nothing else can still be writing lanes[id] concurrently —
+	// doing this from inside the gather goroutine itself raced with the
+	// deferred cleanup's own read of lanes[id] on an early return (e.g. the
+	// receiver bailing out of the per-id loop above on a peer protocol
+	// error while another lane's gather goroutine was still running).
+	// Otherwise descriptions[id] stays "" (so an empty offer/answer still
+	// goes out over the wire, exactly as if we'd succeeded and the peer had
+	// failed) while lanes[id] stays set — and the sender's answer-read loop
+	// below then records a SECOND failure (peer-answer-empty) for the same
+	// id, misattributing our own failure to the peer.
+	for id := 1; id < count; id++ {
+		if lane := lanes[id]; lane != nil && descriptions[id] == "" {
+			lane.Conn.Close()
+			lane.Conn.DiscardSetupInput()
+			lanes[id] = nil
+		}
+	}
 	step := "answer"
 	if sender {
 		step = "offer"

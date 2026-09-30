@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
@@ -16,6 +17,8 @@ import (
 
 	"github.com/zyno-io/sp2p/internal/conn"
 	"github.com/zyno-io/sp2p/internal/crypto"
+	"github.com/zyno-io/sp2p/internal/server"
+	"github.com/zyno-io/sp2p/internal/signal"
 	"github.com/zyno-io/sp2p/internal/transfer"
 )
 
@@ -352,4 +355,243 @@ func TestNegotiateWebRTCReportsCreateFailuresWithoutAddresses(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertNoAddressLikeStrings(t, string(data))
+}
+
+// establishWebRTCPrimaryPair brings up a real signaling server and connects
+// two real WebRTC primaries to each other over it (loopback host
+// candidates only — no STUN/TURN needed). Only the sender's primary is
+// useful to the caller (see TestNegotiateWebRTCOwnDescriptionFailure...
+// below); the receiver's primary exists only so the sender's
+// conn.EstablishWebRTC has a real peer to connect to, and is closed once
+// both sides are up.
+func establishWebRTCPrimaryPair(t *testing.T) *conn.WebRTCConn {
+	t.Helper()
+
+	srv, err := server.New(server.Config{Addr: ":0", BaseURL: "http://localhost"})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	senderClient, err := signal.Connect(ctx, wsURL)
+	if err != nil {
+		t.Fatalf("signal.Connect (sender): %v", err)
+	}
+	t.Cleanup(func() { senderClient.Close() })
+	if err := senderClient.Send(ctx, signal.TypeHello, signal.Hello{Version: signal.ProtocolVersion}); err != nil {
+		t.Fatalf("sending hello: %v", err)
+	}
+	var welcome signal.Welcome
+	select {
+	case env := <-senderClient.Incoming:
+		if env == nil || env.Type != signal.TypeWelcome {
+			t.Fatalf("expected welcome, got %+v", env)
+		}
+		if err := env.ParsePayload(&welcome); err != nil {
+			t.Fatalf("parsing welcome: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for welcome")
+	}
+
+	receiverClient, err := signal.Connect(ctx, wsURL)
+	if err != nil {
+		t.Fatalf("signal.Connect (receiver): %v", err)
+	}
+	t.Cleanup(func() { receiverClient.Close() })
+	if err := receiverClient.Send(ctx, signal.TypeJoin, signal.Join{Version: signal.ProtocolVersion, SessionID: welcome.SessionID}); err != nil {
+		t.Fatalf("sending join: %v", err)
+	}
+	select {
+	case env := <-receiverClient.Incoming:
+		if env == nil || env.Type != signal.TypeWelcome {
+			t.Fatalf("expected receiver welcome, got %+v", env)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for receiver welcome")
+	}
+	select {
+	case env := <-senderClient.Incoming:
+		if env == nil || env.Type != signal.TypePeerJoined {
+			t.Fatalf("expected peer-joined, got %+v", env)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for peer-joined")
+	}
+
+	type establishResult struct {
+		conn *conn.WebRTCConn
+		err  error
+	}
+	senderCh := make(chan establishResult, 1)
+	receiverCh := make(chan establishResult, 1)
+	go func() {
+		c, err := conn.EstablishWebRTC(ctx, senderClient, conn.WebRTCConfig{IsSender: true})
+		senderCh <- establishResult{c, err}
+	}()
+	go func() {
+		c, err := conn.EstablishWebRTC(ctx, receiverClient, conn.WebRTCConfig{IsSender: false})
+		receiverCh <- establishResult{c, err}
+	}()
+
+	var senderPrimary *conn.WebRTCConn
+	select {
+	case res := <-senderCh:
+		if res.err != nil {
+			t.Fatalf("EstablishWebRTC (sender): %v", res.err)
+		}
+		senderPrimary = res.conn
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out establishing sender primary")
+	}
+	select {
+	case res := <-receiverCh:
+		if res.err != nil {
+			t.Fatalf("EstablishWebRTC (receiver): %v", res.err)
+		}
+		t.Cleanup(func() { res.conn.Close() })
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out establishing receiver primary")
+	}
+	t.Cleanup(func() { senderPrimary.Close() })
+	return senderPrimary
+}
+
+// TestNegotiateWebRTCOwnDescriptionFailureRecordsExactlyOneFailure is the
+// regression test for the lanes[id]-stays-set bug: when our own
+// Description() call fails (stage gather or sdp-size), the lane must be
+// closed and dropped right there, so the peer's resulting empty answer
+// (which the peer sends back after seeing our empty offer — the natural
+// consequence of our own failure) is skipped instead of being recorded as a
+// second, misattributed peer-answer-empty failure for the same lane id.
+//
+// This needs a real, non-nil *conn.WebRTCLane (unlike
+// TestNegotiateWebRTCReportsCreateFailuresWithoutAddresses's testLaneFault,
+// which prevents lane creation entirely — lanes[id] is already nil in that
+// case, so it can't reach this bug): testLaneDescriptionFault overrides a
+// real lane's real Description() result instead of skipping it.
+func TestNegotiateWebRTCOwnDescriptionFailureRecordsExactlyOneFailure(t *testing.T) {
+	senderPrimary := establishWebRTCPrimaryPair(t)
+
+	clientPipe, peerPipe := net.Pipe()
+	defer clientPipe.Close()
+	defer peerPipe.Close()
+
+	keyA := bytes.Repeat([]byte{1}, 32)
+	keyB := bytes.Repeat([]byte{2}, 32)
+	clientStream, err := crypto.NewEncryptedStream(clientPipe, keyA, keyB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerStream, err := crypto.NewEncryptedStream(peerPipe, keyB, keyA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testLaneDescriptionFault = func(id int) (string, error, bool) {
+		if id == 1 {
+			return "", fmt.Errorf("synthetic gather failure near 203.0.113.9:51820: %w", context.DeadlineExceeded), true
+		}
+		return "", nil, false
+	}
+	defer func() { testLaneDescriptionFault = nil }()
+
+	keys := &crypto.DerivedKeys{Confirm: bytes.Repeat([]byte{3}, 32)}
+	senderPub, receiverPub := bytes.Repeat([]byte{4}, 32), bytes.Repeat([]byte{5}, 32)
+
+	type result struct {
+		ms     *transfer.MultiStream
+		report *ParallelLaneReport
+		err    error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		ms, report, err := negotiateWebRTC(context.Background(), senderPrimary, clientStream, keys, senderPub, receiverPub, true, 2)
+		resultCh <- result{ms, report, err}
+	}()
+
+	peerWrite := func(v webRTCParallelControl) {
+		t.Helper()
+		data, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := peerStream.WriteFrame(webRTCParallelMessage, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	peerRead := func() webRTCParallelControl {
+		t.Helper()
+		kind, data, err := peerStream.ReadFrame()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kind != webRTCParallelMessage {
+			t.Fatalf("unexpected frame kind %d", kind)
+		}
+		var v webRTCParallelControl
+		if err := json.Unmarshal(data, &v); err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+
+	if hello := peerRead(); hello.Step != "hello" || hello.Count != 2 {
+		t.Fatalf("hello = %+v", hello)
+	}
+	peerWrite(webRTCParallelControl{Step: "accept", Count: 2})
+
+	// The sender's own gather failed for id 1: it still sends an offer, with
+	// an empty SDP, exactly as production code does.
+	if offer := peerRead(); offer.Step != "offer" || offer.ID != 1 || offer.SDP != "" {
+		t.Fatalf("offer = %+v", offer)
+	}
+	// A real receiver seeing an empty offer would drop its own lane and
+	// still send back an empty answer for the same id (the write loop is
+	// unconditional) — reproduce exactly that wire behavior.
+	peerWrite(webRTCParallelControl{Step: "answer", ID: 1, SDP: ""})
+
+	if ready := peerRead(); ready.Step != "ready" || ready.Mask != 0 {
+		t.Fatalf("ready = %+v", ready)
+	}
+	peerWrite(webRTCParallelControl{Step: "ready", Mask: 0})
+	if commit := peerRead(); commit.Step != "commit" || commit.Mask != 0 {
+		t.Fatalf("commit = %+v", commit)
+	}
+	peerWrite(webRTCParallelControl{Step: "committed", Mask: 0})
+
+	var res result
+	select {
+	case res = <-resultCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("negotiateWebRTC did not return")
+	}
+	if res.err != nil {
+		t.Fatalf("negotiateWebRTC error: %v", res.err)
+	}
+	if res.ms != nil {
+		t.Fatal("expected no multi-stream: the only extra lane failed")
+	}
+	report := res.report
+	if report == nil {
+		t.Fatal("expected a report")
+	}
+	if report.Requested != 2 || report.Accepted != 2 || report.Selected != 0 || report.Ours != 0 {
+		t.Fatalf("report = %+v", report)
+	}
+	// The crux of this test: exactly one failure for lane 1, at the gather
+	// stage — not two (gather, then a misattributed peer-answer-empty).
+	if len(report.Failures) != 1 {
+		t.Fatalf("failures = %+v, want exactly 1 (gather failure only, not also peer-answer-empty)", report.Failures)
+	}
+	f := report.Failures[0]
+	if f.ID != 1 || f.Stage != stageGather || f.Class != ClassTimeout {
+		t.Fatalf("failure = %+v, want {ID:1 Stage:%s Class:%s}", f, stageGather, ClassTimeout)
+	}
 }

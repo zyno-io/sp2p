@@ -176,7 +176,15 @@ a fixed set naming the discard site: `create`, `gather`, `sdp-size`,
 authenticated the lane but the peer's ready mask excluded it). `Class` is a
 fixed five-value vocabulary — `timeout`, `eof`, `closed`, `mismatch`,
 `error` — never the underlying Go/Pion error text, which can contain
-addresses; that raw text only ever reaches `Handler.OnVerbose` (`-v`).
+addresses; that raw text is discarded entirely (`classifyLaneError` only
+reads it to pick a bucket) rather than surfaced anywhere, including via
+`Handler.OnVerbose`. That's a deliberate choice about this one data source,
+not a claim that `OnVerbose` itself is address-free in general —
+`internal/conn` already logs addresses there (e.g. dialed/local TCP
+addresses) as ordinary human-facing (`-v`) diagnostics. The distinction
+matters because machine mode's JSON `log` event forwards `OnVerbose` output
+verbatim whenever `-v` is set, and raw lane error text is judged not worth
+that exposure.
 
 A `Handler` that implements the optional `ParallelLaneReporter` interface
 (`OnParallelLaneReport(*ParallelLaneReport)`, following the same pattern as
