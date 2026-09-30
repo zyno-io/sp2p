@@ -415,33 +415,39 @@ peer only starts its next attempt after receiving it). `interop.spec.ts` has a
 regression test that slows the receiver's key derivation to force the
 ordering; it fails without the fix with the same signature seen on CI.
 
-**Known rough edge: multi-homed-host lane sockets (WebKit and browser↔browser
-alike).** On the Mac this was developed on — two active interfaces on the
-same /24 (Wi-Fi `en0` and Ethernet `en9`) — WebKit occasionally lands on 6-7
-of the requested 8 parallel-WebRTC lanes instead of 8, and the same
-symptom (lanes stuck at a fixed, well-below-8 count) has also been observed
-locally on an `engine-matrix.spec.ts` browser↔browser cell where Chromium is
-answering Firefox's lane offers, so this isn't exclusively a WebKit
-behavior — it's whichever side's lane socket happens to bind wrong on this
-particular multi-homed host. This is **not** the
-8-second per-lane authentication timeout in `web/src/webrtc-parallel.ts`'s
-`Lane.wait()` running out (a timing margin that a retry could reasonably
-absorb): the affected lane's ICE connectivity check makes *zero* progress
-for the entire 8 seconds. WebKit's lane sockets bind `INADDR_ANY`, and on a
-multi-homed host they can answer a STUN connectivity check from a different
-local address than the one the check was sent to; pion (the CLI/server's
-WebRTC stack) discards that reply outright — "Discard message: transaction
-source and destination does not match expected" (RFC 8445 §7.2.5.2.1) — so
-the lane never has a chance to connect at all, regardless of how long it
-waits. This is specific to a multi-homed, same-subnet host, not expected on
-CI's single-NIC runners (`ubuntu-latest`, `macos-15`), so no retry was added
-for it — a retry would only be masking noise if the failure were timing-
-sensitive, and this one isn't. If the macos-15 `engines` job in Extended
-checks shows the same lane shortfall for real, that's the point to investigate further:
-it would mean either that runner is multi-homed too, or that this is a
-genuine Safari/WebKit-multi-lane interoperability issue independent of
-network topology (the transfer itself still completes over however many
-lanes did connect — this reduces parallelism, it doesn't break transfers).
+**Fixed: CLI → WebKit lanes on a multi-homed host.** On a Mac with two
+active interfaces on the same /24 (Wi-Fi `en0` and Ethernet `en9`), a CLI
+sending to WebKit used to end up with fewer than 8 parallel-WebRTC lanes,
+failing `CLI sender → webkit` 17 of 20 times (as low as 3 of 8 lanes).
+WebKit → CLI was unaffected (20 of 20). The cause is in pion/ice, the CLI's
+ICE stack, on the side that sends the nomination (the CLI whenever it
+offers):
+
+- WebKit's lane sockets bind the wildcard address. For the same nominated
+  pair, it sometimes answers from the Mac's *other* IP.
+- pion correctly discards those replies as asymmetric (RFC 8445
+  §7.2.5.2.1), but then retries the same nominated pair forever instead of
+  failing it over. `PION_LOG_TRACE=ice` shows roughly 52 `Discard message:
+  transaction source and destination does not match` lines per stuck lane,
+  all for the one nominated pair, while a working pair sits unused.
+- The lane never connects inside its 8 s setup window. The transfer still
+  completes on the lanes that did connect.
+
+Filtering lane candidates to the primary connection's IPs only improved
+this to 12 of 20, because the reply source flips on the *same* pair. The
+real fix is in pion/ice: fail the nominated pair over when its reply is
+asymmetric and another valid pair exists, plus the RFC 8445 §7.3.1.4
+re-check of a Failed pair. That fix is upstream as
+[pion/ice#1019](https://github.com/pion/ice/pull/1019) (v4) and
+[pion/ice#1020](https://github.com/pion/ice/pull/1020) (main). Until it
+ships in a pion/webrtc v4 release, `go.mod` replaces `pion/ice/v4` with
+`github.com/zynoconsulting/ice/v4` (v4.4.2 plus that commit). With it, all
+four CLI↔browser `engines` cells passed 20 of 20 on the same Mac.
+
+Still open: browser↔browser cells on a multi-homed host (neither side uses
+pion) can still land short of 8 lanes, and on this Mac two headless
+Chromiums can't connect directly at all against the local test server. CI
+runners are single-NIC, so neither shows up there.
 
 **New finding, not yet root-caused: `engine-matrix.spec.ts`'s browser↔browser
 cells mostly fail on the macos-15 `engines`-job runner.** Dispatching what
@@ -2149,10 +2155,9 @@ linux-amd64` explicitly. Confirmed passing against real production
 (`v0.6.2`, this Mac): resolved bundle `main-ZTSKTWN6.js` from the release's
 server archive (matching what sp2p.io actually served), CLI installed and
 identity-checked, deploy confirmed in 2 polls, `cli-to-chromium` passed on
-a retried attempt (attempt 1 hit the pre-existing "6-7/8 lanes on a
-multi-homed host" rough edge from the [Engines](#engines-firefox-and-webkit)
-section above — the retry-once design working as intended, not a bug in
-this script), `chromium-to-chromium` passed on the first attempt, overall
+a retried attempt (attempt 1 hit the multi-homed-host lane shortfall
+described in the [Engines](#engines-firefox-and-webkit) section above, since
+fixed; the retry-once design worked as intended), `chromium-to-chromium` passed on the first attempt, overall
 `PASS`. A full run's output, redaction-scanned afterward for the transfer-code
 and URL-fragment patterns above, contained zero matches; under
 `GITHUB_ACTIONS=true` it emitted exactly the expected `::add-mask::` lines
