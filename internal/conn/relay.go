@@ -47,7 +47,36 @@ var (
 	// ErrSignalingLost means the signaling connection was lost while relay
 	// consent/retry was in progress.
 	ErrSignalingLost = errors.New("signaling connection lost")
+	// ErrPeerRelayUnusable is the sentinel matched by *PeerRelayUnusableError
+	// via errors.Is.
+	ErrPeerRelayUnusable = errors.New("peer requested relay, but no relay is usable on this side")
 )
+
+// PeerRelayUnusableError reports that the peer gave up on its own direct
+// connection attempt and asked to retry via relay (see
+// RelayWatch.PeerRequestedRelay) — cutting this side's attempt 1 short via
+// AttemptContext — but this side has no relay it can use: either the
+// signaling server offered no TURN servers, or this side is running
+// -transport tcp, which relay (WebRTC-only) cannot serve. Matches
+// ErrPeerRelayUnusable via errors.Is.
+type PeerRelayUnusableError struct {
+	// TCPOnly is true when this side is running -transport tcp; otherwise
+	// the signaling server offered no TURN servers.
+	TCPOnly bool
+}
+
+func (e *PeerRelayUnusableError) Error() string {
+	if e.TCPOnly {
+		return "direct connection failed; the peer asked to retry via relay, but this side is restricted to TCP (-transport tcp) and cannot use one"
+	}
+	return "direct connection failed; the peer asked to retry via relay, but no relay is available on this side"
+}
+
+// Is reports whether target is ErrPeerRelayUnusable, so callers can use
+// errors.Is(err, ErrPeerRelayUnusable) without caring about the reason.
+func (e *PeerRelayUnusableError) Is(target error) bool {
+	return target == ErrPeerRelayUnusable
+}
 
 // PeerDeclinedRelayError reports that the peer sent relay-denied (or is an
 // old client whose empty relay-denied payload is always treated as
@@ -281,6 +310,17 @@ func (w *RelayWatch) Granted() bool {
 	return w.granted
 }
 
+// PeerRequestedRelay reports whether the peer has sent any relay-retry
+// message at all (pending or granted) — i.e. the peer gave up on its own
+// direct connection attempt and asked to retry via relay. Unlike Granted,
+// this is true even for a pending (not yet locally decided) request; it is
+// what AttemptContext itself reacts to (see retryCh).
+func (w *RelayWatch) PeerRequestedRelay() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sawRetry
+}
+
 // Err returns the watch's current error, applying the fixed priority order
 // (declined, then left, then lost). It returns nil if none apply yet.
 func (w *RelayWatch) Err() error {
@@ -318,8 +358,13 @@ func (w *RelayWatch) Err() error {
 // reports signaling loss) reports that accurately instead of leaving it
 // misattributed.
 //
-// The returned context's watcher goroutine exits when parent is done (it
-// does not otherwise leak beyond the lifetime of parent).
+// The returned context's watcher goroutine exits when parent is done, when
+// one of the events above fires, or when the watch itself is closed — it
+// does not otherwise leak beyond the lifetime of parent or the watch,
+// whichever ends first. Close is typically deferred right after WatchRelay,
+// so a caller whose parent context outlives the connection attempt (e.g.
+// the whole transfer, or context.Background()) does not leak this goroutine
+// for that long: it exits promptly once the caller's own defer runs.
 func (w *RelayWatch) AttemptContext(parent context.Context) context.Context {
 	ctx, cancel := context.WithCancel(parent)
 	go func() {
@@ -328,23 +373,32 @@ func (w *RelayWatch) AttemptContext(parent context.Context) context.Context {
 		case <-w.declinedCh:
 		case <-w.leftCh:
 		case <-parent.Done():
+		case <-w.closeCh:
 		}
 		cancel()
 	}()
 	return ctx
 }
 
-// abortContext returns a context canceled when parent is done or the peer
+// abortContext returns a context canceled when parent is done, the peer
 // declines, leaves, or signaling is lost (but NOT merely on a peer
-// relay-retry, unlike AttemptContext) — used once attempt 1 has already
-// given way to relay retry, so a peer's earlier relay-retry doesn't
-// immediately cancel the very context built in response to it.
+// relay-retry, unlike AttemptContext), or the watch itself is closed — used
+// once attempt 1 has already given way to relay retry, so a peer's earlier
+// relay-retry doesn't immediately cancel the very context built in response
+// to it. Like AttemptContext, its watcher goroutine must also exit on
+// Close: a caller that closes the watch right after RetryWithRelay returns
+// (rather than only via a much later deferred Close, once the whole
+// transfer finishes) would otherwise leak this goroutine for as long as
+// parent lives, exactly as AttemptContext could before its own Close case
+// was added — bare signaling loss alone no longer reaches abortCh once
+// Close has already stopped run() from ever observing it.
 func (w *RelayWatch) abortContext(parent context.Context) context.Context {
 	ctx, cancel := context.WithCancel(parent)
 	go func() {
 		select {
 		case <-w.abortCh:
 		case <-parent.Done():
+		case <-w.closeCh:
 		}
 		cancel()
 	}()

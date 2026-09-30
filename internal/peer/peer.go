@@ -369,6 +369,15 @@ func establish(ctx context.Context, client *signal.Client, cfg Config, connCfg c
 		}
 	}
 	if !turnAvailable || cfg.Transport == conn.TransportTCP {
+		if ctx.Err() == nil && relayWatch.PeerRequestedRelay() {
+			// The peer gave up on its own direct attempt and asked to retry
+			// via relay (cutting our attempt 1 short via AttemptContext),
+			// but we won't be attempting relay ourselves: report a clear
+			// failure instead of the bare context-canceled attemptCtx
+			// cancellation that would otherwise surface here.
+			closeEstablishResult(result)
+			return nil, mapRelayErr(&conn.PeerRelayUnusableError{TCPOnly: cfg.Transport == conn.TransportTCP})
+		}
 		return nil, err
 	}
 	logf("direct connection failed; requesting TURN relay")
@@ -412,6 +421,8 @@ func mapRelayErr(err error) error {
 		return &relayTextError{text: "server did not provide TURN credentials", err: err}
 	case errors.Is(err, conn.ErrRelayNotAllowed):
 		return &relayTextError{text: "direct connection failed and relay was not allowed", err: err}
+	case errors.Is(err, conn.ErrPeerRelayUnusable):
+		return &relayTextError{text: err.Error(), err: err}
 	}
 	return err
 }

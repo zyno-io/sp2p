@@ -572,6 +572,14 @@ func (r *machineReporter) finish(err error, savedPath string) {
 			errorCode = "canceled"
 		} else if errors.Is(err, conn.ErrPeerDeclinedRelay) {
 			errorCode = "peer_relay_denied"
+		} else if errors.Is(err, conn.ErrPeerRelayUnusable) {
+			// The peer gave up on its own direct attempt and asked to retry
+			// via relay, but this side has no relay to offer (see
+			// conn.PeerRelayUnusableError) — same code as the local
+			// could-not-participate case below, since both mean "relay
+			// didn't happen on this side for operational reasons, not an
+			// explicit decline".
+			errorCode = "relay_not_allowed"
 		} else if r.relayResponse == "deny" {
 			errorCode = "relay_denied"
 		} else if r.snapshot.RelayRequired {

@@ -66,6 +66,18 @@ func TestMapRelayErr(t *testing.T) {
 			wantIs:  conn.ErrRelayNotAllowed,
 			wantMsg: "direct connection failed and relay was not allowed",
 		},
+		{
+			name:    "peer requested relay, this side is TCP-only",
+			err:     &conn.PeerRelayUnusableError{TCPOnly: true},
+			wantIs:  conn.ErrPeerRelayUnusable,
+			wantMsg: "direct connection failed; the peer asked to retry via relay, but this side is restricted to TCP (-transport tcp) and cannot use one",
+		},
+		{
+			name:    "peer requested relay, no TURN available",
+			err:     &conn.PeerRelayUnusableError{TCPOnly: false},
+			wantIs:  conn.ErrPeerRelayUnusable,
+			wantMsg: "direct connection failed; the peer asked to retry via relay, but no relay is available on this side",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

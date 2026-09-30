@@ -583,14 +583,33 @@ func TestRelayWatch_UnknownConsentIsPending(t *testing.T) {
 	defer w.Close()
 
 	h.send(signal.TypeRelayRetry, signal.RelayRetry{Consent: "bogus-value"})
-	waitForCondition(t, func() bool {
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		return w.sawRetry
-	})
+	waitForCondition(t, w.PeerRequestedRelay)
 	time.Sleep(150 * time.Millisecond)
 	if w.Granted() {
 		t.Fatal("unknown consent value was treated as granted")
+	}
+}
+
+// TestRelayWatch_PeerRequestedRelay checks PeerRequestedRelay against
+// Granted: a pending relay-retry (the peer giving up on its own direct
+// attempt, before it has decided whether to allow the relay) must set
+// PeerRequestedRelay but not Granted — the distinction
+// internal/flow/send.go, receive.go, and internal/peer/peer.go depend on to
+// report a clear error instead of a bare context-canceled attemptCtx
+// cancellation when this side won't itself be retrying via relay.
+func TestRelayWatch_PeerRequestedRelay(t *testing.T) {
+	h := newRelayHub(t)
+	w := WatchRelay(h.client)
+	defer w.Close()
+
+	if w.PeerRequestedRelay() {
+		t.Fatal("PeerRequestedRelay before any relay-retry arrived")
+	}
+	h.send(signal.TypeRelayRetry, signal.RelayRetry{Consent: signal.RelayConsentPending})
+	waitForCondition(t, w.PeerRequestedRelay)
+	time.Sleep(150 * time.Millisecond)
+	if w.Granted() {
+		t.Fatal("a pending relay-retry must not be treated as granted")
 	}
 }
 
@@ -686,6 +705,60 @@ func TestRelayWatch_AttemptContextCancelsOnParentDone(t *testing.T) {
 	case <-attemptCtx.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("AttemptContext was not canceled when parent was")
+	}
+}
+
+// TestRelayWatch_AttemptContextExitsOnClose is the regression guard for the
+// watcher goroutine outliving the watch itself: with a parent that is never
+// done on its own (context.Background(), as a caller with a long-lived flow
+// ctx or a background process effectively has) and none of
+// retry/declined/left ever arriving, Close must still unblock the
+// goroutine — otherwise it (and the RelayWatch/signal client it holds)
+// leaks for as long as parent lives, which can be the rest of the process.
+func TestRelayWatch_AttemptContextExitsOnClose(t *testing.T) {
+	h := newRelayHub(t)
+	w := WatchRelay(h.client)
+
+	attemptCtx := w.AttemptContext(context.Background())
+	select {
+	case <-attemptCtx.Done():
+		t.Fatal("AttemptContext canceled before Close")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	w.Close()
+	select {
+	case <-attemptCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("AttemptContext's watcher goroutine did not exit after Close — it leaks past the watch's own lifetime")
+	}
+}
+
+// TestRelayWatch_AbortContextExitsOnClose is abortContext's counterpart to
+// TestRelayWatch_AttemptContextExitsOnClose: RetryWithRelay's promptCtx and
+// attempt2Ctx are both built via abortContext, and a caller that closes the
+// watch right after RetryWithRelay returns — rather than only via a much
+// later deferred Close once the whole transfer finishes — must not leak
+// this goroutine either. Before abortContext also selected on closeCh, bare
+// signaling loss (client.Done()) no longer reached abortCh once Close had
+// already stopped run() from observing it, so Close was the only remaining
+// way to unblock it — and didn't.
+func TestRelayWatch_AbortContextExitsOnClose(t *testing.T) {
+	h := newRelayHub(t)
+	w := WatchRelay(h.client)
+
+	abortCtx := w.abortContext(context.Background())
+	select {
+	case <-abortCtx.Done():
+		t.Fatal("abortContext canceled before Close")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	w.Close()
+	select {
+	case <-abortCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("abortContext's watcher goroutine did not exit after Close — it leaks past the watch's own lifetime")
 	}
 }
 

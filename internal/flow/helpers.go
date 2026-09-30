@@ -108,12 +108,19 @@ func reportRelayWatchErr(h Handler, err error, peerRole string) error {
 	}
 
 	var declined *conn.PeerDeclinedRelayError
+	var relayUnusable *conn.PeerRelayUnusableError
 	switch {
 	case errors.As(err, &declined):
 		if declined.Reason == signal.RelayDeniedUnavailable {
 			h.OnError(fmt.Sprintf("Direct connection failed and the %s could not be asked to allow the relay. They can rerun sp2p with -allow-relay.", peerRole))
 		} else {
 			h.OnError(fmt.Sprintf("Direct connection failed and the %s declined the relay.", peerRole))
+		}
+	case errors.As(err, &relayUnusable):
+		if relayUnusable.TCPOnly {
+			h.OnError(fmt.Sprintf("Direct connection failed. The %s asked to retry via relay, but this side is running -transport tcp and cannot use one.", peerRole))
+		} else {
+			h.OnError(fmt.Sprintf("Direct connection failed. The %s asked to retry via relay, but no relay is available on this side.", peerRole))
 		}
 	case errors.Is(err, conn.ErrPeerLeft):
 		h.OnError("Peer disconnected")

@@ -231,6 +231,8 @@ func TestReportRelayWatchErr(t *testing.T) {
 		{"signaling lost", conn.ErrSignalingLost, "Signaling server disconnected"},
 		{"credential timeout", conn.ErrTURNCredentialsTimeout, "Server did not provide TURN credentials"},
 		{"relay not allowed", conn.ErrRelayNotAllowed, "Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay."},
+		{"peer requested relay, this side is TCP-only", &conn.PeerRelayUnusableError{TCPOnly: true}, "Direct connection failed. The receiver asked to retry via relay, but this side is running -transport tcp and cannot use one."},
+		{"peer requested relay, no TURN available", &conn.PeerRelayUnusableError{TCPOnly: false}, "Direct connection failed. The receiver asked to retry via relay, but no relay is available on this side."},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -377,6 +377,39 @@ func TestMachineReporterFinish_PeerRelayDenied(t *testing.T) {
 	}
 }
 
+// TestMachineReporterFinish_PeerRelayUnusableIsRelayNotAllowed checks that
+// finish() maps a wrapped conn.PeerRelayUnusableError — the peer gave up on
+// its own direct attempt and asked to retry via relay, but this side has no
+// relay to offer (no TURN, or -transport tcp) — to the same relay_not_allowed
+// code as the local could-not-participate case, even though
+// r.snapshot.RelayRequired was never set true (this side never reaches its
+// own relay prompt in that scenario).
+func TestMachineReporterFinish_PeerRelayUnusableIsRelayNotAllowed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  *conn.PeerRelayUnusableError
+	}{
+		{"tcp-only", &conn.PeerRelayUnusableError{TCPOnly: true}},
+		{"no turn", &conn.PeerRelayUnusableError{TCPOnly: false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output lockedBuffer
+			reporter := newMachineReporter(context.Background(), OutputConfig{
+				Format:      OutputJSON,
+				EventWriter: &output,
+			}, "send", false)
+
+			err := fmt.Errorf("connecting: %w", tc.err)
+			reporter.finish(err, "")
+
+			result := lastResultEvent(t, &output)
+			if result.Error == nil || result.Error.Code != "relay_not_allowed" {
+				t.Fatalf("result event = %#v, want error code relay_not_allowed", result)
+			}
+		})
+	}
+}
+
 // TestMachineReporterFinish_OwnDenyIsRelayDenied checks that finish() still
 // reports our own deny as relay_denied (unchanged), not peer_relay_denied,
 // when the returned error doesn't wrap conn.ErrPeerDeclinedRelay.

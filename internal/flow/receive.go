@@ -233,10 +233,24 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 		connCfg.Transport = conn.TransportWebRTC
 		connCfg.TCPPreferWait = 0
 		estResult, err = retryWithRelay(ctx, sigClient, relayWatch, cfg.RelayOK, h, connCfg, "sender")
+	} else if err != nil && ctx.Err() == nil && relayWatch.PeerRequestedRelay() {
+		// The sender gave up on its own direct attempt and asked to retry
+		// via relay (cutting our attempt 1 short via AttemptContext), but we
+		// won't be attempting relay ourselves (no TURN available, or
+		// -transport tcp forces a transport relay can't use): report a
+		// clear failure instead of the bare context-canceled attemptCtx
+		// cancellation that would otherwise surface here.
+		closeEstablishResult(estResult)
+		return nil, reportRelayWatchErr(h, &conn.PeerRelayUnusableError{TCPOnly: cfg.Transport == conn.TransportTCP}, "sender")
 	}
 	if err != nil {
 		return nil, err
 	}
+	// The connection is established: relayWatch is no longer needed. Close
+	// it now (the deferred Close above becomes a no-op) so its
+	// AttemptContext goroutine exits right after this attempt instead of
+	// lingering for the rest of the transfer.
+	relayWatch.Close()
 	p2pConn := estResult.Conn
 	defer p2pConn.Close()
 	// Ensure TCP resources (listener, UPnP) are cleaned up.
