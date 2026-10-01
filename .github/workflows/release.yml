@@ -26,6 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           deadline=$((SECONDS + 7200))
+          seen=false
           while :; do
             if (( SECONDS >= deadline )); then
               echo "::error::Timed out waiting for Extended checks on ${SHA:0:12}"
@@ -38,12 +39,19 @@ jobs:
               continue
             fi
             # The tag is usually pushed seconds after main, before the
-            # push-triggered run exists; give it time to be created.
-            if [[ $(jq length <<<"$runs") -eq 0 ]] && (( SECONDS < 900 )); then
-              echo "No Extended checks run on ${SHA:0:12} yet; waiting"
-              sleep 30
-              continue
+            # push-triggered run exists; give it time to be created. Once a
+            # run has been seen, an empty listing is a transient API glitch,
+            # not "no run": keep waiting rather than failing the release.
+            if [[ $(jq length <<<"$runs") -eq 0 ]]; then
+              if [[ $seen == true ]] || (( SECONDS < 900 )); then
+                echo "No Extended checks run listed on ${SHA:0:12}; waiting"
+                sleep 30
+                continue
+              fi
+              echo "::error::No Extended checks run was created for ${SHA:0:12} within 15 minutes. Run 'gh workflow run extended.yml --ref ${GITHUB_REF_NAME}', then re-run this job."
+              exit 1
             fi
+            seen=true
             if jq -e 'any(.[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
               echo "Extended checks passed on ${SHA:0:12}"
               exit 0
