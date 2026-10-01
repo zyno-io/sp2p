@@ -5,6 +5,7 @@ package flow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -39,11 +40,11 @@ func (h *relayPromptTestHandler) OnParallelStreams(int)                {}
 func (h *relayPromptTestHandler) OnVerbose(string)                     {}
 func (h *relayPromptTestHandler) PromptRelay() bool                    { return false }
 func (h *relayPromptTestHandler) OnError(message string)               { h.errors <- message }
-func (h *relayPromptTestHandler) PromptRelayContext(ctx context.Context) bool {
+func (h *relayPromptTestHandler) PromptRelayAnswer(ctx context.Context) conn.RelayAnswer {
 	close(h.promptStarted)
 	<-ctx.Done()
 	close(h.promptCanceled)
-	return false
+	return conn.RelayUnavailable
 }
 
 func TestRetryWithRelayCancelsMachinePromptWhenSignalingConnectionCloses(t *testing.T) {
@@ -106,9 +107,12 @@ func TestRetryWithRelayCancelsMachinePromptWhenSignalingConnectionCloses(t *test
 	}
 	defer client.Close()
 
-	_, err = retryWithRelay(context.Background(), client, make(chan *signal.Envelope), make(chan *signal.Envelope), make(chan *signal.Envelope), make(chan struct{}), false, handler, conn.ConnectConfig{})
-	if err == nil || !strings.Contains(err.Error(), "signaling connection lost") {
-		t.Fatalf("retryWithRelay error = %v, want signaling connection loss", err)
+	watch := conn.WatchRelay(client)
+	defer watch.Close()
+
+	_, err = retryWithRelay(context.Background(), client, watch, false, handler, conn.ConnectConfig{}, "receiver")
+	if !errors.Is(err, conn.ErrSignalingLost) {
+		t.Fatalf("retryWithRelay error = %v, want conn.ErrSignalingLost", err)
 	}
 	select {
 	case <-handler.promptCanceled:
@@ -122,6 +126,167 @@ func TestRetryWithRelayCancelsMachinePromptWhenSignalingConnectionCloses(t *test
 		}
 	default:
 		t.Fatal("expected signaling-disconnect error")
+	}
+}
+
+// relayRoleTestHandler is a minimal flow.Handler that captures OnError
+// messages and always locally allows the relay (it does not implement
+// RelayPromptHandler, so retryWithRelay falls back to PromptRelay()).
+type relayRoleTestHandler struct {
+	errs chan string
+}
+
+func (h *relayRoleTestHandler) OnPhaseChanged(Phase)                 {}
+func (h *relayRoleTestHandler) OnTransferCode(string, string)        {}
+func (h *relayRoleTestHandler) OnConnectionStatus(conn.MethodStatus) {}
+func (h *relayRoleTestHandler) OnConnectionMethodsReset()            {}
+func (h *relayRoleTestHandler) OnMetadata(*transfer.Metadata)        {}
+func (h *relayRoleTestHandler) OnProgress(uint64)                    {}
+func (h *relayRoleTestHandler) OnVerifyCode(string)                  {}
+func (h *relayRoleTestHandler) OnComplete(uint64, time.Duration)     {}
+func (h *relayRoleTestHandler) OnUpdateAvailable(string, string)     {}
+func (h *relayRoleTestHandler) OnParallelStreams(int)                {}
+func (h *relayRoleTestHandler) OnVerbose(string)                     {}
+func (h *relayRoleTestHandler) PromptRelay() bool                    { return true }
+func (h *relayRoleTestHandler) OnError(message string)               { h.errs <- message }
+
+// TestRetryWithRelay_ErrorTextNamesPeerRole checks that a peer decline is
+// reported using the role passed by the caller (flow/send.go passes
+// "receiver", flow/receive.go passes "sender").
+func TestRetryWithRelay_ErrorTextNamesPeerRole(t *testing.T) {
+	for _, tc := range []struct{ role, want string }{
+		{"receiver", "the receiver declined the relay"},
+		{"sender", "the sender declined the relay"},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				serverConn, err := websocket.Accept(w, r, nil)
+				if err != nil {
+					t.Errorf("accept WebSocket: %v", err)
+					return
+				}
+				defer serverConn.Close(websocket.StatusNormalClosure, "done")
+				ctx := r.Context()
+
+				// Client's relay-retry{pending}.
+				if _, _, err := serverConn.Read(ctx); err != nil {
+					t.Errorf("read relay retry: %v", err)
+					return
+				}
+				sendTestEnvelope(t, ctx, serverConn, signal.TypeTURNCredentials, signal.TURNCredentials{
+					ICEServers: []signal.ICEServer{{URLs: []string{"turn:relay.example.com:3478"}}},
+				})
+
+				// Give the client a moment to locally allow and send
+				// relay-retry{granted} (ignored here), then the peer declines.
+				time.Sleep(50 * time.Millisecond)
+				sendTestEnvelope(t, ctx, serverConn, signal.TypeRelayDenied, signal.RelayDenied{Reason: signal.RelayDeniedDeclined})
+				time.Sleep(200 * time.Millisecond)
+			}))
+			defer server.Close()
+
+			serverURL := strings.Replace(server.URL, "http://", "ws://", 1)
+			client, err := signal.Connect(context.Background(), serverURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+
+			watch := conn.WatchRelay(client)
+			defer watch.Close()
+
+			h := &relayRoleTestHandler{errs: make(chan string, 4)}
+			_, err = retryWithRelay(context.Background(), client, watch, false, h, conn.ConnectConfig{}, tc.role)
+			var declined *conn.PeerDeclinedRelayError
+			if !errors.As(err, &declined) {
+				t.Fatalf("error = %v, want *conn.PeerDeclinedRelayError", err)
+			}
+			select {
+			case msg := <-h.errs:
+				if !strings.Contains(msg, tc.want) {
+					t.Fatalf("OnError message = %q, want to contain %q", msg, tc.want)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("OnError was never called")
+			}
+		})
+	}
+}
+
+// TestReportRelayWatchErr covers the full mapping table directly (rather
+// than only through retryWithRelay's network-facing wrapper above),
+// including the credential-timeout case restored by this fix and the case
+// (declined/lost during attempt 1, before relay retry is ever reached)
+// that reportRelayWatchErr exists specifically to serve.
+func TestReportRelayWatchErr(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"peer declined", &conn.PeerDeclinedRelayError{Reason: signal.RelayDeniedDeclined}, "Direct connection failed and the receiver declined the relay."},
+		{"peer unavailable", &conn.PeerDeclinedRelayError{Reason: signal.RelayDeniedUnavailable}, "Direct connection failed and the receiver could not be asked to allow the relay. They can rerun sp2p with -allow-relay."},
+		{"peer left", conn.ErrPeerLeft, "Peer disconnected"},
+		{"decision timeout", conn.ErrPeerRelayTimeout, "Timed out waiting for the receiver to allow the relay."},
+		{"signaling lost", conn.ErrSignalingLost, "Signaling server disconnected"},
+		{"credential timeout", conn.ErrTURNCredentialsTimeout, "Server did not provide TURN credentials"},
+		{"relay not allowed", conn.ErrRelayNotAllowed, "Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay."},
+		{"peer requested relay, this side is TCP-only", &conn.PeerRelayUnusableError{TCPOnly: true}, "Direct connection failed. The receiver asked to retry via relay, but this side is running -transport tcp and cannot use one."},
+		{"peer requested relay, no TURN available", &conn.PeerRelayUnusableError{TCPOnly: false}, "Direct connection failed. The receiver asked to retry via relay, but no relay is available on this side."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &relayRoleTestHandler{errs: make(chan string, 1)}
+			got := reportRelayWatchErr(h, tc.err, "receiver")
+			if got != tc.err {
+				t.Fatalf("reportRelayWatchErr returned %v, want the original error unchanged", got)
+			}
+			select {
+			case msg := <-h.errs:
+				if msg != tc.want {
+					t.Fatalf("OnError message = %q, want %q", msg, tc.want)
+				}
+			default:
+				t.Fatal("OnError was never called")
+			}
+		})
+	}
+}
+
+// TestReportRelayWatchErr_ContextCancellationPassesThroughSilently checks
+// that a context cancellation is never reported via OnError — that's the
+// caller's (or the user's Ctrl+C's) business, not a relay-consent outcome
+// — and that a nil error passes through as nil.
+func TestReportRelayWatchErr_ContextCancellationPassesThroughSilently(t *testing.T) {
+	h := &relayRoleTestHandler{errs: make(chan string, 1)}
+	if got := reportRelayWatchErr(h, context.Canceled, "receiver"); got != context.Canceled {
+		t.Fatalf("reportRelayWatchErr(context.Canceled) = %v, want unchanged", got)
+	}
+	if got := reportRelayWatchErr(h, context.DeadlineExceeded, "receiver"); got != context.DeadlineExceeded {
+		t.Fatalf("reportRelayWatchErr(context.DeadlineExceeded) = %v, want unchanged", got)
+	}
+	if got := reportRelayWatchErr(h, nil, "receiver"); got != nil {
+		t.Fatalf("reportRelayWatchErr(nil) = %v, want nil", got)
+	}
+	select {
+	case msg := <-h.errs:
+		t.Fatalf("OnError was called unexpectedly with %q", msg)
+	default:
+	}
+}
+
+func sendTestEnvelope(t *testing.T, ctx context.Context, c *websocket.Conn, msgType string, payload any) {
+	t.Helper()
+	env, err := signal.NewEnvelope(msgType, payload)
+	if err != nil {
+		t.Fatalf("NewEnvelope: %v", err)
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := c.Write(ctx, websocket.MessageText, data); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 }
 

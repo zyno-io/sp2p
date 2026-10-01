@@ -181,31 +181,12 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 	onStatus := func(s conn.MethodStatus) { h.OnConnectionStatus(s) }
 	onLog := func(msg string) { h.OnVerbose(msg) }
 
-	// Pre-subscribe to relay-retry, relay-denied, and peer-left before
-	// conn.Establish so these signals aren't consumed by processSignaling.
-	relayCh := sigClient.Subscribe(signal.TypeRelayRetry)
-	defer sigClient.Unsubscribe(signal.TypeRelayRetry, relayCh)
-	deniedCh := sigClient.Subscribe(signal.TypeRelayDenied)
-	defer sigClient.Unsubscribe(signal.TypeRelayDenied, deniedCh)
-	peerLeftCh := sigClient.Subscribe(signal.TypePeerLeft)
-	defer sigClient.Unsubscribe(signal.TypePeerLeft, peerLeftCh)
-
-	// Cancel connection attempt early if peer signals relay-retry or disconnects,
-	// so both sides reach the relay prompt around the same time.
-	attemptCtx, attemptCancel := context.WithCancel(ctx)
-	peerWantsRelay := make(chan struct{})
-	peerLeft := make(chan struct{})
-	go func() {
-		select {
-		case <-relayCh:
-			close(peerWantsRelay)
-			attemptCancel()
-		case <-peerLeftCh:
-			close(peerLeft)
-			attemptCancel()
-		case <-attemptCtx.Done():
-		}
-	}()
+	// Watch relay-retry, relay-denied, and peer-left before conn.Establish
+	// so these signals aren't consumed by processSignaling, and so attempt 1
+	// is cancelled the instant the peer reaches its own relay step — both
+	// sides then reach the relay retry/prompt step around the same time.
+	relayWatch := conn.WatchRelay(sigClient)
+	defer relayWatch.Close()
 
 	connCfg := conn.ConnectConfig{
 		SignalClient:   sigClient,
@@ -233,29 +214,43 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 			return crypto.AuthenticateCandidate(ctx, c, keys, senderPub, kp.Public, false)
 		}
 	}
+	attemptCtx := relayWatch.AttemptContext(ctx)
 	estResult, err := conn.Establish(attemptCtx, connCfg)
-	attemptCancel()
-	select {
-	case <-peerLeft:
-		if estResult != nil {
-			estResult.Conn.Close()
-			if estResult.TCPResult != nil && estResult.TCPResult.Cleanup != nil {
-				estResult.TCPResult.Cleanup()
-			}
-		}
+	if relayWatch.PeerLeft() {
+		closeEstablishResult(estResult)
 		h.OnError("Sender disconnected")
 		return nil, fmt.Errorf("peer disconnected")
-	default:
+	}
+	if err != nil && ctx.Err() == nil {
+		if wErr := relayWatch.Err(); wErr != nil {
+			// See flow/send.go's identical check for why.
+			closeEstablishResult(estResult)
+			return nil, reportRelayWatchErr(h, wErr, "sender")
+		}
 	}
 	if err != nil && turnAvailable && cfg.Transport != conn.TransportTCP {
 		// TURN relay requires WebRTC; do not re-enable TCP or keep its preference delay.
 		connCfg.Transport = conn.TransportWebRTC
 		connCfg.TCPPreferWait = 0
-		estResult, err = retryWithRelay(ctx, sigClient, relayCh, deniedCh, peerLeftCh, peerWantsRelay, cfg.RelayOK, h, connCfg)
+		estResult, err = retryWithRelay(ctx, sigClient, relayWatch, cfg.RelayOK, h, connCfg, "sender")
+	} else if err != nil && ctx.Err() == nil && relayWatch.PeerRequestedRelay() {
+		// The sender gave up on its own direct attempt and asked to retry
+		// via relay (cutting our attempt 1 short via AttemptContext), but we
+		// won't be attempting relay ourselves (no TURN available, or
+		// -transport tcp forces a transport relay can't use): report a
+		// clear failure instead of the bare context-canceled attemptCtx
+		// cancellation that would otherwise surface here.
+		closeEstablishResult(estResult)
+		return nil, reportRelayWatchErr(h, &conn.PeerRelayUnusableError{TCPOnly: cfg.Transport == conn.TransportTCP}, "sender")
 	}
 	if err != nil {
 		return nil, err
 	}
+	// The connection is established: relayWatch is no longer needed. Close
+	// it now (the deferred Close above becomes a no-op) so its
+	// AttemptContext goroutine exits right after this attempt instead of
+	// lingering for the rest of the transfer.
+	relayWatch.Close()
 	p2pConn := estResult.Conn
 	defer p2pConn.Close()
 	// Ensure TCP resources (listener, UPnP) are cleaned up.
@@ -316,10 +311,11 @@ func Receive(ctx context.Context, cfg ReceiveConfig, h Handler) (*ReceiveResult,
 			count = min(cfg.Parallel, webRTCParallelLimit)
 		}
 		h.OnVerbose("negotiating authenticated parallel WebRTC connections")
-		ms, e := negotiateWebRTC(ctx, rtc, encStream, keys, senderPub, kp.Public, false, count)
+		ms, laneReport, e := negotiateWebRTC(ctx, rtc, encStream, keys, senderPub, kp.Public, false, count)
 		if e != nil {
 			return nil, fmt.Errorf("parallel WebRTC setup: %w", e)
 		}
+		reportParallelLanes(h, laneReport)
 		if ms != nil {
 			frw, deadliner, multiStream = ms, ms, ms
 			h.OnParallelStreams(ms.StreamCount())

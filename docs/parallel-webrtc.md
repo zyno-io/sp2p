@@ -142,5 +142,77 @@ because its final acknowledgement is lost. Diagnostics aggregate all active
 connections, preserve unavailable counters, and omit addresses, SDP, keys,
 transfer codes, and payloads.
 
+## Failure diagnostics
+
+Every place a lane can silently drop out of setup is instrumented, so a
+setup that ends with fewer connections than the peer accepted can be
+explained without a repro. This is diagnostics only: it changes no wire
+message and adds no retry (see the "Alternatives considered" discussion in
+the investigation that produced it).
+
+**Go.** `internal/conn.WebRTCLane` records an address-free trace: connection,
+ICE, and DTLS transport state transitions plus DataChannel open/close, each
+with a millisecond offset from the lane's creation, via `Trace()`. When a
+lane closes itself (a rejected DataChannel label, the shared receive budget,
+or the underlying peer connection failing) it records why. `PairTypes()`
+reports the selected ICE candidate pair's *types* only, e.g. `host/prflx` —
+never an address, port, or ufrag. `internal/flow.negotiateWebRTC` returns a
+`*ParallelLaneReport` alongside the transport:
+
+| Field | Meaning |
+| --- | --- |
+| `Requested` | This side's own lane-count cap before negotiation |
+| `Accepted` | The negotiated count (including the primary at id 0) |
+| `Ours` / `Theirs` | The ready masks each side sent |
+| `Selected` | The committed mask |
+| `SetupMS` | Elapsed time from negotiation start |
+| `Failures` | One entry per accepted lane that never made it into `Selected` |
+
+Each `Failures` entry is `{ID, Stage, Class, Trace, Pair}`. `Stage` is one of
+a fixed set naming the discard site: `create`, `gather`, `sdp-size`,
+`peer-offer-empty`, `set-remote-offer`, `peer-answer-empty`,
+`set-remote-answer`, `connect-timeout`, `closed-before-open`,
+`auth-challenge`, `auth-proof`, `select`, `confirm`, or `peer-not-ready` (we
+authenticated the lane but the peer's ready mask excluded it). `Class` is a
+fixed five-value vocabulary — `timeout`, `eof`, `closed`, `mismatch`,
+`error` — never the underlying Go/Pion error text, which can contain
+addresses; that raw text is discarded entirely (`classifyLaneError` only
+reads it to pick a bucket) rather than surfaced anywhere, including via
+`Handler.OnVerbose`. That's a deliberate choice about this one data source,
+not a claim that `OnVerbose` itself is address-free in general —
+`internal/conn` already logs addresses there (e.g. dialed/local TCP
+addresses) as ordinary human-facing (`-v`) diagnostics. The distinction
+matters because machine mode's JSON `log` event forwards `OnVerbose` output
+verbatim whenever `-v` is set, and raw lane error text is judged not worth
+that exposure.
+
+A `Handler` that implements the optional `ParallelLaneReporter` interface
+(`OnParallelLaneReport(*ParallelLaneReport)`, following the same pattern as
+`RelayPromptHandler`) receives the report whenever any lane the peer
+accepted was not selected — including when the negotiated transport falls
+all the way back to the primary. The CLI's JSON reporter emits this as its
+own `parallel_lanes` event (see `man/sp2p.1`'s JSON EVENTS section); it is
+not a `log` event, so it is never dropped by a consumer that skips verbose
+output. The human terminal handler prints it only with `-v`.
+
+**Browser.** `web/src/webrtc-parallel.ts`'s `Lane` carries the same shape: an
+`id`, a `trace[]` of `{ms, event}` entries recorded at the same
+conn/ICE/DataChannel transitions, and `close(stage, reason)`, called at every
+discard site instead of a bare `close()`. `negotiateParallelWebRTC` closes a
+lane immediately when its own description gathering fails, rather than
+leaving it open for `wait()`'s 8-second timer to catch. If any lane the peer
+accepted was not selected, the `finally` block logs exactly one line — the
+ready masks plus each failed lane's stage, reason, and trace — through the
+existing `log()` helper (already captured by dump-on-failure diagnostics).
+Reasons are either one of `handshake.ts`'s own fixed error strings or one of
+a small generic bucket (`closed`, `timeout`, `error`); an arbitrary
+`RTCPeerConnection`/DOM exception message is never logged verbatim.
+
+**Privacy.** Nothing above ever includes an IP address, port, ICE ufrag/pwd,
+SDP, or transfer code — matching the rest of this document's diagnostics
+rule. Go and TypeScript tests assert this directly against a synthetic
+failure. See `docs/testing.md` for the `lanes-stress` workflow this
+diagnostic surface exists to support.
+
 See the [WAN investigation](browser-wan-benchmark.md) for reproducible
 benchmarks and the limits of the current performance evidence.

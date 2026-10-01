@@ -6,9 +6,11 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
+	"github.com/zyno-io/sp2p/internal/conn"
 	"github.com/zyno-io/sp2p/internal/flow"
 )
 
@@ -93,35 +95,90 @@ func sendMachine(ctx context.Context, cfg SendConfig) error {
 	return nil
 }
 
-// promptRelay asks the user whether to allow TURN relay.
-// It opens /dev/tty directly so it works even when stdin is piped.
-// Returns false if no TTY is available.
+// promptRelay asks the user whether to allow TURN relay. It opens /dev/tty
+// directly so it works even when stdin is piped. Returns false if no TTY is
+// available. Kept for the plain Handler.PromptRelay() bool contract; the
+// interactive CLI itself uses the cancellable promptRelayTTY below.
 func promptRelay() bool {
+	return promptRelayTTY(context.Background()) == conn.RelayAllow
+}
+
+// promptRelayTTY asks the user whether to allow TURN relay, honoring ctx
+// cancellation. It opens /dev/tty directly so it works even when stdin is
+// piped. Returns Unavailable if no TTY is available, ctx is canceled before
+// an answer arrives, or input hits EOF.
+func promptRelayTTY(ctx context.Context) conn.RelayAnswer {
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
-		return false
+		return conn.RelayUnavailable
 	}
-	defer tty.Close()
 
 	// Check that the TTY is actually readable (not EOF) before printing
 	// the prompt. In environments like Docker without -t, /dev/tty may
 	// open successfully but read returns EOF immediately.
-	// Use a non-blocking peek via bufio.Scanner on the tty: we print the
-	// prompt first, then scan. If scan fails (EOF), the prompt is still
-	// preserved because we print a trailing newline.
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "  Could not establish a direct connection.\n")
 	fmt.Fprintf(os.Stderr, "  A TURN relay is available — data stays E2E encrypted.\n")
 	fmt.Fprintf(os.Stderr, "\n")
 	fmt.Fprintf(os.Stderr, "  Allow relay? [y/N]: ")
 
-	scanner := bufio.NewScanner(tty)
-	if scanner.Scan() {
-		answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
-		return answer == "y" || answer == "yes"
+	return readRelayAnswer(ctx, tty)
+}
+
+// readRelayAnswer reads one line from tty (expected to be a blocking
+// character device such as /dev/tty) on a background goroutine and returns
+// its y/n answer, or Unavailable promptly if ctx is canceled or the read
+// hits EOF/error first.
+//
+// This deliberately does NOT rely on canceling ctx to close tty out from
+// under the blocked read: that pattern (context.AfterFunc(ctx, tty.Close))
+// does not reliably unblock a pending read on every platform. In
+// particular, on macOS a /dev/tty character device can't be registered
+// with the runtime's kqueue-based netpoller, so Go falls back to a plain
+// blocking read syscall for it — closing the fd from another goroutine
+// does not interrupt that blocked read (verified under `script`: still
+// blocked 3+ seconds after the close).
+//
+// Instead, the read runs on its own goroutine that owns tty and closes it
+// only once the read itself returns. If ctx fires first, this function
+// returns immediately without waiting for (or ever using) that goroutine's
+// eventual answer — resultCh is buffered so the goroutine's send never
+// blocks, and nothing reads resultCh again after this function has
+// returned, so a "late" answer (the user finally pressing enter well after
+// the peer already decided) can never be acted on. The goroutine — and the
+// open tty fd — may outlive this call until the user answers or the
+// process exits; that's an accepted, bounded leak (at most one per
+// canceled prompt), not an unbounded one.
+func readRelayAnswer(ctx context.Context, tty io.ReadCloser) conn.RelayAnswer {
+	resultCh := make(chan conn.RelayAnswer, 1)
+	go func() {
+		defer tty.Close()
+		scanner := bufio.NewScanner(tty)
+		if scanner.Scan() {
+			answer := strings.TrimSpace(strings.ToLower(scanner.Text()))
+			if answer == "y" || answer == "yes" {
+				resultCh <- conn.RelayAllow
+				return
+			}
+			resultCh <- conn.RelayDeny
+			return
+		}
+		resultCh <- conn.RelayUnavailable
+	}()
+
+	select {
+	case answer := <-resultCh:
+		if answer == conn.RelayUnavailable {
+			// Scanner failed (EOF / no TTY input). Print a newline so the
+			// cursor moves off the prompt line and Resume() doesn't erase it.
+			fmt.Fprintf(os.Stderr, "\n")
+		}
+		return answer
+	case <-ctx.Done():
+		// The prompt line has no trailing newline yet (the user hasn't
+		// answered); move the cursor off it before returning so a redraw
+		// (e.g. progress.Resume()) doesn't corrupt it.
+		fmt.Fprintf(os.Stderr, "\n")
+		return conn.RelayUnavailable
 	}
-	// Scanner failed (EOF / no TTY input). Print newline so the cursor
-	// moves off the prompt line and Resume() doesn't erase it.
-	fmt.Fprintf(os.Stderr, "\n")
-	return false
 }

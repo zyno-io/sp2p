@@ -116,6 +116,35 @@ func (c *Client) Unsubscribe(msgType string, ch chan *Envelope) {
 	}
 }
 
+// SubscribeTypes returns a single channel that receives messages of any of
+// the given types, in the order the read loop processes them (arrival
+// order). Subscribed types are no longer delivered to the Incoming channel.
+// Call UnsubscribeTypes when done.
+func (c *Client) SubscribeTypes(types ...string) chan *Envelope {
+	ch := make(chan *Envelope, 16)
+	c.subsMu.Lock()
+	for _, t := range types {
+		c.subs[t] = append(c.subs[t], ch)
+	}
+	c.subsMu.Unlock()
+	return ch
+}
+
+// UnsubscribeTypes removes ch from each of the given types' subscriber lists.
+func (c *Client) UnsubscribeTypes(ch chan *Envelope, types ...string) {
+	c.subsMu.Lock()
+	defer c.subsMu.Unlock()
+	for _, t := range types {
+		chs := c.subs[t]
+		for i, existing := range chs {
+			if existing == ch {
+				c.subs[t] = append(chs[:i], chs[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
 // Send sends a typed message to the server.
 func (c *Client) Send(ctx context.Context, msgType string, payload any) error {
 	env, err := NewEnvelope(msgType, payload)

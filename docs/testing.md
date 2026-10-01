@@ -55,6 +55,12 @@
   real CLI→browser and browser→browser transfer through production
   sp2p.io, using the release's own checksum-verified CLI, with relay denied.
   See [Production smoke test](#production-smoke-test) below.
+- **Lane-diagnostics stress** — `.github/workflows/lanes-stress.yml`,
+  manual-dispatch only, not part of any release gate. Repeats the
+  CLI↔Chromium `parallel-interop.spec.ts` tests many times, plus once under
+  CPU contention, to chase a rare parallel-WebRTC lane shortfall using the
+  `parallel_lanes` diagnostics below. See
+  [Lane-diagnostics stress](#lane-diagnostics-stress) below.
 
 ## Extended checks
 
@@ -82,6 +88,44 @@ a manual dispatch, which only reports in the run itself.
 release unless Extended checks passed on the tagged commit. If a run is
 already in progress on that commit, it waits (up to ~2 hours) instead of
 failing immediately.
+
+## Lane-diagnostics stress
+
+`.github/workflows/lanes-stress.yml` ("Lanes Stress") exists to chase the
+rare parallel-WebRTC lane shortfall described in
+[parallel-webrtc.md](parallel-webrtc.md#failure-diagnostics): a setup that
+negotiates and accepts N lanes but selects fewer, with no protocol change and
+(previously) no diagnostic trail. It is manual-dispatch only
+(`workflow_dispatch`, input `repeat`, default 50) — it never runs on
+push/pull_request and is not part of `extended.yml` or any release gate,
+because it exists to reproduce a suspected regression on demand, not to gate
+merges on a fixed pass rate.
+
+Run it with:
+
+```bash
+gh workflow run lanes-stress.yml --ref <branch-or-tag> -f repeat=200
+```
+
+It builds the same way `ci.yml`'s `browser-interop` job does (checkout,
+`setup-go`, `setup-node`, `npm ci`, `playwright install --with-deps
+chromium`), then runs `tests/parallel-interop.spec.ts`'s CLI-involving tests
+(`-g "CLI"` — the CLI→Chromium `compression 0`/`compression 3` sends and the
+browser→CLI receive; it does not include the pure browser↔browser
+`blockedExtras` cases) with `--repeat-each="$repeat"`, once plainly and once
+under CPU contention (a background busy-loop per core, matching the
+reproduction setup in the investigation that motivated the diagnostics).
+
+**Reading a shortfall.** If a run ever produces `counts`/`cli.counts` below
+the requested lane count, the CLI's JSON stream carries a `parallel_lanes`
+event (see `man/sp2p.1`'s JSON EVENTS section) and the browser console
+carries one `[sp2p] ... parallel WebRTC lanes: ours=... theirs=... selected=...
+failures=[...]` line (Playwright's dump-on-failure diagnostics in
+`web/tests/helpers.ts` already capture both). Each `failures` entry names the
+`stage` the lane was lost at and a `class` bucket (`timeout`/`eof`/`closed`/
+`mismatch`/`error`) — never a raw address-bearing error string — plus its own
+address-free `trace`. That is enough to say *where* a lane was lost without
+a live repro; it does not by itself retry or recover the lane.
 
 ## Running locally
 
@@ -371,33 +415,39 @@ peer only starts its next attempt after receiving it). `interop.spec.ts` has a
 regression test that slows the receiver's key derivation to force the
 ordering; it fails without the fix with the same signature seen on CI.
 
-**Known rough edge: multi-homed-host lane sockets (WebKit and browser↔browser
-alike).** On the Mac this was developed on — two active interfaces on the
-same /24 (Wi-Fi `en0` and Ethernet `en9`) — WebKit occasionally lands on 6-7
-of the requested 8 parallel-WebRTC lanes instead of 8, and the same
-symptom (lanes stuck at a fixed, well-below-8 count) has also been observed
-locally on an `engine-matrix.spec.ts` browser↔browser cell where Chromium is
-answering Firefox's lane offers, so this isn't exclusively a WebKit
-behavior — it's whichever side's lane socket happens to bind wrong on this
-particular multi-homed host. This is **not** the
-8-second per-lane authentication timeout in `web/src/webrtc-parallel.ts`'s
-`Lane.wait()` running out (a timing margin that a retry could reasonably
-absorb): the affected lane's ICE connectivity check makes *zero* progress
-for the entire 8 seconds. WebKit's lane sockets bind `INADDR_ANY`, and on a
-multi-homed host they can answer a STUN connectivity check from a different
-local address than the one the check was sent to; pion (the CLI/server's
-WebRTC stack) discards that reply outright — "Discard message: transaction
-source and destination does not match expected" (RFC 8445 §7.2.5.2.1) — so
-the lane never has a chance to connect at all, regardless of how long it
-waits. This is specific to a multi-homed, same-subnet host, not expected on
-CI's single-NIC runners (`ubuntu-latest`, `macos-15`), so no retry was added
-for it — a retry would only be masking noise if the failure were timing-
-sensitive, and this one isn't. If the macos-15 `engines` job in Extended
-checks shows the same lane shortfall for real, that's the point to investigate further:
-it would mean either that runner is multi-homed too, or that this is a
-genuine Safari/WebKit-multi-lane interoperability issue independent of
-network topology (the transfer itself still completes over however many
-lanes did connect — this reduces parallelism, it doesn't break transfers).
+**Fixed: CLI → WebKit lanes on a multi-homed host.** On a Mac with two
+active interfaces on the same /24 (Wi-Fi `en0` and Ethernet `en9`), a CLI
+sending to WebKit used to end up with fewer than 8 parallel-WebRTC lanes,
+failing `CLI sender → webkit` 17 of 20 times (as low as 3 of 8 lanes).
+WebKit → CLI was unaffected (20 of 20). The cause is in pion/ice, the CLI's
+ICE stack, on the side that sends the nomination (the CLI whenever it
+offers):
+
+- WebKit's lane sockets bind the wildcard address. For the same nominated
+  pair, it sometimes answers from the Mac's *other* IP.
+- pion correctly discards those replies as asymmetric (RFC 8445
+  §7.2.5.2.1), but then retries the same nominated pair forever instead of
+  failing it over. `PION_LOG_TRACE=ice` shows roughly 52 `Discard message:
+  transaction source and destination does not match` lines per stuck lane,
+  all for the one nominated pair, while a working pair sits unused.
+- The lane never connects inside its 8 s setup window. The transfer still
+  completes on the lanes that did connect.
+
+Filtering lane candidates to the primary connection's IPs only improved
+this to 12 of 20, because the reply source flips on the *same* pair. The
+real fix is in pion/ice: when a nomination reply comes back from a
+different remote address (RFC 8445 §7.2.5.2.1), fail that pair and clear
+the nomination so the agent nominates another valid pair. That fix is
+proposed upstream as [pion/ice#1021](https://github.com/pion/ice/pull/1021)
+(against `main`, ice v5). Until the pion/webrtc version sp2p uses includes
+it, `go.mod` replaces `pion/ice/v4` with `github.com/zynoconsulting/ice/v4`
+(v4.4.4 plus the same change). With it, all four CLI↔browser `engines`
+cells passed 20 of 20 on the same Mac.
+
+Still open: browser↔browser cells on a multi-homed host (neither side uses
+pion) can still land short of 8 lanes, and on this Mac two headless
+Chromiums can't connect directly at all against the local test server. CI
+runners are single-NIC, so neither shows up there.
 
 **New finding, not yet root-caused: `engine-matrix.spec.ts`'s browser↔browser
 cells mostly fail on the macos-15 `engines`-job runner.** Dispatching what
@@ -946,25 +996,53 @@ The negative controls (extended-checks only) dismiss/deny consent instead:
   `"P2P connection failed and relay was declined"` (own-side decline is
   checked before this side even learns the peer's answer — see
   `establishP2PWithRetry`) and zero TURN allocations are ever created.
+  Both dialogs are held open (`registerHeldDialog`) until both have
+  appeared, then dismissed together, so the test is deterministic instead
+  of racing the two independent per-side assertions against each other.
 - **A CLI receiver denies, and the browser sender independently declines**
   — the CLI's terminal result is exactly
   `{outcome: "failed", error: {code: "relay_denied", message: "Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay."}}`
   with exit code 1; the browser shows the same
-  `"...relay was declined"` message.
+  `"...relay was declined"` message. The browser's dialog is held open
+  until the CLI's own decline is confirmed sent (`answerRelayPrompt` then
+  `cli.relayResponded`), which is *why* this is deterministic: with the
+  peer-already-declined fast path below, an unheld dialog could let the
+  browser decline first and skip the CLI's prompt entirely, making
+  `answerRelayPrompt` hang waiting for a `relay_required` event that never
+  comes.
 
-**Known asymmetric-consent-messaging gap, found while writing this suite:**
-each side's own `confirm()`/prompt decision is checked *before* that side
-learns whether its peer already agreed or declined — `relay-retry` is sent
-to the peer before showing the local prompt specifically so both prompts
-can appear in parallel, but the side that already sent `relay-retry` and
-then declines "wins" the peer's `agree-vs-deny` race as "agreed" from the
-*other* peer's perspective. So if peer A declines while peer B is still
-about to accept, B never sees "peer denied" — it proceeds to attempt 2,
-allocates a TURN relay, and then fails on a plain timeout/disconnect
-instead of a clear "peer declined the relay" message. Consent itself is
-still correctly enforced (the declining side never allocates), but the
-*other* side's error message is misleading. This is a product-behavior
-finding, not a test bug; it isn't fixed here.
+**Two-phase consent, and the split tests that prove it.** Consent is split
+into two stages carried as additive payload fields on the existing
+`relay-retry`/`relay-denied` messages (`internal/conn/relay.go`'s
+`RelayWatch`/`RetryWithRelay`; `web/src/relay-consent.ts`'s
+`RelayConsentWatch` is the same state machine in TypeScript): a side sends
+`relay-retry{consent:"pending"}` the instant its own direct attempt fails
+(so the peer learns immediately and can prompt in parallel; this also
+requests TURN credentials from the server right away — that's just a
+credential fetch, not an allocation), then either
+`relay-retry{consent:"granted"}` after its own prompt says yes, or
+`relay-denied{reason}` if it says no. Critically, **a side never starts
+attempt 2 — and so never allocates anything on the TURN server — until it
+has learned the peer's decision is `granted`** — this replaces the old
+"whoever sent `relay-retry` first is assumed to have agreed" behavior,
+which made a fast accepter allocate a real TURN relay and then fail on a
+bare timeout instead of a clear "peer declined" message whenever the peer
+actually declined.
+Old (≤0.6.2) peers are unaffected: their bare `relay-retry {}` /
+`relay-denied {}` payloads are always treated as `granted`/`declined`
+respectively, matching their original go-immediately behavior.
+`relay.spec.ts`'s 8 **consent split** tests (`consent split: <pairing>,
+<sender|receiver> declines`) prove this directly, for all 4 pairings x
+both declining sides: the accepting side allows immediately, the decliner
+holds its own prompt open until the accepter has visibly committed to
+waiting for it (a browser's `.step-p2p` text, or a CLI's `relay_response`
+event — see `runConsentSplit`), then declines. Each test asserts the
+accepting side reports the peer's decline within 10s (well under the old
+15s/30s misleading-timeout paths), with **zero TURN allocations** on
+either side — proving the accepting side genuinely waited rather than
+having already allocated by the time it learned of the decline. Two of the
+eight (one with Go, one with web as the accepting side) are tagged `@pr`
+and run on every PR; all eight run in extended checks.
 
 ### Leak check
 
@@ -1074,24 +1152,33 @@ the underlying race isn't specific to the larger `relay-full` job).
   actually moves, the shim just needs to exist so the confirm click's
   awaited promise resolves immediately instead of hanging on a real,
   unresolvable native API call.
-- **The CLI-denial race (fixed and confirmed):** `"CLI receiver denies,
-  browser sender declines"` failed once with `cli.results[0].error` =
+- **The CLI-denial race (since eliminated by the relay-consent redesign,
+  not just papered over):** at the time, `"CLI receiver denies, browser
+  sender declines"` failed once with `cli.results[0].error` =
   `{code: "operation_failed", message: "Peer denied relay connection"}`
   instead of the hardcoded `{code: "relay_denied", message: CLI_DENIED}`
-  — a genuine, unavoidable race (not a bug): this CLI's own
-  `answerRelayPrompt("deny")` (written to a file the CLI polls every
-  100ms) and the browser sender's independent decline (which notifies the
-  peer immediately, without waiting to learn the peer's own answer first
-  — see the asymmetric-consent-messaging note above) can arrive in either
-  order. `internal/cli/machine.go`'s `finish()` reports `relay_denied`
-  only if `promptRelay`'s own file-read set `r.relayResponse` first; if
-  the peer's `relay-denied` signal is observed first instead
-  (`internal/flow/helpers.go`'s `<-deniedCh` case), the error is
-  `operation_failed` / `"Peer denied relay connection"` instead. Both are
-  a correct "consent was denied, nothing relayed" outcome. The test now
-  asserts that shared shape (outcome, exit code, zero allocations, one of
-  the two known error shapes) instead of one hardcoded race winner, and
-  has passed cleanly on every run since.
+  — a genuine, unavoidable race under the *old* single-phase consent
+  design (not a test bug): this CLI's own `answerRelayPrompt("deny")`
+  (written to a file the CLI polls every 100ms) and the browser sender's
+  independent decline could arrive in either order, because a side's
+  `relay-retry` doubled as both "I'm asking" and "I agree", sent *before*
+  its own local prompt — so a fast peer could already look "agreed" to
+  the other side by the time either prompt resolved. The test was patched
+  at the time to assert a shared shape across both known outcomes instead
+  of one hardcoded race winner.
+
+  The relay-consent redesign (`internal/conn/relay.go`'s
+  `RelayWatch`/`RetryWithRelay`; `web/src/relay-consent.ts`'s
+  `RelayConsentWatch`) removed the race at its root by splitting consent
+  into `relay-retry{consent:"pending"}` (asking) and a separate, later
+  `relay-retry{consent:"granted"}` or `relay-denied{reason}` (deciding) —
+  a side never looks "agreed" until it actually has agreed. Both this test
+  and the 8 new **consent split** tests (see "Two-phase consent" above)
+  now assert one exact, deterministic outcome instead of a shared shape
+  across possible races, and hold the browser's dialog open
+  (`registerHeldDialog`) until the CLI's own denial is confirmed sent —
+  removing the race from the test's own sequencing too, not just from the
+  product.
 - **A `testturnd -allocation-lifetime 8s` fix for the CLI↔CLI allocation
   leak (below) was tried, worked for its target, and was reverted after
   it broke every Firefox pairing.** With the short lifetime wired into
@@ -2068,10 +2155,9 @@ linux-amd64` explicitly. Confirmed passing against real production
 (`v0.6.2`, this Mac): resolved bundle `main-ZTSKTWN6.js` from the release's
 server archive (matching what sp2p.io actually served), CLI installed and
 identity-checked, deploy confirmed in 2 polls, `cli-to-chromium` passed on
-a retried attempt (attempt 1 hit the pre-existing "6-7/8 lanes on a
-multi-homed host" rough edge from the [Engines](#engines-firefox-and-webkit)
-section above — the retry-once design working as intended, not a bug in
-this script), `chromium-to-chromium` passed on the first attempt, overall
+a retried attempt (attempt 1 hit the multi-homed-host lane shortfall
+described in the [Engines](#engines-firefox-and-webkit) section above, since
+fixed; the retry-once design worked as intended), `chromium-to-chromium` passed on the first attempt, overall
 `PASS`. A full run's output, redaction-scanned afterward for the transfer-code
 and URL-fragment patterns above, contained zero matches; under
 `GITHUB_ACTIONS=true` it emitted exactly the expected `::add-mask::` lines

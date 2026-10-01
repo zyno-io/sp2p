@@ -14,6 +14,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1307,6 +1308,114 @@ func setupPeers(t *testing.T, wsURL string) (sender, receiver *websocket.Conn) {
 	wsRead(t, receiver) // consume receiver welcome
 	wsRead(t, sender)   // consume peer-joined
 	return sender, receiver
+}
+
+// TestSignal_RelayConsentPayloadsPassThroughUnchanged guards the compatibility
+// assumption the relay-consent design depends on: the server relays
+// relay-retry/relay-denied payload bytes verbatim (it never inspects or
+// rewrites the new "consent"/"reason" fields), and a second relay-retry
+// still gets the same cached TURN credentials as the first.
+func TestSignal_RelayConsentPayloadsPassThroughUnchanged(t *testing.T) {
+	wantURLs := []string{"turn:relay.example.com:3478"}
+	// Ephemeral (TURNGen), not StaticTURN: a static credential is the same
+	// object on every issuance regardless of whether turnOnce's per-session
+	// caching actually runs, so it can't tell a working cache from a
+	// broken one. An ephemeral credential embeds a fresh expiry timestamp
+	// on every real Generate call, so "the second relay-retry returns the
+	// SAME credentials" below only holds if turnOnce actually suppressed a
+	// second Generate call — but that alone isn't reliable either: Generate's
+	// output is only as distinguishable as its one-second (Unix timestamp)
+	// resolution, and this test's whole exchange can complete within the
+	// same wall-clock second, so two real Generate calls could still
+	// produce byte-identical output. generateCalls (via onGenerate) counts
+	// real Generate calls directly, independent of that timing coincidence.
+	var generateCalls atomic.Int32
+	turnGen := &TURNCredentialGenerator{
+		URLs:       wantURLs,
+		Secret:     "consent-passthrough-secret",
+		TTL:        5 * time.Minute,
+		onGenerate: func() { generateCalls.Add(1) },
+	}
+	_, wsURL := startTestServerWithConfig(t, Config{
+		Addr:    ":0",
+		BaseURL: "http://localhost",
+		TURNGen: turnGen,
+	})
+	sender, receiver := setupPeers(t, wsURL)
+
+	// relay-retry{"consent":"pending"} arrives at the peer byte-for-byte,
+	// and the server still issues TURN credentials to the sender.
+	wsSend(t, sender, signal.TypeRelayRetry, signal.RelayRetry{Consent: signal.RelayConsentPending})
+	creds := wsReadSlow(t, sender)
+	if creds.Type != signal.TypeTURNCredentials {
+		t.Fatalf("expected turn-credentials, got %s", creds.Type)
+	}
+	var firstCreds signal.TURNCredentials
+	if err := creds.ParsePayload(&firstCreds); err != nil {
+		t.Fatal(err)
+	}
+
+	relayed := wsReadSlow(t, receiver)
+	if relayed.Type != signal.TypeRelayRetry {
+		t.Fatalf("expected relay-retry, got %s", relayed.Type)
+	}
+	var relayedRR signal.RelayRetry
+	if err := relayed.ParsePayload(&relayedRR); err != nil {
+		t.Fatal(err)
+	}
+	if relayedRR.Consent != signal.RelayConsentPending {
+		t.Fatalf("relayed consent = %q, want pending (payload must pass through unchanged)", relayedRR.Consent)
+	}
+
+	// relay-denied{"reason":"unavailable"} also passes through unchanged.
+	wsSend(t, receiver, signal.TypeRelayDenied, signal.RelayDenied{Reason: signal.RelayDeniedUnavailable})
+	deniedEnv := wsReadSlow(t, sender)
+	if deniedEnv.Type != signal.TypeRelayDenied {
+		t.Fatalf("expected relay-denied, got %s", deniedEnv.Type)
+	}
+	var rd signal.RelayDenied
+	if err := deniedEnv.ParsePayload(&rd); err != nil {
+		t.Fatal(err)
+	}
+	if rd.Reason != signal.RelayDeniedUnavailable {
+		t.Fatalf("relayed reason = %q, want unavailable", rd.Reason)
+	}
+
+	// A second relay-retry (now consent=granted) returns the SAME cached
+	// credentials — clients ignore the extra copy, and no fresh TURN
+	// allocation happens on the repeat.
+	wsSend(t, sender, signal.TypeRelayRetry, signal.RelayRetry{Consent: signal.RelayConsentGranted})
+	repeatedCreds := wsReadSlow(t, sender)
+	if repeatedCreds.Type != signal.TypeTURNCredentials {
+		t.Fatalf("expected turn-credentials, got %s", repeatedCreds.Type)
+	}
+	var secondCreds signal.TURNCredentials
+	if err := repeatedCreds.ParsePayload(&secondCreds); err != nil {
+		t.Fatal(err)
+	}
+	if len(firstCreds.ICEServers) != 1 || len(secondCreds.ICEServers) != 1 ||
+		firstCreds.ICEServers[0].Username != secondCreds.ICEServers[0].Username ||
+		firstCreds.ICEServers[0].Credential != secondCreds.ICEServers[0].Credential {
+		t.Fatalf("credentials changed on repeat: first=%+v second=%+v", firstCreds, secondCreds)
+	}
+	repeatedRelay := wsReadSlow(t, receiver)
+	if repeatedRelay.Type != signal.TypeRelayRetry {
+		t.Fatalf("expected relay-retry, got %s", repeatedRelay.Type)
+	}
+	var repeatedRR signal.RelayRetry
+	if err := repeatedRelay.ParsePayload(&repeatedRR); err != nil {
+		t.Fatal(err)
+	}
+	if repeatedRR.Consent != signal.RelayConsentGranted {
+		t.Fatalf("relayed consent = %q, want granted", repeatedRR.Consent)
+	}
+
+	// The real assertion that the credential-equality check above can't
+	// make on its own: Generate itself was only ever called once. Without
+	// turnOnce, the second relay-retry above would call it again.
+	if calls := generateCalls.Load(); calls != 1 {
+		t.Fatalf("Generate called %d times, want exactly 1 (turnOnce should have cached the first issuance)", calls)
+	}
 }
 
 func TestSignal_RelayRetryDeliversStaticTURN(t *testing.T) {

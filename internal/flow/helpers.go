@@ -4,8 +4,10 @@ package flow
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 	"mime"
 	"os"
 	"path/filepath"
@@ -60,142 +62,109 @@ func iceServersToConn(servers []signal.ICEServer) ([]string, []conn.TURNServer) 
 }
 
 // retryWithRelay attempts to establish a connection using TURN relay servers
-// after direct methods have failed. It checks for user consent, coordinates
-// the relay retry with the peer via signaling, receives TURN credentials
-// from the server, and retries the connection.
-// peerWantsRelay is closed if the peer already signaled relay-retry (consumed from relayCh).
-func retryWithRelay(ctx context.Context, sigClient *signal.Client, relayCh chan *signal.Envelope, deniedCh chan *signal.Envelope, peerLeftCh chan *signal.Envelope, peerWantsRelay <-chan struct{}, relayOK bool, h Handler, cfg conn.ConnectConfig) (*conn.EstablishResult, error) {
+// after direct methods have failed. It is a thin wrapper around
+// conn.RetryWithRelay: it builds a RelayOptions from h, then maps the
+// returned error to the right user-facing text via reportRelayWatchErr.
+func retryWithRelay(ctx context.Context, sigClient *signal.Client, w *conn.RelayWatch, relayOK bool, h Handler, cfg conn.ConnectConfig, peerRole string) (*conn.EstablishResult, error) {
 	h.OnVerbose("direct connection failed, attempting TURN relay fallback")
 
-	// Subscribe to server-delivered TURN credentials.
-	// relayCh is pre-subscribed by the caller to avoid losing messages
-	// consumed by processSignaling during connection attempts.
-	turnCh := sigClient.Subscribe(signal.TypeTURNCredentials)
-	defer sigClient.Unsubscribe(signal.TypeTURNCredentials, turnCh)
+	result, err := conn.RetryWithRelay(ctx, sigClient, w, cfg, conn.RelayOptions{
+		RelayOK: relayOK,
+		Prompt:  buildRelayPrompt(h),
+		OnLog:   h.OnVerbose,
+		OnReset: h.OnConnectionMethodsReset,
+	})
+	if err != nil {
+		return nil, reportRelayWatchErr(h, err, peerRole)
+	}
+	return result, nil
+}
 
-	// Signal relay-retry BEFORE prompting the user so the peer learns
-	// immediately and can show their own relay prompt in parallel,
-	// rather than waiting for our user to decide first.
-	h.OnVerbose("requesting TURN relay credentials from server")
-	if err := sigClient.Send(ctx, signal.TypeRelayRetry, struct{}{}); err != nil {
-		return nil, fmt.Errorf("sending relay retry signal: %w", err)
+// closeEstablishResult releases a partially- or fully-established
+// connection attempt's resources. Safe to call with a nil result.
+func closeEstablishResult(estResult *conn.EstablishResult) {
+	if estResult == nil {
+		return
+	}
+	estResult.Conn.Close()
+	if estResult.TCPResult != nil && estResult.TCPResult.Cleanup != nil {
+		estResult.TCPResult.Cleanup()
+	}
+}
+
+// reportRelayWatchErr maps a relay-consent error — from conn.RetryWithRelay,
+// or from a RelayWatch's own Err() when attempt 1 was cut short before ever
+// reaching relay retry (e.g. the peer already declined, or signaling was
+// lost, while attempt 1 was still running) — to the right user-facing text
+// naming the peer's role, reports it via h.OnError, and returns err
+// unchanged so callers can keep propagating it.
+//
+// It never calls h.OnError for a context cancellation — that's the
+// caller's (or the user's Ctrl+C's) business, not a relay-consent outcome.
+// A nil err passes through unchanged.
+func reportRelayWatchErr(h Handler, err error, peerRole string) error {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return err
 	}
 
-	// Wait for TURN credentials from the server.
-	select {
-	case env := <-turnCh:
-		if env == nil {
-			return nil, fmt.Errorf("connection lost waiting for TURN credentials")
+	var declined *conn.PeerDeclinedRelayError
+	var relayUnusable *conn.PeerRelayUnusableError
+	switch {
+	case errors.As(err, &declined):
+		if declined.Reason == signal.RelayDeniedUnavailable {
+			h.OnError(fmt.Sprintf("Direct connection failed and the %s could not be asked to allow the relay. They can rerun sp2p with -allow-relay.", peerRole))
+		} else {
+			h.OnError(fmt.Sprintf("Direct connection failed and the %s declined the relay.", peerRole))
 		}
-		var tc signal.TURNCredentials
-		if err := env.ParsePayload(&tc); err != nil {
-			return nil, fmt.Errorf("invalid TURN credentials: %w", err)
+	case errors.As(err, &relayUnusable):
+		if relayUnusable.TCPOnly {
+			h.OnError(fmt.Sprintf("Direct connection failed. The %s asked to retry via relay, but this side is running -transport tcp and cannot use one.", peerRole))
+		} else {
+			h.OnError(fmt.Sprintf("Direct connection failed. The %s asked to retry via relay, but no relay is available on this side.", peerRole))
 		}
-		if len(tc.ICEServers) == 0 {
-			return nil, fmt.Errorf("server returned empty TURN credentials")
-		}
-		h.OnVerbose(fmt.Sprintf("received %d TURN servers from signaling server", len(tc.ICEServers)))
-		for _, s := range tc.ICEServers {
-			cfg.TURNServers = append(cfg.TURNServers, conn.TURNServer{
-				URLs:       s.URLs,
-				Username:   s.Username,
-				Credential: s.Credential,
-			})
-		}
-	case <-time.After(30 * time.Second):
+	case errors.Is(err, conn.ErrPeerLeft):
+		h.OnError("Peer disconnected")
+	case errors.Is(err, conn.ErrPeerRelayTimeout):
+		h.OnError(fmt.Sprintf("Timed out waiting for the %s to allow the relay.", peerRole))
+	case errors.Is(err, conn.ErrSignalingLost):
+		h.OnError("Signaling server disconnected")
+	case errors.Is(err, conn.ErrTURNCredentialsTimeout):
 		h.OnError("Server did not provide TURN credentials")
-		return nil, fmt.Errorf("timeout waiting for TURN credentials")
-	case <-peerLeftCh:
-		h.OnError("Peer disconnected")
-		return nil, fmt.Errorf("peer disconnected")
-	case <-sigClient.Done():
-		h.OnError("Signaling server disconnected")
-		return nil, fmt.Errorf("signaling connection lost")
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case errors.Is(err, conn.ErrRelayNotAllowed):
+		h.OnError("Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay.")
 	}
+	return err
+}
 
-	// Now prompt the user for consent (peer is already being notified). A
-	// machine handler can cancel its prompt if the peer has already declined;
-	// otherwise an unattended response-file prompt could wait indefinitely.
-	if !relayOK {
-		if contextualPrompt, ok := h.(RelayPromptHandler); ok {
-			promptCtx, cancelPrompt := context.WithCancel(ctx)
-			promptResult := make(chan bool, 1)
-			go func() {
-				promptResult <- contextualPrompt.PromptRelayContext(promptCtx)
-			}()
-			waitForPrompt := func() {
-				cancelPrompt()
-				// A RelayPromptHandler promises to honor cancellation. Waiting for
-				// it keeps any final relay-prompt event ahead of this flow's
-				// terminal result in the machine event stream.
-				<-promptResult
-			}
-
-			select {
-			case allowed := <-promptResult:
-				cancelPrompt()
-				if !allowed {
-					if ctx.Err() != nil {
-						return nil, ctx.Err()
-					}
-					h.OnVerbose("relay denied: user declined")
-					sigClient.Send(ctx, signal.TypeRelayDenied, struct{}{})
-					h.OnError("Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay.")
-					return nil, fmt.Errorf("direct connection failed and relay not allowed")
-				}
-			case <-deniedCh:
-				waitForPrompt()
-				h.OnError("Peer denied relay connection")
-				return nil, fmt.Errorf("peer denied relay")
-			case <-peerLeftCh:
-				waitForPrompt()
-				h.OnError("Peer disconnected")
-				return nil, fmt.Errorf("peer disconnected")
-			case <-sigClient.Done():
-				waitForPrompt()
-				h.OnError("Signaling server disconnected")
-				return nil, fmt.Errorf("signaling connection lost")
-			case <-ctx.Done():
-				waitForPrompt()
-				return nil, ctx.Err()
-			}
-		} else if !h.PromptRelay() {
-			h.OnVerbose("relay denied: user declined or no TTY available")
-			sigClient.Send(ctx, signal.TypeRelayDenied, struct{}{})
-			h.OnError("Could not establish direct connection. Use -allow-relay to route encrypted data through a TURN relay.")
-			return nil, fmt.Errorf("direct connection failed and relay not allowed")
+// buildRelayPrompt adapts h's relay prompt to conn.RelayOptions.Prompt,
+// preferring the cancellable, richer RelayPromptHandler when h implements
+// it and falling back to the plain Handler.PromptRelay otherwise.
+func buildRelayPrompt(h Handler) func(context.Context) conn.RelayAnswer {
+	if rph, ok := h.(RelayPromptHandler); ok {
+		return rph.PromptRelayAnswer
+	}
+	return func(context.Context) conn.RelayAnswer {
+		if h.PromptRelay() {
+			return conn.RelayAllow
 		}
+		return conn.RelayDeny
 	}
+}
 
-	// Wait for peer to agree to relay retry.
-	// peerWantsRelay is already closed if the peer's relay-retry signal
-	// arrived during conn.Establish and cancelled our attempt early.
-	select {
-	case <-peerWantsRelay:
-		h.OnVerbose("peer already requested relay retry")
-	case <-relayCh:
-		h.OnVerbose("peer agreed to relay retry")
-	case <-deniedCh:
-		h.OnError("Peer denied relay connection")
-		return nil, fmt.Errorf("peer denied relay")
-	case <-peerLeftCh:
-		h.OnError("Peer disconnected")
-		return nil, fmt.Errorf("peer disconnected")
-	case <-sigClient.Done():
-		h.OnError("Signaling server disconnected")
-		return nil, fmt.Errorf("signaling connection lost")
-	case <-time.After(30 * time.Second):
-		h.OnError("Peer did not agree to relay retry")
-		return nil, fmt.Errorf("peer did not agree to relay retry")
-	case <-ctx.Done():
-		return nil, ctx.Err()
+// reportParallelLanes calls h's optional ParallelLaneReporter whenever any
+// lane the peer accepted was not selected — including when report is nil
+// (negotiation never produced one, e.g. it failed before reaching "ready").
+// A nil report or a report with no gap is not reported.
+func reportParallelLanes(h Handler, report *ParallelLaneReport) {
+	reporter, ok := h.(ParallelLaneReporter)
+	if !ok || report == nil {
+		return
 	}
-
-	time.Sleep(500 * time.Millisecond)
-	h.OnConnectionMethodsReset()
-	return conn.Establish(ctx, cfg)
+	accepted := report.Accepted - 1 // extra lanes only; id 0 is the primary
+	selectedCount := bits.OnesCount32(report.Selected)
+	if selectedCount < accepted {
+		reporter.OnParallelLaneReport(report)
+	}
 }
 
 // safeRename moves a temp file to a destination, avoiding overwrites.

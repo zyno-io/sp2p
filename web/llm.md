@@ -239,6 +239,7 @@ Rsync and tunnel help follows the same machine-output boundary. With `--format j
 | `progress` | `bytes_transferred` and `total_bytes` | Cumulative `bytes_sent` and `bytes_received`, at most once per second |
 | `subprocess_output` | Not used | Rsync JSON mode only; client stdout/stderr and daemon stderr, with `output_stream` set to `stdout` or `stderr` and exact bytes base64-encoded in `output_data` |
 | `connection`, `connection_reset`, `protocol`, `verification` | Connection and authentication state | Connection and authenticated v3 state |
+| `parallel_streams`, `parallel_lanes` | Diagnostic only, file transfer over parallel TCP/WebRTC. `parallel_streams` reports the negotiated connection count. `parallel_lanes` is emitted after a parallel-WebRTC negotiation whenever any lane the peer accepted was not selected: its `failures[]` names each lost lane's `stage`, a fixed `class` (`timeout`, `eof`, `closed`, `mismatch`, or `error`), and an address-free `trace` — never a raw address, SDP, or the underlying Go/Pion error text | Not used |
 | `relay_required`, `relay_response`, `relay_response_invalid`, `relay_prompt_canceled` | Relay decision lifecycle | Same response-file contract |
 | `error` | Nonterminal diagnostic; continue reading | Nonterminal diagnostic when emitted; setup and subprocess failures are always present in terminal `result.error` |
 | `result` | Exactly one terminal outcome and optional `saved_path` | Exactly one terminal outcome plus final `bytes_sent` and `bytes_received` |
@@ -284,6 +285,8 @@ printf 'allow\n' > /tmp/sp2p-relay-response-example
 ```
 
 SP2P emits `relay_response` and removes the file. If the peer or signaling connection ends first, it emits `relay_prompt_canceled` and removes the file; never reuse the path. Relay traffic remains end-to-end encrypted, but the relay observes connection metadata. Use `--allow-relay` only when policy authorizes relay without a per-session decision. Unattended human mode cannot use the response-file mechanism and should fail unless `--allow-relay` is already authorized.
+
+Answering `deny` tells the peer, not just this side: it sends a `relay-denied` signal so the peer's own attempt stops promptly with a clear "peer declined" error instead of a timeout. If the *peer* declines (or cannot be asked) first, this side's own `relay_required` prompt is skipped entirely and the `result` event reports `error.code: "peer_relay_denied"` — do not write to a response file that never arrives; a missing `relay_required` event within the expected window means the peer already decided.
 
 ## Agent handoff prompts
 

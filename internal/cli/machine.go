@@ -191,6 +191,7 @@ type machineEvent struct {
 	TotalBytes       *uint64            `json:"total_bytes,omitempty"`
 	DurationMS       *int64             `json:"duration_ms,omitempty"`
 	ParallelStreams  int                `json:"parallel_streams,omitempty"`
+	ParallelLanes    *machineLaneReport `json:"parallel_lanes,omitempty"`
 	Message          string             `json:"message,omitempty"`
 	Error            *machineError      `json:"error,omitempty"`
 	Outcome          string             `json:"outcome,omitempty"`
@@ -204,6 +205,27 @@ type machineConnection struct {
 	Method string `json:"method"`
 	State  string `json:"state"`
 	Detail string `json:"detail,omitempty"`
+}
+
+// machineLaneReport mirrors flow.ParallelLaneReport for the "parallel_lanes"
+// JSON event. It carries no IPs, ports, ICE ufrags/pwds, or SDP — see
+// flow.ParallelLaneReport and conn.LaneTraceEvent.
+type machineLaneReport struct {
+	Requested int                  `json:"requested"`
+	Accepted  int                  `json:"accepted"`
+	Ours      uint32               `json:"ours"`
+	Theirs    uint32               `json:"theirs"`
+	Selected  uint32               `json:"selected"`
+	SetupMS   int64                `json:"setup_ms"`
+	Failures  []machineLaneFailure `json:"failures,omitempty"`
+}
+
+type machineLaneFailure struct {
+	ID    int                   `json:"id"`
+	Stage string                `json:"stage"`
+	Class string                `json:"class"`
+	Trace []conn.LaneTraceEvent `json:"trace,omitempty"`
+	Pair  string                `json:"pair,omitempty"`
 }
 
 type machineError struct {
@@ -378,6 +400,30 @@ func (r *machineReporter) OnParallelStreams(count int) {
 	r.mu.Unlock()
 }
 
+// OnParallelLaneReport implements flow.ParallelLaneReporter. This is its own
+// "parallel_lanes" event, not a "log" event, so CI diagnostics that skip
+// verbose log lines (see web/tests/helpers.ts) still see it.
+func (r *machineReporter) OnParallelLaneReport(report *flow.ParallelLaneReport) {
+	if report == nil {
+		return
+	}
+	failures := make([]machineLaneFailure, len(report.Failures))
+	for i, f := range report.Failures {
+		failures[i] = machineLaneFailure{ID: f.ID, Stage: f.Stage, Class: string(f.Class), Trace: f.Trace, Pair: f.Pair}
+	}
+	r.mu.Lock()
+	r.emitLocked(machineEvent{Event: "parallel_lanes", ParallelLanes: &machineLaneReport{
+		Requested: report.Requested,
+		Accepted:  report.Accepted,
+		Ours:      report.Ours,
+		Theirs:    report.Theirs,
+		Selected:  report.Selected,
+		SetupMS:   report.SetupMS,
+		Failures:  failures,
+	}})
+	r.mu.Unlock()
+}
+
 func (r *machineReporter) OnVerbose(message string) {
 	if !r.verbose {
 		return
@@ -406,32 +452,33 @@ func (r *machineReporter) OnWarning(message string) {
 // creates the response file itself so an agent cannot accidentally approve a
 // later transfer with a stale file. The file is removed after a response.
 func (r *machineReporter) PromptRelay() bool {
-	return r.promptRelay(r.ctx)
+	return r.promptRelay(r.ctx) == conn.RelayAllow
 }
 
-// PromptRelayContext lets flow stop a machine relay prompt when the peer has
-// already declined or disconnected.
-func (r *machineReporter) PromptRelayContext(ctx context.Context) bool {
+// PromptRelayAnswer lets flow stop a machine relay prompt when the peer has
+// already declined or disconnected, and reports "could not be asked"
+// (response-file errors) distinctly from an explicit deny.
+func (r *machineReporter) PromptRelayAnswer(ctx context.Context) conn.RelayAnswer {
 	return r.promptRelay(ctx)
 }
 
-func (r *machineReporter) promptRelay(ctx context.Context) bool {
+func (r *machineReporter) promptRelay(ctx context.Context) conn.RelayAnswer {
 	responseFile, err := os.CreateTemp("", "sp2p-relay-response-")
 	if err != nil {
 		r.OnError("Could not create relay response file")
-		return false
+		return conn.RelayUnavailable
 	}
 	path := responseFile.Name()
 	if err := responseFile.Chmod(0o600); err != nil {
 		responseFile.Close()
 		os.Remove(path)
 		r.OnError("Could not secure relay response file")
-		return false
+		return conn.RelayUnavailable
 	}
 	if err := responseFile.Close(); err != nil {
 		os.Remove(path)
 		r.OnError("Could not prepare relay response file")
-		return false
+		return conn.RelayUnavailable
 	}
 	defer os.Remove(path)
 
@@ -455,7 +502,7 @@ func (r *machineReporter) promptRelay(ctx context.Context) bool {
 			r.snapshot.RelayRequired = false
 			r.mu.Unlock()
 			r.OnError("Could not read relay response file")
-			return false
+			return conn.RelayUnavailable
 		}
 		response := strings.ToLower(strings.TrimSpace(string(data)))
 		switch response {
@@ -465,7 +512,10 @@ func (r *machineReporter) promptRelay(ctx context.Context) bool {
 			r.snapshot.RelayRequired = false
 			r.emitLocked(machineEvent{Event: "relay_response", Response: response})
 			r.mu.Unlock()
-			return response == "allow"
+			if response == "allow" {
+				return conn.RelayAllow
+			}
+			return conn.RelayDeny
 		case "":
 			// Still waiting for the agent.
 		default:
@@ -490,7 +540,7 @@ func (r *machineReporter) promptRelay(ctx context.Context) bool {
 			r.snapshot.RelayRequired = false
 			r.emitLocked(machineEvent{Event: "relay_prompt_canceled"})
 			r.mu.Unlock()
-			return false
+			return conn.RelayUnavailable
 		case <-ticker.C:
 		}
 	}
@@ -520,6 +570,16 @@ func (r *machineReporter) finish(err error, savedPath string) {
 		errorCode := "operation_failed"
 		if errors.Is(err, context.Canceled) {
 			errorCode = "canceled"
+		} else if errors.Is(err, conn.ErrPeerDeclinedRelay) {
+			errorCode = "peer_relay_denied"
+		} else if errors.Is(err, conn.ErrPeerRelayUnusable) {
+			// The peer gave up on its own direct attempt and asked to retry
+			// via relay, but this side has no relay to offer (see
+			// conn.PeerRelayUnusableError) — same code as the local
+			// could-not-participate case below, since both mean "relay
+			// didn't happen on this side for operational reasons, not an
+			// explicit decline".
+			errorCode = "relay_not_allowed"
 		} else if r.relayResponse == "deny" {
 			errorCode = "relay_denied"
 		} else if r.snapshot.RelayRequired {

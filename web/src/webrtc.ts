@@ -3,7 +3,7 @@
 // WebRTC connection establishment for the web UI.
 
 import { log } from "./log";
-import { SignalClient } from "./signal";
+import { SignalClient, Envelope } from "./signal";
 
 // An inactive video transceiver sends and receives no media, but Chrome then
 // requests 1 MiB receive / 256 KiB send UDP socket buffers for the bundled
@@ -71,22 +71,33 @@ export function splitIceServers(
 
 // Establish a WebRTC connection using the signaling client.
 // Only the provided rtcIceServers are used (caller controls STUN vs TURN inclusion).
+// abort, if given, rejects the attempt the instant it fires (used for a relay
+// retry's attempt 2, so a peer decline/leave/signaling-loss during it is
+// reported immediately instead of waiting out timeoutMs) — see
+// relay-consent.ts's RelayConsentWatch.exit.
 export function establishWebRTC(
   sigClient: SignalClient,
   isSender: boolean,
   onStatus?: (method: string, state: string, detail?: string) => void,
   iceServers?: ICEServerConfig[],
   timeoutMs = 15000,
-  rtcIceServersOverride?: RTCIceServer[]
+  rtcIceServersOverride?: RTCIceServer[],
+  abort?: AbortSignal
 ): Promise<WebRTCResult> {
   return new Promise((resolve, reject) => {
     onStatus?.("WebRTC", "trying", "ICE gathering...");
 
-    // Clean up handlers from any previous attempt to prevent cross-attempt interference.
-    const handlerTypes = ["candidate", "answer", "offer", "error", "peer-left"];
-    for (const t of handlerTypes) {
-      sigClient.off(t);
-    }
+    // Track exactly the handlers THIS attempt registers, so cleanup removes
+    // only its own — never another attempt's, and never a longer-lived
+    // listener another part of the app owns (e.g. relay-consent.ts's
+    // RelayConsentWatch, which must keep seeing peer-left/relay-denied
+    // across attempts).
+    const ownHandlers: { type: string; fn: (env: Envelope) => void }[] = [];
+    const on = (type: string, fn: (env: Envelope) => void) => {
+      sigClient.on(type, fn);
+      ownHandlers.push({ type, fn });
+    };
+
     // A sender can't have a current answer or candidate before sending its
     // offer, so anything held is from an earlier attempt.
     if (isSender) sigClient.discardHeld(["answer", "candidate"]);
@@ -139,9 +150,10 @@ export function establishWebRTC(
       settled = true;
       clearTimeout(timer);
       finishGathering?.();
-      for (const t of handlerTypes) {
-        sigClient.off(t);
+      for (const { type, fn } of ownHandlers) {
+        sigClient.removeHandler(type, fn);
       }
+      abort?.removeEventListener("abort", onAbort);
     }
 
     function resolveClean(result: WebRTCResult) {
@@ -158,12 +170,23 @@ export function establishWebRTC(
 
     // Register error/peer-left handlers immediately so there's no gap
     // where these events could be missed.
-    sigClient.on("error", (env) => {
+    on("error", (env) => {
       rejectClean(new Error(env.payload?.message || "Signaling error"));
     });
-    sigClient.on("peer-left", () => {
+    on("peer-left", () => {
       rejectClean(new Error("Peer disconnected"));
     });
+
+    function onAbort() {
+      rejectClean(new Error("Relay attempt aborted"));
+    }
+    if (abort) {
+      if (abort.aborted) {
+        rejectClean(new Error("Relay attempt aborted"));
+        return;
+      }
+      abort.addEventListener("abort", onAbort);
+    }
 
     pc.onconnectionstatechange = () => {
       log(`WebRTC: connection state → ${pc.connectionState}`);
@@ -192,7 +215,7 @@ export function establishWebRTC(
     };
 
     // Handle incoming ICE candidates.
-    sigClient.on("candidate", (env) => {
+    on("candidate", (env) => {
       const c = env.payload;
       log("WebRTC: received remote ICE candidate");
       pc.addIceCandidate(
@@ -234,7 +257,7 @@ export function establishWebRTC(
         .catch(rejectClean);
 
       // Wait for answer.
-      sigClient.on("answer", (env) => {
+      on("answer", (env) => {
         stage("Applying receiver's answer");
         pc.setRemoteDescription(
           new RTCSessionDescription({
@@ -258,7 +281,7 @@ export function establishWebRTC(
       };
 
       // Wait for offer.
-      sigClient.on("offer", async (env) => {
+      on("offer", async (env) => {
         stage("Applying sender's offer");
         try {
           await pc.setRemoteDescription(

@@ -1,0 +1,46 @@
+name: Lanes Stress
+
+# Manual-only stress job for the CLI<->Chromium parallel-WebRTC lane setup
+# (internal/flow/webrtc_parallel.go, web/src/webrtc-parallel.ts): repeats the
+# CLI<->browser parallel-lane tests in tests/parallel-interop.spec.ts many
+# times, plus once under CPU contention, to chase any lane shortfall. Never
+# runs on push/pull_request and is not part of any release gate. If a lane
+# ever drops, verbose (-v) CLI output and the browser console carry the new
+# parallel_lanes diagnostics (stage/class/trace, never addresses) — see
+# docs/parallel-webrtc.md and docs/testing.md.
+on:
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: Repetitions per test (--repeat-each)
+        type: string
+        default: "50"
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 25
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: cd web && npm ci
+      - run: cd web && npx playwright install --with-deps chromium
+      - name: CLI<->Chromium parallel WebRTC lanes, repeated
+        run: cd web && npx playwright test --project=chromium tests/parallel-interop.spec.ts -g "CLI" --repeat-each="${{ inputs.repeat }}"
+      - name: CLI<->Chromium parallel WebRTC lanes, repeated under CPU contention
+        run: |
+          for _ in $(seq "$(nproc)"); do
+            (while :; do :; done) &
+          done
+          trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
+          cd web && npx playwright test --project=chromium tests/parallel-interop.spec.ts -g "CLI" --repeat-each="${{ inputs.repeat }}"

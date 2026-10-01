@@ -52,6 +52,16 @@ If no direct connection can be made, an encrypted TURN relay is offered
 (after confirmation, unless
 .B \-allow\-relay
 is given).
+Relay requires consent from
+.I both
+sides: if the other side declines, or cannot be asked, this side is told so
+directly instead of timing out.
+Between two current versions, neither side ever attempts (or allocates) a
+relay connection until both have consented.
+Against a peer on v0.6.2 or earlier, which always agrees immediately,
+this side's own consent alone can start a relay attempt before that
+peer's real decision arrives; a later decline from that peer still
+aborts it promptly.
 .PP
 There are three kinds of session:
 .IP \(bu 2
@@ -552,6 +562,24 @@ and
 .B bytes_received
 for streams.
 .PP
+File transfers over parallel WebRTC also emit a
+.B parallel_lanes
+event whenever a negotiation accepted more independent connections than it
+ended up selecting.
+Its
+.B failures
+array names each lost lane's setup
+.BR stage ,
+a fixed
+.B class
+.RB ( timeout ", " eof ", " closed ", " mismatch ", or " error ),
+and an address-free
+.BR trace ;
+it never contains an IP address, port, ICE credential, SDP, or the
+underlying Go/Pion error text.
+This event is emitted regardless of
+.BR \-v .
+.PP
 An
 .B error
 event is diagnostic, not terminal.
@@ -575,6 +603,19 @@ Write
 or
 .B deny
 to that file to answer the prompt; SP2P removes it after reading.
+Answering
+.B deny
+also tells the peer, so its own attempt fails promptly with a clear
+message instead of timing out.
+If the peer declines (or cannot be asked) first, this side's own
+.B relay_required
+prompt may never appear at all, and the terminal
+.B result
+event reports error code
+.BR peer_relay_denied .
+A prompt already open when the peer declines is canceled: a
+.B relay_prompt_canceled
+event is emitted and the response file is removed.
 .PP
 In human rsync client modes, the child's stdin, stdout, and stderr are attached
 normally and SP2P preserves its numeric exit status.

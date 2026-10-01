@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/zyno-io/sp2p/internal/conn"
 	"github.com/zyno-io/sp2p/internal/crypto"
 	"github.com/zyno-io/sp2p/internal/flow"
 	"github.com/zyno-io/sp2p/internal/transfer"
@@ -63,6 +65,58 @@ func TestLegacyProtocolNoticeIsMachineReadableWithoutVerbose(t *testing.T) {
 		t.Fatal("agent prompt requires manual compatibility")
 	}
 }
+
+// TestMachineReporterEmitsParallelLanesEvent checks that OnParallelLaneReport
+// emits its own "parallel_lanes" event (not "log", so CI diagnostics that
+// skip log lines still see it — see web/tests/helpers.ts) with the report's
+// fields intact, and that the encoded event never contains an IP-like
+// string, matching flow.ParallelLaneReport's address-free guarantee.
+func TestMachineReporterEmitsParallelLanesEvent(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{Format: OutputJSON, EventWriter: &output}, "send", false)
+	report := &flow.ParallelLaneReport{
+		Requested: 8, Accepted: 8, Ours: 0b11111100, Theirs: 0b01111100, Selected: 0b01111100, SetupMS: 1234,
+		Failures: []flow.LaneFailure{{
+			ID: 7, Stage: "connect-timeout", Class: flow.ClassTimeout,
+			Trace: []conn.LaneTraceEvent{{MS: 5, Event: "conn=connecting"}, {MS: 5000, Event: "close=peer_connection_failed"}},
+			Pair:  "host/prflx",
+		}},
+	}
+	reporter.OnParallelLaneReport(report)
+
+	raw := output.String()
+	var event machineEvent
+	if err := json.Unmarshal([]byte(raw), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Event != "parallel_lanes" {
+		t.Fatalf("event = %q, want parallel_lanes", event.Event)
+	}
+	got := event.ParallelLanes
+	if got == nil {
+		t.Fatal("missing parallel_lanes payload")
+	}
+	if got.Requested != 8 || got.Accepted != 8 || got.Selected != 0b01111100 || got.SetupMS != 1234 {
+		t.Fatalf("parallel_lanes payload = %+v", got)
+	}
+	if len(got.Failures) != 1 || got.Failures[0].Stage != "connect-timeout" || got.Failures[0].Class != "timeout" || got.Failures[0].Pair != "host/prflx" {
+		t.Fatalf("failures = %+v", got.Failures)
+	}
+	if ipLikeEventPattern.MatchString(raw) {
+		t.Fatalf("parallel_lanes event contains an IP-like string: %s", raw)
+	}
+}
+
+func TestMachineReporterParallelLanesEventOmittedForNilReport(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{Format: OutputJSON, EventWriter: &output}, "send", false)
+	reporter.OnParallelLaneReport(nil)
+	if output.String() != "" {
+		t.Fatalf("expected no event for a nil report, got %q", output.String())
+	}
+}
+
+var ipLikeEventPattern = regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
 
 func (b *lockedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
@@ -225,18 +279,18 @@ func TestMachineReporterCancelsRelayPrompt(t *testing.T) {
 		EventWriter: &output,
 	}, "receive", false)
 
-	response := make(chan bool, 1)
+	response := make(chan conn.RelayAnswer, 1)
 	go func() {
-		response <- reporter.PromptRelayContext(parent)
+		response <- reporter.PromptRelayAnswer(parent)
 	}()
 
 	responseFile := waitForRelayResponseFile(t, &output)
 	cancel()
 
 	select {
-	case allowed := <-response:
-		if allowed {
-			t.Fatal("canceled relay prompt was allowed")
+	case answer := <-response:
+		if answer != conn.RelayUnavailable {
+			t.Fatalf("canceled relay prompt answer = %v, want RelayUnavailable", answer)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out canceling relay prompt")
@@ -276,6 +330,133 @@ func TestMachineReporterClearsRelayStatusWhenResponseFileDisappears(t *testing.T
 	if reporter.snapshot.RelayRequired {
 		t.Fatal("relay status remained required after response file disappeared")
 	}
+}
+
+// TestMachineReporterPromptRelay_ResponseFileErrorGivesUnavailable checks
+// that a response-file error (the agent's file disappeared) resolves to
+// RelayUnavailable, not RelayDeny — it lets the peer-facing message say
+// "could not be asked" instead of "declined".
+func TestMachineReporterPromptRelay_ResponseFileErrorGivesUnavailable(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{
+		Format:      OutputJSON,
+		EventWriter: &output,
+	}, "send", false)
+
+	answerDone := make(chan conn.RelayAnswer, 1)
+	go func() { answerDone <- reporter.promptRelay(context.Background()) }()
+	responseFile := waitForRelayResponseFile(t, &output)
+	if err := os.Remove(responseFile); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case answer := <-answerDone:
+		if answer != conn.RelayUnavailable {
+			t.Fatalf("answer = %v, want RelayUnavailable", answer)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for response-file error")
+	}
+}
+
+// TestMachineReporterFinish_PeerRelayDenied checks that finish() maps a
+// wrapped conn.ErrPeerDeclinedRelay to the peer_relay_denied code.
+func TestMachineReporterFinish_PeerRelayDenied(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{
+		Format:      OutputJSON,
+		EventWriter: &output,
+	}, "send", false)
+
+	err := fmt.Errorf("relay retry failed: %w", &conn.PeerDeclinedRelayError{Reason: "declined"})
+	reporter.finish(err, "")
+
+	result := lastResultEvent(t, &output)
+	if result.Error == nil || result.Error.Code != "peer_relay_denied" {
+		t.Fatalf("result event = %#v, want error code peer_relay_denied", result)
+	}
+}
+
+// TestMachineReporterFinish_PeerRelayUnusableIsRelayNotAllowed checks that
+// finish() maps a wrapped conn.PeerRelayUnusableError — the peer gave up on
+// its own direct attempt and asked to retry via relay, but this side has no
+// relay to offer (no TURN, or -transport tcp) — to the same relay_not_allowed
+// code as the local could-not-participate case, even though
+// r.snapshot.RelayRequired was never set true (this side never reaches its
+// own relay prompt in that scenario).
+func TestMachineReporterFinish_PeerRelayUnusableIsRelayNotAllowed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  *conn.PeerRelayUnusableError
+	}{
+		{"tcp-only", &conn.PeerRelayUnusableError{TCPOnly: true}},
+		{"no turn", &conn.PeerRelayUnusableError{TCPOnly: false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output lockedBuffer
+			reporter := newMachineReporter(context.Background(), OutputConfig{
+				Format:      OutputJSON,
+				EventWriter: &output,
+			}, "send", false)
+
+			err := fmt.Errorf("connecting: %w", tc.err)
+			reporter.finish(err, "")
+
+			result := lastResultEvent(t, &output)
+			if result.Error == nil || result.Error.Code != "relay_not_allowed" {
+				t.Fatalf("result event = %#v, want error code relay_not_allowed", result)
+			}
+		})
+	}
+}
+
+// TestMachineReporterFinish_OwnDenyIsRelayDenied checks that finish() still
+// reports our own deny as relay_denied (unchanged), not peer_relay_denied,
+// when the returned error doesn't wrap conn.ErrPeerDeclinedRelay.
+func TestMachineReporterFinish_OwnDenyIsRelayDenied(t *testing.T) {
+	var output lockedBuffer
+	reporter := newMachineReporter(context.Background(), OutputConfig{
+		Format:      OutputJSON,
+		EventWriter: &output,
+	}, "send", false)
+
+	answerDone := make(chan conn.RelayAnswer, 1)
+	go func() { answerDone <- reporter.promptRelay(context.Background()) }()
+	responseFile := waitForRelayResponseFile(t, &output)
+	if err := os.WriteFile(responseFile, []byte("deny\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case answer := <-answerDone:
+		if answer != conn.RelayDeny {
+			t.Fatalf("answer = %v, want RelayDeny", answer)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for deny response")
+	}
+
+	reporter.finish(conn.ErrRelayNotAllowed, "")
+	result := lastResultEvent(t, &output)
+	if result.Error == nil || result.Error.Code != "relay_denied" {
+		t.Fatalf("result event = %#v, want error code relay_denied", result)
+	}
+}
+
+func lastResultEvent(t *testing.T, output *lockedBuffer) machineEvent {
+	t.Helper()
+	var result machineEvent
+	found := false
+	for _, line := range bytes.Split(bytes.TrimSpace([]byte(output.String())), []byte{'\n'}) {
+		var event machineEvent
+		if json.Unmarshal(line, &event) == nil && event.Event == "result" {
+			result = event
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no result event found: %s", output.String())
+	}
+	return result
 }
 
 func TestMachineReporterReportsStatusFileFailures(t *testing.T) {

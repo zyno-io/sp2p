@@ -227,7 +227,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 			return nil, fmt.Errorf("creating data channel: %w", err)
 		}
 		conn.setDataChannel(dc)
-		setupDataChannel(dc, conn, dcReady, &dcOnce)
+		setupDataChannel(dc, conn, dcReady, &dcOnce, nil)
 
 		offer, err := pc.CreateOffer(nil)
 		if err != nil {
@@ -268,7 +268,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 				go conn.Close()
 				return
 			}
-			setupDataChannel(dc, conn, dcReady, &dcOnce)
+			setupDataChannel(dc, conn, dcReady, &dcOnce, nil)
 		})
 	}
 
@@ -420,7 +420,12 @@ func processSignaling(ctx context.Context, sigClient *signal.Client, pc *webrtc.
 	}
 }
 
-func setupDataChannel(dc *webrtc.DataChannel, conn *WebRTCConn, ready chan struct{}, closeOnce *sync.Once) {
+// setupDataChannel wires a DataChannel's flow control, message, and close
+// handlers. onEvent, when non-nil, is called with a short, address-free
+// event name ("dc=open", "dc=close", "close=budget_exceeded") for a
+// WebRTCLane's Trace() — it is nil for the primary connection, which keeps
+// no such trace.
+func setupDataChannel(dc *webrtc.DataChannel, conn *WebRTCConn, ready chan struct{}, closeOnce *sync.Once, onEvent func(string)) {
 	conn.bufferLimit.Store(dataChannelBuffer)
 	dc.SetBufferedAmountLowThreshold(dataChannelBuffer / 2)
 
@@ -431,6 +436,9 @@ func setupDataChannel(dc *webrtc.DataChannel, conn *WebRTCConn, ready chan struc
 	})
 
 	dc.OnOpen(func() {
+		if onEvent != nil {
+			onEvent("dc=open")
+		}
 		closeOnce.Do(func() { close(ready) })
 	})
 
@@ -443,6 +451,9 @@ func setupDataChannel(dc *webrtc.DataChannel, conn *WebRTCConn, ready chan struc
 		default:
 		}
 		if msg.IsString || len(msg.Data) == 0 || len(msg.Data) > sctpMaxMsgSize || !conn.receiveBudget.reserve(len(msg.Data)) {
+			if onEvent != nil {
+				onEvent("close=budget_exceeded")
+			}
 			go conn.Close()
 			return
 		}
@@ -456,6 +467,9 @@ func setupDataChannel(dc *webrtc.DataChannel, conn *WebRTCConn, ready chan struc
 	})
 
 	dc.OnClose(func() {
+		if onEvent != nil {
+			onEvent("dc=close")
+		}
 		conn.closeOnce.Do(func() {
 			close(conn.closed)
 			conn.flowMu.Lock()
