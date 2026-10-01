@@ -314,6 +314,7 @@ type statsWriter struct {
 	stop   chan struct{}
 	done   chan struct{}
 	seq    atomic.Uint64
+	mu     sync.Mutex // serializes writeOnce between flush and the background writer
 }
 
 func newStatsWriter(path string, build func() Snapshot) *statsWriter {
@@ -369,6 +370,8 @@ func (w *statsWriter) flush() {
 }
 
 func (w *statsWriter) writeOnce() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	snap := w.build()
 	snap.Seq = w.seq.Add(1)
 	data, err := json.MarshalIndent(snap, "", "  ")
