@@ -267,12 +267,15 @@ func TestStatsWriter_CoalescesAndFlushReflectsLatest(t *testing.T) {
 	w := newStatsWriter(path, func() Snapshot { return tr.snapshot(0) })
 	tr.writer = w
 	w.start()
-	defer w.close()
 
 	for i := 0; i < 100; i++ {
 		tr.recordCreated("u")
 	}
 	w.flush()
+	// Stop the background writer before reading: a coalesced write can still
+	// be replacing stats.json after flush returns, and on Windows reading
+	// during a replace fails with a sharing violation.
+	w.close()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
