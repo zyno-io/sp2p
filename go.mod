@@ -5,7 +5,7 @@ go 1.27.0
 require (
 	github.com/coder/websocket v1.8.15
 	github.com/huin/goupnp v1.3.0
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.1
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/pion/logging v0.2.4
 	github.com/pion/stun/v4 v4.0.1
