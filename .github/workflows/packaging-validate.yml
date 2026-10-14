@@ -162,7 +162,7 @@ jobs:
         with:
           go-version-file: go.mod
       - if: env.MODE == 'snapshot'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 25
           cache: npm
@@ -201,7 +201,7 @@ jobs:
         run: |
           mkdir -p dist
           gh release download "$TAG" -R "$REPO" -D dist
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: packaging-inputs
           path: |
@@ -224,7 +224,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.ref }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-inputs
           path: dist
@@ -249,7 +249,7 @@ jobs:
             [void][System.Management.Automation.Language.Parser]::ParseFile("rendered/chocolatey/tools/chocolateyInstall.ps1", [ref]$null, [ref]$errors)
             if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
           '
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: packaging-rendered
@@ -276,7 +276,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.ref }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-inputs
           path: dist
@@ -284,7 +284,7 @@ jobs:
         run: bash scripts/packaging/serve.sh dist
       - name: Render
         run: bash scripts/packaging/render.sh homebrew "$VERSION" "$BASE_URL" dist/checksums.txt out/homebrew
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-rendered
           path: rendered-ubuntu
@@ -333,11 +333,11 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.ref }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-inputs
           path: dist
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-rendered
           path: rendered-ubuntu
@@ -408,11 +408,11 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.ref }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-inputs
           path: dist
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-rendered
           path: rendered-ubuntu
@@ -478,7 +478,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.ref }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-inputs
           path: dist
@@ -486,7 +486,7 @@ jobs:
         run: bash scripts/packaging/serve.sh dist
       - name: Render
         run: bash scripts/packaging/render.sh aur "$VERSION" "$BASE_URL" dist/checksums.txt out/aur
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-rendered
           path: rendered-ubuntu
@@ -555,7 +555,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.ref }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: packaging-inputs
           path: dist
@@ -631,7 +631,7 @@ jobs:
           nested=$(yq '.NestedInstallerType // .Installers[0].NestedInstallerType' "$installer")
           [ "$nested" = portable ] || { echo "::error::expected NestedInstallerType portable, got $nested"; exit 1; }
           bash scripts/packaging/verify-urls.sh winget "$dir" dist/checksums.txt
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: packaging-winget-manifests
