@@ -1,11 +1,11 @@
-FROM node:25-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 AS web-builder
+FROM node:26-slim@sha256:193fe51b64e77981119c98c2002c9e32a70e2f006fb4d25068ce0558998917f0 AS web-builder
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci
 COPY web/ .
 RUN npm run build
 
-FROM golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS go-builder
+FROM golang:1.27.2-alpine@sha256:f92b6ef800e499660581efdabdf25d9d817a9d124eaf900924f0504e7e27e12d AS go-builder
 RUN apk add --no-cache git
 WORKDIR /app
 COPY go.mod go.sum ./
