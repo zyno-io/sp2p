@@ -1,4 +1,4 @@
-FROM node:25-slim@sha256:81db02c4b671288a03915da9534dbd54f96d0e7c24d80ccc54f5b36b2e684370 AS web-builder
+FROM node:26-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072 AS web-builder
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci
