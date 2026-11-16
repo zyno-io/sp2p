@@ -1820,7 +1820,7 @@ git's CRLF conversion before checkout, best-effort disables Windows Defender
 real-time scanning (`Set-MpPreference -DisableRealtimeMonitoring $true`,
 wrapped so a failure there — e.g. a runner image that already has it off,
 or lacks permission — doesn't fail the job), checks out, sets up Go
-(`go-version-file: go.mod`) and Node 25, `npm --prefix web ci`, builds web
+(`go-version-file: go.mod`) and Node 26, `npm --prefix web ci`, builds web
 assets (`npm --prefix web run build` — needed before any Go step, since
 `web.go`'s `//go:embed web/dist/*` won't compile without it; not `make
 build-web`, since `make` isn't guaranteed on this runner image), `go vet
