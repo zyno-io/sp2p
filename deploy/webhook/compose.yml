@@ -3,6 +3,8 @@ name: sp2p-deploy
 services:
   deploy:
     build: .
+    # Join the network the tunnel connector (or reverse proxy) uses to reach
+    # sp2p; it routes the hook path to http://sp2p-deploy:9000. No host ports.
     networks:
       production:
         aliases: [sp2p-deploy]
@@ -21,6 +23,12 @@ services:
           create_host_path: false
     secrets:
       - deploy_secret
+    # webhook buffers whole request bodies before checking the signature and
+    # has no size limit. Cap memory so oversized unsigned requests can only
+    # OOM-kill this container (restart policy recovers it), not the host.
+    mem_limit: 128m
+    memswap_limit: 128m
+    pids_limit: 64
     read_only: true
     tmpfs:
       - /run

@@ -470,7 +470,6 @@ When TLS is active and `-addr` is not set, the server listens on `:443`.
 | `-base-url` | `SP2P_BASE_URL` | `http://localhost:8080` | Public base URL |
 | `-trust-proxy` | `SP2P_TRUST_PROXY` | `false` | Honor forwarded IPs only through explicitly trusted proxies |
 | `-trusted-proxies` | `SP2P_TRUSTED_PROXIES` | | Comma-separated immediate proxy IPs/CIDRs; required with `-trust-proxy` |
-| `-deploy-webhook-url` | `SP2P_DEPLOY_WEBHOOK_URL` | | Private sidecar origin; enables only the signed deployment forwarding route |
 | `-tls-cert` | `SP2P_TLS_CERT` | | TLS certificate file |
 | `-tls-key` | `SP2P_TLS_KEY` | | TLS private key file |
 | `-acme` | `SP2P_ACME` | `false` | Enable ACME auto-certificates |

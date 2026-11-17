@@ -98,22 +98,12 @@ Environment values false and 0 disable trust.
 .BI \-trusted\-proxies " addresses"
 Comma-separated IP addresses/CIDRs of the actual reverse proxies.
 Forwarded chains are resolved from the trusted side. Do not trust all addresses.
-.SS Deployment Sidecar
-.TP
-.BI \-deploy\-webhook\-url " origin"
-Optional private HTTP(S) origin of the deployment sidecar, for example
-.IR http://sp2p-deploy:9000 .
-Enables forwarding only POST requests at /hooks/sp2p-deploy through the
-server's existing HTTPS listener. Request bodies are limited to 4 KiB;
-the sidecar verifies signed requests and exclusively owns Docker access.
-Disabled by default.
 .SH ENVIRONMENT
 All flags can be set via environment variables:
 .PP
 .TS
 l l.
 Flag	Variable
-\-deploy\-webhook\-url	SP2P_DEPLOY_WEBHOOK_URL
 \-addr	SP2P_ADDR
 \-base\-url	SP2P_BASE_URL
 \-config\-dir	SP2P_CONFIG_DIR

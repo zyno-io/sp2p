@@ -6,6 +6,12 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-11-17
+
+### Removed
+
+- Remove the server's `-deploy-webhook-url` flag (`SP2P_DEPLOY_WEBHOOK_URL`) and its `/hooks/sp2p-deploy` forwarding route. The tunnel connector or reverse proxy now routes the hook path to the deployment sidecar directly over a Docker network, and the sidecar is memory-capped because the server's 4 KiB limit no longer applies. Clear the variable from production configuration.
+
 ### Changed
 
 - Run the release workflow's Extended checks job in parallel instead of as a gate, so publishing and deployment no longer wait for it. A failed or missing Extended checks run still marks the release run red.
