@@ -2071,9 +2071,10 @@ reverted with `git revert --no-edit`:
 same style as `web/tests/wan-*.mjs` (not picked up by `npm test` or any
 other CI job) — but unlike those, it's the one such script CI *does* run:
 `.github/workflows/smoke-production.yml`'s `smoke` job, called automatically
-by `release.yml` right after a full release's SSH deploy step
+by `release.yml` right after a full release's signed HTTPS deployment request
 (`needs: [release, publish-release]`), and dispatchable by hand for any
-already-published tag. It has no `environment:` and needs no secrets —
+already-published tag. The manual `deploy.yml` workflow also runs it after
+requesting an existing release's deployment. It has no `environment:` and needs no secrets —
 everything it touches (sp2p.io, public GitHub Release assets) is public.
 
 ### What it checks
