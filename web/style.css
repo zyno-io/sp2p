@@ -274,7 +274,7 @@ a:hover { text-decoration-thickness: 2px; }
 }
 
 .wordmark {
-  font-size: clamp(4.5rem, 12vw, 9.5rem);
+  font-size: clamp(5rem, 14vw, 12.5rem);
   font-weight: 800;
   letter-spacing: -0.06em;
   line-height: 0.82;
