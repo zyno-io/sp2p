@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: MIT
+name: sp2p-deploy
+services:
+  deploy:
+    build: .
+    networks:
+      production:
+        aliases: [sp2p-deploy]
+    environment:
+      SP2P_DEPLOY_DIR: ${SP2P_DEPLOY_DIR:-/opt/sp2p}
+      SP2P_DEPLOY_COMPOSE_FILE: ${SP2P_DEPLOY_COMPOSE_FILE:-docker-compose.yml}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Keep the host path identical inside the sidecar so Compose resolves
+      # relative bind mounts exactly as it did when invoked through SSH.
+      - type: bind
+        source: ${SP2P_DEPLOY_DIR:-/opt/sp2p}
+        target: ${SP2P_DEPLOY_DIR:-/opt/sp2p}
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - deploy_secret
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+networks:
+  production:
+    external: true
+    name: ${SP2P_DEPLOY_NETWORK:-sp2p_default}
+
+secrets:
+  deploy_secret:
+    file: ${SP2P_DEPLOY_SECRET_FILE:?Set SP2P_DEPLOY_SECRET_FILE to the private deployment secret file}

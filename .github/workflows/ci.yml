@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  deploy-hook:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build deployment sidecar
+        run: docker build -t sp2p-deploy-hook:test deploy/webhook
+      - name: Check signed HTTPS requests and fixed deployment command
+        run: python3 deploy/webhook/test_webhook.py
+
   test:
     runs-on: ubuntu-latest
     steps:
