@@ -3,8 +3,9 @@
 The release workflow publishes signed artifacts and the server image, then sends
 an authenticated HTTPS request to a separate deployment sidecar. The sidecar
 uses the host's Docker socket to update the existing `sp2p` Compose service.
-The sidecar listens only on host loopback; the host's Cloudflare Tunnel routes
-the public hook path to it. sp2p itself has no knowledge of the hook. SSH
+The sidecar publishes no host ports; the Cloudflare Tunnel connector reaches it
+over a Docker network and routes the public hook path to it. sp2p itself has
+no knowledge of the hook. SSH
 remains private to Tailscale, and Tailnet Lock needs no changes.
 
 The sidecar uses [webhook](https://github.com/adnanh/webhook), Docker CLI, and
@@ -75,30 +76,32 @@ production file on the server.
    production `.env` and project name as it did when run through SSH. Include
    any additional configuration files referenced by that production file.
 
-   The sidecar publishes port 9000 on `127.0.0.1` only. Set
-   `SP2P_DEPLOY_LISTEN` (for example `127.0.0.1:9100`) if that port is taken.
-   Always include the `127.0.0.1:` prefix; a bare port binds every interface.
-   The tunnel rule's service port in the next step must match.
+   The sidecar joins the Docker network named by `SP2P_DEPLOY_NETWORK`
+   (default `sp2p_default`) with the alias `sp2p-deploy`, and publishes no
+   host ports. Set it to the network the tunnel connector shares with sp2p.
 
    The container is capped at 128 MiB because webhook buffers request bodies
    before verifying signatures. An oversized request only restarts the sidecar.
 
-4. Route the hook path through the host's Cloudflare Tunnel. Add an ingress
-   rule for the exact path **above** the existing `sp2p.io` rule, since
-   cloudflared uses the first match:
+4. Route the hook path through the Cloudflare Tunnel. Production runs a
+   standalone cloudflared container that joins a dedicated network shared with
+   the `sp2p` service and the sidecar, so routes use container names. Put the
+   exact path **above** the catch-all `sp2p.io` route, since cloudflared uses
+   the first match:
 
    ```yaml
    ingress:
      - hostname: sp2p.io
        path: ^/hooks/sp2p-deploy$
-       service: http://127.0.0.1:9000
+       service: http://sp2p-deploy:9000
      - hostname: sp2p.io
-       service: http://127.0.0.1:8080 # existing sp2p rule
+       service: http://sp2p:8080
      - service: http_status:404
    ```
 
-   For a dashboard-managed tunnel, add the equivalent public hostname with
-   path `^/hooks/sp2p-deploy$`, ordered before the catch-all `sp2p.io` entry.
+   For a dashboard-managed tunnel, add the equivalent routes in that order.
+   sp2p serves plain HTTP behind the tunnel; set `SP2P_TRUSTED_PROXIES` to the
+   shared network's subnet so rate limits see real client addresses.
    The tunnel forwards the signed body unchanged. The application never
    receives the Docker socket, the deployment secret, or the hook traffic.
 
@@ -128,10 +131,12 @@ Server 0.7.2 forwarded the hook itself through `SP2P_DEPLOY_WEBHOOK_URL`; later
 servers do not. Switch the routing **before** deploying a server without the
 forwarding route, or the next hook request reaches sp2p and returns 404:
 
-1. Copy the updated [deploy/webhook](../deploy/webhook/) over the installed
-   copy, export the same `SP2P_DEPLOY_*` variables as in step 3, and run
+1. Attach the tunnel connector, `sp2p`, and the sidecar to a shared network
+   and add the routes from step 4.
+2. Copy the updated [deploy/webhook](../deploy/webhook/) over the installed
+   copy, set `SP2P_DEPLOY_NETWORK` to that network along with the other
+   `SP2P_DEPLOY_*` variables from step 3, and run
    `docker compose -f /opt/sp2p-deploy/compose.yml up -d --build`.
-2. Add the tunnel ingress rule from step 4.
 3. Confirm that an unsigned `POST` to the hook returns 403 **without** a
    `Cache-Control: no-store` header (that header comes from the old in-server
    forwarding), then run the manual deployment workflow.

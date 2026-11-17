@@ -8,7 +8,7 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ### Removed
 
-- Remove the server's `-deploy-webhook-url` flag (`SP2P_DEPLOY_WEBHOOK_URL`) and its `/hooks/sp2p-deploy` forwarding route. The deployment sidecar now listens on host loopback, and the host's tunnel or reverse proxy routes the hook path to it directly. Clear the variable from production configuration.
+- Remove the server's `-deploy-webhook-url` flag (`SP2P_DEPLOY_WEBHOOK_URL`) and its `/hooks/sp2p-deploy` forwarding route. The tunnel connector or reverse proxy now routes the hook path to the deployment sidecar directly over a Docker network, and the sidecar is memory-capped because the server's 4 KiB limit no longer applies. Clear the variable from production configuration.
 
 ### Changed
 
