@@ -670,7 +670,7 @@ This is fully compatible with peers on v0.6.2 or earlier, which only ever send a
 
 ## Development
 
-**Requirements:** Go 1.27.0 (or a newer supported, security-patched toolchain) and Node.js 25 (for the web UI build). CI and release builds follow `go.mod`; containers pin builder and runtime digests. Dependabot proposes weekly dependency, action, and image updates. Rebuild static binaries after toolchain security updates.
+**Requirements:** Go 1.27.4 (or a newer supported, security-patched toolchain) and Node.js 26 (for the web UI build). CI and release builds follow `go.mod`; containers pin Go builder and runtime digests and follow the Node 26 Alpine tag. Dependabot proposes weekly dependency, action, and image updates. Rebuild static binaries after toolchain security updates.
 
 ### Make Targets
 

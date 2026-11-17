@@ -266,10 +266,6 @@ func (p *Progress) ShowCode(code, baseURL string) {
 	code, baseURL = terminalText(code), terminalText(baseURL)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// Keep the agent handoff prompt in the terminal scrollback. The share block
-	// below is intentionally ephemeral while the sender waits for a receiver.
-	p.clearEphemeral()
-	fmt.Fprintf(p.out, "\n  %s\n\n", agentPrompt(code, baseURL))
 	p.shareCode = code
 	p.shareBaseURL = baseURL
 	p.qrURL = baseURL + "/r#" + code
@@ -411,6 +407,11 @@ func (p *Progress) render() {
 
 	case PhaseRegistered:
 		if p.shareCode != "" {
+			// Keep the complete prompt copyable, but include every wrapped row in
+			// the ephemeral frame so it disappears when the receiver joins.
+			buf.WriteByte('\n')
+			writeWrappedLine(&buf, "  "+agentPrompt(p.shareCode, p.shareBaseURL), w)
+			buf.WriteByte('\n')
 			if p.showQR {
 				renderQRTo(&buf, p.qrURL)
 				fmt.Fprintf(&buf, "  (press q to hide)\n\n")
@@ -563,6 +564,23 @@ func writeLn(buf *bytes.Buffer, width int, format string, args ...any) {
 	line := fmt.Sprintf(format, args...)
 	line = strings.TrimRight(line, "\n")
 	buf.WriteString(truncLine(line, width))
+	buf.WriteByte('\n')
+}
+
+// writeWrappedLine preserves the full text while making each terminal row
+// explicit, so render can count and later clear it. Unlike other share hints,
+// the agent prompt must not truncate the code or the guide URL.
+func writeWrappedLine(buf *bytes.Buffer, text string, width int) {
+	if width <= 0 {
+		width = 80
+	}
+	runes := []rune(text)
+	for len(runes) > width {
+		buf.WriteString(string(runes[:width]))
+		buf.WriteByte('\n')
+		runes = runes[width:]
+	}
+	buf.WriteString(string(runes))
 	buf.WriteByte('\n')
 }
 

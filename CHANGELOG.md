@@ -6,6 +6,14 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Fixed
+
+- Clear the sender terminal’s AI Agent prompt together with the share panel when the receiver joins, so it does not remain above connection status or transfer progress. Preserve the full prompt at narrow terminal widths and while showing a QR code.
+
+### Changed
+
+- Refresh Go and frontend dependencies, CI actions, and build images. Use Go 1.27.4 and Node 26 for builds; retain the patched ICE fork pending its upstream connection fix.
+
 ## [0.7.0] - 2026-10-01
 
 ### Fixed
