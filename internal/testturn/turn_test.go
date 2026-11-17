@@ -97,6 +97,48 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 	}
 }
 
+// Browser discovery uses STUN without advertising TURN or supplying credentials.
+// Verify that it reflects the actual packet source without allocating a relay.
+func TestServer_STUNBindingWithoutCredentials(t *testing.T) {
+	srv := newTestServer(t, Config{})
+	conn, err := net.Dial("udp4", srv.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	request := stun.MustBuild(stun.TransactionID, stun.BindingRequest)
+	if _, err := conn.Write(request.Raw); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 1500)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := &stun.Message{Raw: buf[:n]}
+	if err := response.Decode(); err != nil {
+		t.Fatal(err)
+	}
+	if response.Type != stun.BindingSuccess || response.TransactionID != request.TransactionID {
+		t.Fatal("STUN binding did not return the matching success response")
+	}
+	var mapped stun.XORMappedAddress
+	if err := mapped.GetFrom(response); err != nil {
+		t.Fatal(err)
+	}
+	source := conn.LocalAddr().(*net.UDPAddr)
+	if !mapped.IP.Equal(source.IP) || mapped.Port != source.Port {
+		t.Fatal("STUN binding did not reflect the client's actual endpoint")
+	}
+	stats := srv.Snapshot()
+	if stats.Created != 0 || stats.Live != 0 || stats.PionLive != 0 || stats.AuthFailures != 0 {
+		t.Fatal("Unauthenticated STUN binding changed TURN allocation/auth accounting")
+	}
+}
+
 func TestServer_AllocateAndRelease(t *testing.T) {
 	srv := newTestServer(t, Config{})
 	client := newTestClient(t, srv, "session-1", "")

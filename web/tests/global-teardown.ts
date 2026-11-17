@@ -1,21 +1,24 @@
+// SPDX-License-Identifier: MIT
+
 import { readFileSync, rmSync, unlinkSync } from "fs";
 import { join } from "path";
 
 export default async function globalTeardown() {
   const knownPath = join(__dirname, "..", ".pw-state.json");
 
-  let state: { pid?: number; tmpDir?: string } = {};
+  let state: { pid?: number; stunPid?: number; tmpDir?: string } = {};
   try {
     state = JSON.parse(readFileSync(knownPath, "utf-8"));
   } catch {
     return; // Nothing recorded (or already torn down) — best-effort cleanup.
   }
 
-  if (state.pid) {
+  for (const pid of [state.pid, state.stunPid]) {
+    if (!pid) continue;
     try {
       // Node has no real SIGTERM on Windows: any signal here forcibly
       // terminates the process, same as SIGKILL. Fine for teardown.
-      process.kill(state.pid, "SIGTERM");
+      process.kill(pid, "SIGTERM");
     } catch {
       // Already dead.
     }

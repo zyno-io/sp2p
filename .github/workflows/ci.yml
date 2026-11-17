@@ -99,6 +99,10 @@ jobs:
         run: go test -race ./internal/rsync ./internal/tunnel ./internal/cli
         env:
           SP2P_TEST_RSYNC: /usr/bin/rsync
+      - name: Install WebKit
+        run: cd web && npx playwright install --with-deps webkit
+      - name: Check WebKit transfers before merge
+        run: cd web && npx playwright test --project=webkit
 
   browser-interop:
     runs-on: ubuntu-latest
