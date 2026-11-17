@@ -42,7 +42,7 @@ export function showQRModal(url: string): void {
     margin: 2,
     // Dark modules on a light background scan most reliably.
     color: {
-      dark: "#0d1820",
+      dark: "#15171c",
       light: "#ffffff",
     },
   });
