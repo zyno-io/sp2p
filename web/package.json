@@ -3,11 +3,12 @@
   "private": true,
   "scripts": {
     "build": "node build.js",
-    "watch": "cp index.html receive.html style.css dist/ && esbuild src/main.ts --bundle --outfile=dist/app.js --sourcemap --target=es2020 --watch",
+    "watch": "mkdir -p dist && cp index.html receive.html favicon.svg theme.js dist/ && esbuild app=src/main.ts style=style.css --bundle --outdir=dist --sourcemap --target=es2020 --loader:.woff2=file --loader:.woff=file --asset-names=[name]-[hash] --watch",
     "test": "playwright test --project=chromium",
     "test:ui": "playwright test --ui"
   },
   "devDependencies": {
+    "@fontsource-variable/inter": "^5.3.0",
     "@playwright/test": "^1.65.1",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"

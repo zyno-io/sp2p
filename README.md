@@ -70,18 +70,18 @@ sudo dpkg -i sp2p_amd64.deb
 
 **Fedora / RHEL:**
 ```bash
-curl -LO https://sp2p.io/dl/sp2p_x86_64.rpm
-sudo rpm -i sp2p_x86_64.rpm
+curl -LO https://sp2p.io/dl/sp2p_amd64.rpm
+sudo rpm -i sp2p_amd64.rpm
 ```
 
 **Alpine:**
 ```bash
-curl -LO https://sp2p.io/dl/sp2p_x86_64.apk
+curl -LO https://sp2p.io/dl/sp2p_amd64.apk
 wget -O /etc/apk/keys/oss@zyno.io-sp2p.rsa.pub https://cdn.zyno.io/apps/sp2p/sp2p.rsa.pub
-apk add sp2p_x86_64.apk
+apk add sp2p_amd64.apk
 ```
 
-**Arch (AUR):** *(pending)*
+**Arch (AUR):**
 ```bash
 yay -S sp2p-bin
 ```
@@ -99,12 +99,12 @@ scoop bucket add zyno-io https://github.com/zyno-io/scoop-bucket
 scoop install sp2p
 ```
 
-**Chocolatey:** *(pending)*
+**Chocolatey:**
 ```powershell
 choco install sp2p
 ```
 
-**WinGet:** *(pending)*
+**WinGet:**
 ```powershell
 winget install zyno-io.sp2p
 ```

@@ -19,6 +19,7 @@ export function showQRModal(url: string): void {
   const closeBtn = document.createElement("button");
   closeBtn.className = "qr-close";
   closeBtn.innerHTML = "&times;";
+  closeBtn.setAttribute("aria-label", "Close QR code");
   closeBtn.addEventListener("click", closeQRModal);
   modal.appendChild(closeBtn);
 
@@ -39,9 +40,10 @@ export function showQRModal(url: string): void {
   QRCode.toCanvas(canvas, url, {
     width: 280,
     margin: 2,
+    // Dark modules on a light background scan most reliably.
     color: {
-      dark: "#e0e0e0",
-      light: "#141414",
+      dark: "#15171c",
+      light: "#ffffff",
     },
   });
 

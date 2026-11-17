@@ -234,151 +234,172 @@ async function establishP2PWithRetry(
 
 // ─── PLATFORM DETECTION ──────────────────────────────────────
 
-function detectPlatform(): { os: string; arch: string; label: string } {
+type OS = "darwin" | "windows" | "linux";
+type Arch = "amd64" | "arm64";
+interface Platform { os: OS; arch: Arch }
+
+const OS_LABELS: Record<OS, string> = { darwin: "macOS", windows: "Windows", linux: "Linux" };
+
+function detectPlatform(): Platform {
   const ua = navigator.userAgent;
   const uaData = (navigator as any).userAgentData;
 
-  let os = "linux";
-  let osLabel = "Linux";
-  let arch = "amd64";
+  let os: OS = "linux";
+  let arch: Arch = "amd64";
 
   // Detect OS.
   if (uaData?.platform) {
     const p = uaData.platform.toLowerCase();
-    if (p === "macos") { os = "darwin"; osLabel = "macOS"; }
-    else if (p === "windows") { os = "windows"; osLabel = "Windows"; }
+    if (p === "macos" || p === "ios") os = "darwin";
+    else if (p === "windows") os = "windows";
   } else {
-    if (/Mac|iPhone|iPad/.test(ua)) { os = "darwin"; osLabel = "macOS"; }
-    else if (/Windows/.test(ua)) { os = "windows"; osLabel = "Windows"; }
+    if (/Mac|iPhone|iPad/.test(ua)) os = "darwin";
+    else if (/Windows/.test(ua)) os = "windows";
   }
 
-  // Detect architecture.
-  if (uaData?.architecture === "arm") {
-    arch = "arm64";
-  } else if (/aarch64|arm64/.test(ua)) {
+  // Detect architecture. Refined asynchronously by refinePlatform() where
+  // the browser exposes it (Chromium's high-entropy client hints).
+  if (/aarch64|arm64/i.test(ua)) {
     arch = "arm64";
   } else if (os === "darwin") {
     // Most modern Macs are ARM64; UA is unreliable for detection.
     arch = "arm64";
   }
 
-  return { os, arch, label: `${osLabel} (${arch})` };
+  return { os, arch };
 }
 
-function initZeroInstallSection(): void {
-  const section = document.querySelector<HTMLElement>(".zero-install-section");
-  if (!section) return;
-  const origin = location.origin;
-  const curlEl = section.querySelector<HTMLElement>(".send-curl");
-  const wgetEl = section.querySelector<HTMLElement>(".send-wget");
-  const psEl = section.querySelector<HTMLElement>(".send-powershell");
-  if (curlEl) {
-    curlEl.textContent = `curl -f ${origin} | sh -s <file>`;
-    curlEl.dataset.copyText = `curl -f ${origin} | sh -s `;
+async function refinePlatform(platform: Platform): Promise<Platform> {
+  const uaData = (navigator as any).userAgentData;
+  if (typeof uaData?.getHighEntropyValues !== "function") return platform;
+  try {
+    const { architecture } = await uaData.getHighEntropyValues(["architecture"]);
+    if (architecture === "arm") return { ...platform, arch: "arm64" };
+    if (architecture === "x86") return { ...platform, arch: "amd64" };
+  } catch {
+    // Hints unavailable; keep the user-agent guess.
   }
-  if (wgetEl) {
-    wgetEl.textContent = `wget -O- ${origin} | sh -s <file>`;
-    wgetEl.dataset.copyText = `wget -O- ${origin} | sh -s `;
-  }
-  if (psEl) {
-    psEl.textContent = `& ([scriptblock]::Create((irm ${origin}/ps))) '<file>'`;
-    psEl.dataset.copyText = `& ([scriptblock]::Create((irm ${origin}/ps))) '`;
-  }
+  return platform;
 }
 
-function initUsageSection(): void {
-  const section = document.querySelector<HTMLElement>(".usage-section");
-  if (!section) return;
-  const origin = location.origin;
+function archLabel(os: OS, arch: Arch): string {
+  if (os === "darwin") return arch === "arm64" ? "Apple silicon (arm64)" : "Intel (amd64)";
+  return arch === "arm64" ? "ARM (arm64)" : "x86-64 (amd64)";
+}
 
-  const setCommand = (selector: string, value: string, copyText = value): void => {
-    const element = section.querySelector<HTMLElement>(selector);
-    if (!element) return;
-    element.textContent = value;
-    element.dataset.copyText = copyText;
-  };
+// Linux picks its architecture with a toggle that drives both the download
+// button and the package snippets. It follows detection until clicked.
+let linuxArch: Arch = "amd64";
+let linuxArchChosen = false;
 
-  setCommand(".agent-send-prompt", `Please send [file] using ${origin}/llm`);
-  setCommand(".agent-rsync-prompt", `Please sync [source directory] to [destination directory] with rsync using ${origin}/llm`);
-  setCommand(".agent-tunnel-prompt", `Please forward [TCP or Unix target endpoint] to [TCP or Unix local listener endpoint] using ${origin}/llm`);
-
-  setCommand(".rsync-send-command", `sp2p rsync send --server ${origin} -- -av --partial ./photos/ sp2p::share/`);
-  setCommand(".rsync-recv-command", `sp2p rsync recv --server ${origin} CODE ./backup`);
-  setCommand(".rsync-serve-command", `sp2p rsync send --server ${origin} ./photos`);
-  setCommand(".rsync-download-command", `sp2p rsync recv --server ${origin} CODE -- -av --partial sp2p::share/ ./photos/`);
-  setCommand(".tunnel-serve-tcp-command", `sp2p tunnel serve --server ${origin} --to tcp://127.0.0.1:5432`);
-  setCommand(".tunnel-connect-tcp-command", `sp2p tunnel connect --server ${origin} --listen tcp://127.0.0.1:15432 CODE`);
-  setCommand(".tunnel-serve-unix-command", `sp2p tunnel serve --server ${origin} --to unix:///run/example/service.sock`);
-  setCommand(".tunnel-connect-unix-command", `sp2p tunnel connect --server ${origin} --listen unix:///tmp/sp2p-example.sock CODE`);
-  setCommand(".tunnel-serve-stdio-command", `sp2p tunnel serve --server ${origin} --stdio`);
-  setCommand(".tunnel-connect-stdio-command", `sp2p tunnel connect --server ${origin} --stdio CODE`);
-  setCommand(".cli-send-command", `sp2p send -server ${origin} <file>`, `sp2p send -server ${origin} `);
-  setCommand(".cli-recv-command", `sp2p receive -server ${origin} CODE`);
-
-  const { os, arch, label } = detectPlatform();
-  const downloadBtn = section.querySelector<HTMLAnchorElement>(".download-btn");
-  const platformLabel = section.querySelector(".download-platform");
-  if (downloadBtn) downloadBtn.href = `/dl/${os}/${arch}`;
-  if (platformLabel) platformLabel.textContent = `for ${label}`;
-
-  const tabs = Array.from(section.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
-  const selectTab = (selectedTab: HTMLButtonElement, moveFocus: boolean): void => {
-    for (const tab of tabs) {
-      const isSelected = tab === selectedTab;
-      tab.setAttribute("aria-selected", String(isSelected));
-      tab.tabIndex = isSelected ? 0 : -1;
-      const panelId = tab.getAttribute("aria-controls");
-      const panel = panelId ? document.getElementById(panelId) : null;
-      if (panel) panel.hidden = !isSelected;
+// Point each platform's download button at the detected architecture for
+// that OS (or its most common one), with the other architecture as a link.
+function applyDownloadLinks(platform: Platform): void {
+  if (!linuxArchChosen) linuxArch = platform.os === "linux" ? platform.arch : "amd64";
+  for (const group of document.querySelectorAll<HTMLElement>("[data-download-os]")) {
+    const os = group.dataset.downloadOs as OS;
+    if (!(os in OS_LABELS)) continue;
+    const primary: Arch = os === "linux"
+      ? linuxArch
+      : os === platform.os ? platform.arch : (os === "darwin" ? "arm64" : "amd64");
+    const alternate: Arch = primary === "arm64" ? "amd64" : "arm64";
+    const button = group.querySelector<HTMLAnchorElement>(".download-btn");
+    const label = group.querySelector(".download-platform");
+    const alt = group.querySelector<HTMLAnchorElement>(".download-alt");
+    if (button) button.href = `/dl/${os}/${primary}`;
+    if (label) label.textContent = archLabel(os, primary);
+    if (alt) {
+      alt.href = `/dl/${os}/${alternate}`;
+      alt.textContent = `or ${archLabel(os, alternate)}`;
     }
-    if (moveFocus) selectedTab.focus();
-  };
+  }
 
-  tabs.forEach((tab, index) => {
-    tab.addEventListener("click", () => selectTab(tab, false));
-    tab.addEventListener("keydown", (event) => {
-      let nextIndex: number | null = null;
-      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
-        nextIndex = (index + 1) % tabs.length;
-      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
-        nextIndex = (index - 1 + tabs.length) % tabs.length;
-      } else if (event.key === "Home") {
-        nextIndex = 0;
-      } else if (event.key === "End") {
-        nextIndex = tabs.length - 1;
-      }
-      if (nextIndex === null) return;
-      event.preventDefault();
-      selectTab(tabs[nextIndex], true);
+  // Linux package snippets point at this server's /dl redirects, using the
+  // selected Linux architecture (release packages are sp2p_{amd64,arm64}.*).
+  for (const el of document.querySelectorAll<HTMLElement>("code[data-template]")) {
+    el.textContent = (el.dataset.template ?? "")
+      .split("{origin}").join(location.origin)
+      .split("{arch}").join(linuxArch);
+  }
+  for (const opt of document.querySelectorAll<HTMLButtonElement>(".arch-opt")) {
+    opt.setAttribute("aria-pressed", String(opt.dataset.arch === linuxArch));
+  }
+}
+
+function initArchToggle(getPlatform: () => Platform): void {
+  for (const opt of document.querySelectorAll<HTMLButtonElement>(".arch-opt")) {
+    opt.addEventListener("click", () => {
+      const arch = opt.dataset.arch;
+      if (arch !== "amd64" && arch !== "arm64") return;
+      linuxArch = arch;
+      linuxArchChosen = true;
+      applyDownloadLinks(getPlatform());
     });
-  });
+  }
 }
 
-// ─── SEND PAGE ───────────────────────────────────────────────
+// ─── TABS ────────────────────────────────────────────────────
 
-// Only show a negotiated protocol after successful transcript confirmation.
-function showProtocol(protocol: 2 | 3): void {
-  log(`authenticated transfer protocol v${protocol}`);
-  if (protocol === 2) show($(".legacy-warning"));
+// Every [role="tablist"] gets ARIA tab behavior with roving focus. A tablist
+// marked data-auto="platform" preselects the tab whose data-platforms list
+// contains the visitor's OS; the others keep the tab marked selected in HTML.
+function initTabs(platform: Platform): void {
+  for (const list of document.querySelectorAll<HTMLElement>('[role="tablist"]')) {
+    const tabs = Array.from(list.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    if (tabs.length === 0) continue;
+
+    const selectTab = (selectedTab: HTMLButtonElement, moveFocus: boolean, animate: boolean): void => {
+      for (const tab of tabs) {
+        const isSelected = tab === selectedTab;
+        tab.setAttribute("aria-selected", String(isSelected));
+        tab.tabIndex = isSelected ? 0 : -1;
+        const panelId = tab.getAttribute("aria-controls");
+        const panel = panelId ? document.getElementById(panelId) : null;
+        if (!panel) continue;
+        const wasHidden = panel.hidden;
+        panel.hidden = !isSelected;
+        if (isSelected && wasHidden && animate) {
+          panel.classList.remove("panel-in");
+          void panel.offsetWidth; // restart the entrance animation
+          panel.classList.add("panel-in");
+        }
+      }
+      if (moveFocus) selectedTab.focus();
+    };
+
+    let initial = tabs.find((tab) => tab.getAttribute("aria-selected") === "true") ?? tabs[0];
+    if (list.dataset.auto === "platform") {
+      const match = tabs.find((tab) => (tab.dataset.platforms ?? "").split(/\s+/).includes(platform.os));
+      if (match) initial = match;
+    }
+    selectTab(initial, false, false);
+
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => selectTab(tab, false, true));
+      tab.addEventListener("keydown", (event) => {
+        let nextIndex: number | null = null;
+        if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+          nextIndex = (index + 1) % tabs.length;
+        } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+          nextIndex = (index - 1 + tabs.length) % tabs.length;
+        } else if (event.key === "Home") {
+          nextIndex = 0;
+        } else if (event.key === "End") {
+          nextIndex = tabs.length - 1;
+        }
+        if (nextIndex === null) return;
+        event.preventDefault();
+        selectTab(tabs[nextIndex], true, true);
+      });
+    });
+  }
 }
 
-async function initSend(): Promise<void> {
-  initZeroInstallSection();
-  initUsageSection();
+// ─── COPY BOXES ──────────────────────────────────────────────
 
-  const dropZone = $(".drop-zone");
-  const zeroInstallSection = $(".zero-install-section");
-  const usageSection = $(".usage-section");
-  const fileInput = $(".file-input") as HTMLInputElement;
-  const shareDisplay = $(".share-display");
-  const shareUrl = $(".share-url");
-  const shareCurl = $(".share-curl");
-  const shareWget = $(".share-wget");
-  const sharePowershell = $(".share-powershell");
-  const shareCli = $(".share-cli");
-  const shareAgent = $(".share-agent");
-
-  // Click-to-copy on share boxes.
+// Click (or Enter/Space) on any .copy-box copies its <code>, preferring a
+// data-copy-text prefix over the displayed text (e.g. "<file>" placeholders).
+function initCopyBoxes(): void {
   for (const box of document.querySelectorAll<HTMLElement>(".copy-box")) {
     const copy = async (): Promise<void> => {
       const code = box.querySelector("code") as HTMLElement | null;
@@ -407,6 +428,101 @@ async function initSend(): Promise<void> {
       });
     }
   }
+}
+
+// ─── SCROLL REVEAL ───────────────────────────────────────────
+
+function initReveal(): void {
+  const elements = Array.from(document.querySelectorAll<HTMLElement>(".reveal"));
+  if (!("IntersectionObserver" in window)) {
+    elements.forEach((el) => el.classList.add("is-in"));
+    return;
+  }
+  const observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      entry.target.classList.add("is-in");
+      observer.unobserve(entry.target);
+    }
+  }, { rootMargin: "0px 0px -8% 0px" });
+  elements.forEach((el) => observer.observe(el));
+}
+
+function initZeroInstallSection(): void {
+  const section = document.querySelector<HTMLElement>(".zero-install-section");
+  if (!section) return;
+  const origin = location.origin;
+  const curlEl = section.querySelector<HTMLElement>(".send-curl");
+  const wgetEl = section.querySelector<HTMLElement>(".send-wget");
+  const psEl = section.querySelector<HTMLElement>(".send-powershell");
+  if (curlEl) {
+    curlEl.textContent = `curl -f ${origin} | sh -s <file>`;
+    curlEl.dataset.copyText = `curl -f ${origin} | sh -s `;
+  }
+  if (wgetEl) {
+    wgetEl.textContent = `wget -O- ${origin} | sh -s <file>`;
+    wgetEl.dataset.copyText = `wget -O- ${origin} | sh -s `;
+  }
+  if (psEl) {
+    psEl.textContent = `& ([scriptblock]::Create((irm ${origin}/ps))) '<file>'`;
+    psEl.dataset.copyText = `& ([scriptblock]::Create((irm ${origin}/ps))) '`;
+  }
+}
+
+function initUsageSection(): void {
+  const origin = location.origin;
+
+  const setCommand = (selector: string, value: string, copyText = value): void => {
+    const element = document.querySelector<HTMLElement>(selector);
+    if (!element) return;
+    element.textContent = value;
+    element.dataset.copyText = copyText;
+  };
+
+  setCommand(".agent-send-prompt", `Please send [file] using ${origin}/llm`);
+  setCommand(".agent-rsync-prompt", `Please sync [source directory] to [destination directory] with rsync using ${origin}/llm`);
+  setCommand(".agent-tunnel-prompt", `Please forward [TCP or Unix target endpoint] to [TCP or Unix local listener endpoint] using ${origin}/llm`);
+
+  setCommand(".rsync-send-command", `sp2p rsync send --server ${origin} -- -av --partial ./photos/ sp2p::share/`);
+  setCommand(".rsync-recv-command", `sp2p rsync recv --server ${origin} CODE ./backup`);
+  setCommand(".rsync-serve-command", `sp2p rsync send --server ${origin} ./photos`);
+  setCommand(".rsync-download-command", `sp2p rsync recv --server ${origin} CODE -- -av --partial sp2p::share/ ./photos/`);
+  setCommand(".tunnel-serve-tcp-command", `sp2p tunnel serve --server ${origin} --to tcp://127.0.0.1:5432`);
+  setCommand(".tunnel-connect-tcp-command", `sp2p tunnel connect --server ${origin} --listen tcp://127.0.0.1:15432 CODE`);
+  setCommand(".tunnel-serve-unix-command", `sp2p tunnel serve --server ${origin} --to unix:///run/example/service.sock`);
+  setCommand(".tunnel-connect-unix-command", `sp2p tunnel connect --server ${origin} --listen unix:///tmp/sp2p-example.sock CODE`);
+  setCommand(".tunnel-serve-stdio-command", `sp2p tunnel serve --server ${origin} --stdio`);
+  setCommand(".tunnel-connect-stdio-command", `sp2p tunnel connect --server ${origin} --stdio CODE`);
+  setCommand(".cli-send-command", `sp2p send -server ${origin} <file>`, `sp2p send -server ${origin} `);
+  setCommand(".cli-recv-command", `sp2p receive -server ${origin} CODE`);
+
+}
+
+// ─── SEND PAGE ───────────────────────────────────────────────
+
+// Only show a negotiated protocol after successful transcript confirmation.
+function showProtocol(protocol: 2 | 3): void {
+  log(`authenticated transfer protocol v${protocol}`);
+  if (protocol === 2) show($(".legacy-warning"));
+}
+
+async function initSend(): Promise<void> {
+  initZeroInstallSection();
+  initUsageSection();
+
+  const dropZone = $(".drop-zone");
+  const zeroInstallSection = $(".zero-install-section");
+  const usageSection = $(".usage-section");
+  const installSection = document.querySelector<HTMLElement>(".install-section");
+  const fileInput = $(".file-input") as HTMLInputElement;
+  const shareDisplay = $(".share-display");
+  const shareUrl = $(".share-url");
+  const shareCurl = $(".share-curl");
+  const shareWget = $(".share-wget");
+  const sharePowershell = $(".share-powershell");
+  const shareCli = $(".share-cli");
+  const shareAgent = $(".share-agent");
+
   const stepsContainer = $(".steps");
   const progressContainer = $(".progress-container");
   const progressBar = $(".progress-bar-fill");
@@ -430,6 +546,11 @@ async function initSend(): Promise<void> {
   });
 
   dropZone.addEventListener("click", () => fileInput.click());
+  dropZone.addEventListener("keydown", (event) => {
+    if (event.target !== dropZone || (event.key !== "Enter" && event.key !== " ")) return;
+    event.preventDefault();
+    fileInput.click();
+  });
 
   async function startSend(files: File[]): Promise<void> {
     const isSingleFile = files.length === 1;
@@ -440,6 +561,7 @@ async function initSend(): Promise<void> {
     hide(dropZone);
     hide(zeroInstallSection);
     hide(usageSection);
+    if (installSection) hide(installSection);
     show(stepsContainer);
 
     let sigClient: SignalClient | null = null;
@@ -741,37 +863,18 @@ async function initReceive(): Promise<void> {
       if (fileInfo.fileCount > 0) {
         sizeEl.textContent += ` (${fileInfo.fileCount} files)`;
       }
-
-      // Populate CLI commands.
-      const origin = location.origin;
-      const curlEl = confirmContainer.querySelector(".confirm-curl")!;
-      const wgetEl = confirmContainer.querySelector(".confirm-wget")!;
-      const psEl = confirmContainer.querySelector(".confirm-powershell")!;
-      const cliEl = confirmContainer.querySelector(".confirm-cli")!;
-      curlEl.textContent = `curl -f ${origin}/r | sh -s ${code}`;
-      wgetEl.textContent = `wget -O- ${origin}/r | sh -s ${code}`;
-      psEl.textContent = `& ([scriptblock]::Create((irm ${origin}/ps/r))) '${code}'`;
-      cliEl.textContent = `sp2p receive -server ${origin} ${code}`;
-
-      // Set up click-to-copy on confirmation copy-boxes.
-      for (const box of confirmContainer.querySelectorAll<HTMLElement>(".copy-box")) {
-        box.addEventListener("click", async () => {
-          const codeEl = box.querySelector("code");
-          if (!codeEl?.textContent) return;
-          await navigator.clipboard.writeText(codeEl.textContent);
-          const hint = box.querySelector(".copy-hint");
-          if (hint) {
-            hint.textContent = "copied!";
-            box.classList.add("copied");
-            setTimeout(() => {
-              hint.textContent = "click to copy";
-              box.classList.remove("copied");
-            }, 2000);
-          }
-        });
-      }
-
     }
+
+    // Populate CLI commands.
+    const origin = location.origin;
+    const curlEl = confirmContainer.querySelector(".confirm-curl")!;
+    const wgetEl = confirmContainer.querySelector(".confirm-wget")!;
+    const psEl = confirmContainer.querySelector(".confirm-powershell")!;
+    const cliEl = confirmContainer.querySelector(".confirm-cli")!;
+    curlEl.textContent = `curl -f ${origin}/r | sh -s ${code}`;
+    wgetEl.textContent = `wget -O- ${origin}/r | sh -s ${code}`;
+    psEl.textContent = `& ([scriptblock]::Create((irm ${origin}/ps/r))) '${code}'`;
+    cliEl.textContent = `sp2p receive -server ${origin} ${code}`;
 
     // Invoke the picker in the click handler itself, before transient activation
     // expires during ICE/key exchange. Even a missing preview needs a gesture.
@@ -1045,8 +1148,21 @@ function initFooterVersion(): void {
 }
 
 // Initialize based on page.
+// Enables scroll-reveal styling; without JS, everything stays visible.
+document.documentElement.classList.add("js");
+
 document.addEventListener("DOMContentLoaded", () => {
+  let platform = detectPlatform();
   initFooterVersion();
+  initTabs(platform);
+  applyDownloadLinks(platform);
+  initArchToggle(() => platform);
+  void refinePlatform(platform).then((refined) => {
+    platform = refined;
+    applyDownloadLinks(refined);
+  });
+  initCopyBoxes();
+  initReveal();
   if (document.body.dataset.page === "send") {
     initSend();
   } else if (document.body.dataset.page === "receive") {
