@@ -1,0 +1,50 @@
+name: Deploy published release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published full release to deploy and smoke-test (e.g. v0.7.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sp2p-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Expected a full release tag such as v0.7.1' >&2
+            exit 1
+          fi
+          gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft == false' | grep -qx true
+      - name: Request deployment
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ vars.DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          export DEPLOY_VERSION="${RELEASE_TAG#v}"
+          python3 scripts/request-deploy.py
+
+  smoke:
+    needs: deploy
+    uses: ./.github/workflows/smoke-production.yml
+    with:
+      tag: ${{ inputs.tag }}

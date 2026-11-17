@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: sp2p-production-deploy
+  cancel-in-progress: false
+
 jobs:
   # Releases ship only commits whose Extended checks (extended.yml: shaped
   # network, relay, engine matrix, N-2 compatibility, large transfer checks)
@@ -435,12 +439,11 @@ jobs:
 
       - name: Deploy to server
         if: needs.release.outputs.has_server == 'true'
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
-          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} 'cd /opt/sp2p && docker compose pull && docker compose up -d'
+        env:
+          DEPLOY_WEBHOOK_URL: ${{ vars.DEPLOY_WEBHOOK_URL }}
+          DEPLOY_WEBHOOK_SECRET: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}
+          DEPLOY_VERSION: ${{ needs.release.outputs.clean_version }}
+        run: python3 scripts/request-deploy.py
 
   # Post-deploy check of production sp2p.io. Full releases only: a
   # `-server`-scoped tag has no CLI asset to drive one side of the transfer

@@ -384,6 +384,9 @@ A missing config file is ignored. A malformed one is an error.
 
 ## Self-Hosting
 
+For automated updates over HTTPS while keeping SSH private, see the
+[deployment sidecar setup](docs/deployment.md).
+
 ### Docker Compose
 
 Docker Compose is the easiest way to self-host SP2P. Clone this repo and run:

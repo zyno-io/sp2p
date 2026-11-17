@@ -1,0 +1,33 @@
+[
+  {
+    "id": "sp2p-deploy",
+    "execute-command": "/usr/local/bin/sp2p-deploy",
+    "command-working-directory": "{{ getenv "SP2P_DEPLOY_DIR" | js }}",
+    "http-methods": ["POST"],
+    "success-http-response-code": 202,
+    "response-message": "Deployment requested. Verify completion with production smoke.\n",
+    "trigger-rule-mismatch-http-response-code": 403,
+    "pass-arguments-to-command": [
+      {"source": "payload", "name": "version"},
+      {"source": "payload", "name": "timestamp"}
+    ],
+    "trigger-rule": {
+      "and": [
+        {
+          "match": {
+            "type": "payload-hmac-sha256",
+            "secret": "{{ getenv "SP2P_DEPLOY_SECRET" | js }}",
+            "parameter": {"source": "header", "name": "X-Sp2p-Signature"}
+          }
+        },
+        {
+          "match": {
+            "type": "regex",
+            "regex": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$",
+            "parameter": {"source": "payload", "name": "version"}
+          }
+        }
+      ]
+    }
+  }
+]

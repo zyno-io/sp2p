@@ -6,6 +6,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Changed
+
+- Deploy published server images through an authenticated HTTPS sidecar, keeping SSH private to Tailscale. Add a manual deploy-and-smoke workflow for existing releases.
+
 ## [0.7.1] - 2026-11-16
 
 ### Fixed
