@@ -251,6 +251,11 @@ a:hover { text-decoration-thickness: 2px; }
 
 @keyframes wire-flow { to { stroke-dashoffset: -280; } }
 
+/* Decorative loops stop while a transfer is running, so they never compete
+   with WebRTC and encryption for the main thread on slow machines. */
+body:has(.steps:not(.hidden)) .hero-line,
+body:has(.steps:not(.hidden)) .tm-pkt { animation: none; }
+
 .hero-copy { position: relative; }
 
 .subtitle {
