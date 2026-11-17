@@ -191,13 +191,26 @@ test.describe("Send page", () => {
       await install.getByRole("tab", { name: tab, exact: true }).click();
       const panel = install.getByRole("tabpanel", { name: tab, exact: true });
       await expect(panel.locator(".download-btn")).toHaveAttribute("href", new RegExp(`^/dl/${os}/(amd64|arm64)$`));
-      await expect(panel.locator(".download-alt")).toHaveAttribute("href", new RegExp(`^/dl/${os}/(amd64|arm64)$`));
+      if (os !== "linux") {
+        await expect(panel.locator(".download-alt")).toHaveAttribute("href", new RegExp(`^/dl/${os}/(amd64|arm64)$`));
+      }
       await expect(panel.locator(".download-platform")).not.toBeEmpty();
     }
     await install.getByRole("tab", { name: "Linux", exact: true }).click();
     await expect(install.getByRole("tabpanel", { name: "Linux" })).toContainText(`curl -fLO ${origin}/dl/sp2p_amd64.deb`);
     await expect(install.getByRole("tabpanel", { name: "Linux" })).toContainText(`curl -fLO ${origin}/dl/sp2p_amd64.rpm`);
     await expect(install.getByRole("tabpanel", { name: "Linux" })).toContainText(`apk add sp2p_amd64.apk`);
+    const linux = install.getByRole("tabpanel", { name: "Linux" });
+    await expect(linux.getByRole("button", { name: /^amd64/ })).toHaveAttribute("aria-pressed", "true");
+    await linux.getByRole("button", { name: /^arm64/ }).click();
+    await expect(linux.getByRole("button", { name: /^arm64/ })).toHaveAttribute("aria-pressed", "true");
+    await expect(linux.locator(".download-btn")).toHaveAttribute("href", "/dl/linux/arm64");
+    await expect(linux).toContainText(`curl -fLO ${origin}/dl/sp2p_arm64.deb`);
+    await expect(linux).toContainText(`apk add sp2p_arm64.apk`);
+    await expect(linux).toContainText("yay -S sp2p-bin");
+    await install.getByRole("tab", { name: "Windows", exact: true }).click();
+    await expect(install.getByRole("tabpanel", { name: "Windows" })).toContainText("winget install zyno-io.sp2p");
+    await expect(install.getByRole("tabpanel", { name: "Windows" })).toContainText("choco install sp2p");
     await expect(page.locator(".cli-send-command")).toHaveText(`sp2p send -server ${origin} <file>`);
     await expect(page.locator(".cli-recv-command")).toHaveText(`sp2p receive -server ${origin} CODE`);
     await expect(install.locator(".send-curl, .send-wget, .send-powershell")).toHaveCount(0);

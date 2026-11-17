@@ -690,6 +690,32 @@ details > * + * { margin-top: 0.6rem; }
 .download-platform { font-family: var(--font-mono); font-size: 0.78rem; font-weight: 400; opacity: 0.75; }
 .download-alt { font-size: 0.92rem; color: var(--ink-2); }
 
+.arch-toggle {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+}
+.arch-opt {
+  padding: 0.4rem 0.95rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-2);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.2s, color 0.2s;
+}
+.arch-opt span { font-weight: 400; opacity: 0.7; margin-left: 0.2rem; }
+.arch-opt:hover { color: var(--ink); }
+.arch-opt[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.arch-opt:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
 .package-list > * + * { margin-top: 0.75rem; }
 
 .download-all {

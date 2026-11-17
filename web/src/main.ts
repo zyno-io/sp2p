@@ -287,13 +287,21 @@ function archLabel(os: OS, arch: Arch): string {
   return arch === "arm64" ? "ARM (arm64)" : "x86-64 (amd64)";
 }
 
+// Linux picks its architecture with a toggle that drives both the download
+// button and the package snippets. It follows detection until clicked.
+let linuxArch: Arch = "amd64";
+let linuxArchChosen = false;
+
 // Point each platform's download button at the detected architecture for
 // that OS (or its most common one), with the other architecture as a link.
 function applyDownloadLinks(platform: Platform): void {
+  if (!linuxArchChosen) linuxArch = platform.os === "linux" ? platform.arch : "amd64";
   for (const group of document.querySelectorAll<HTMLElement>("[data-download-os]")) {
     const os = group.dataset.downloadOs as OS;
     if (!(os in OS_LABELS)) continue;
-    const primary: Arch = os === platform.os ? platform.arch : (os === "darwin" ? "arm64" : "amd64");
+    const primary: Arch = os === "linux"
+      ? linuxArch
+      : os === platform.os ? platform.arch : (os === "darwin" ? "arm64" : "amd64");
     const alternate: Arch = primary === "arm64" ? "amd64" : "arm64";
     const button = group.querySelector<HTMLAnchorElement>(".download-btn");
     const label = group.querySelector(".download-platform");
@@ -307,12 +315,26 @@ function applyDownloadLinks(platform: Platform): void {
   }
 
   // Linux package snippets point at this server's /dl redirects, using the
-  // detected architecture on Linux (release packages are sp2p_{amd64,arm64}.*).
-  const linuxArch: Arch = platform.os === "linux" ? platform.arch : "amd64";
+  // selected Linux architecture (release packages are sp2p_{amd64,arm64}.*).
   for (const el of document.querySelectorAll<HTMLElement>("code[data-template]")) {
     el.textContent = (el.dataset.template ?? "")
       .split("{origin}").join(location.origin)
       .split("{arch}").join(linuxArch);
+  }
+  for (const opt of document.querySelectorAll<HTMLButtonElement>(".arch-opt")) {
+    opt.setAttribute("aria-pressed", String(opt.dataset.arch === linuxArch));
+  }
+}
+
+function initArchToggle(getPlatform: () => Platform): void {
+  for (const opt of document.querySelectorAll<HTMLButtonElement>(".arch-opt")) {
+    opt.addEventListener("click", () => {
+      const arch = opt.dataset.arch;
+      if (arch !== "amd64" && arch !== "arm64") return;
+      linuxArch = arch;
+      linuxArchChosen = true;
+      applyDownloadLinks(getPlatform());
+    });
   }
 }
 
@@ -1130,11 +1152,15 @@ function initFooterVersion(): void {
 document.documentElement.classList.add("js");
 
 document.addEventListener("DOMContentLoaded", () => {
-  const platform = detectPlatform();
+  let platform = detectPlatform();
   initFooterVersion();
   initTabs(platform);
   applyDownloadLinks(platform);
-  void refinePlatform(platform).then(applyDownloadLinks);
+  initArchToggle(() => platform);
+  void refinePlatform(platform).then((refined) => {
+    platform = refined;
+    applyDownloadLinks(refined);
+  });
   initCopyBoxes();
   initReveal();
   if (document.body.dataset.page === "send") {

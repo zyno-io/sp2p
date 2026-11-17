@@ -329,8 +329,11 @@
 
           <div id="platform-panel-linux" class="platform-panel" role="tabpanel" aria-labelledby="platform-tab-linux" hidden>
             <div class="download-section" data-download-os="linux">
+              <div class="arch-toggle" role="group" aria-label="Linux architecture">
+                <button class="arch-opt" type="button" data-arch="amd64" aria-pressed="true">amd64 <span>x86-64</span></button>
+                <button class="arch-opt" type="button" data-arch="arm64" aria-pressed="false">arm64 <span>ARM</span></button>
+              </div>
               <a class="download-btn" href="/dl/linux/amd64">Download for Linux <span class="download-platform">x86-64 (amd64)</span></a>
-              <a class="download-alt" href="/dl/linux/arm64">or ARM (arm64)</a>
             </div>
             <div class="package-list">
               <button class="copy-box" type="button">
@@ -352,6 +355,11 @@ wget -O /etc/apk/keys/oss@zyno.io-sp2p.rsa.pub https://cdn.zyno.io/apps/sp2p/sp2
 apk add sp2p_amd64.apk</code>
                 <span class="copy-hint">click to copy</span>
               </button>
+              <button class="copy-box" type="button">
+                <span class="copy-caption">Arch (AUR)</span>
+                <code>yay -S sp2p-bin</code>
+                <span class="copy-hint">click to copy</span>
+              </button>
             </div>
           </div>
 
@@ -365,6 +373,16 @@ apk add sp2p_amd64.apk</code>
                 <span class="copy-caption">Scoop</span>
                 <code>scoop bucket add zyno-io https://github.com/zyno-io/scoop-bucket
 scoop install sp2p</code>
+                <span class="copy-hint">click to copy</span>
+              </button>
+              <button class="copy-box" type="button">
+                <span class="copy-caption">WinGet</span>
+                <code>winget install zyno-io.sp2p</code>
+                <span class="copy-hint">click to copy</span>
+              </button>
+              <button class="copy-box" type="button">
+                <span class="copy-caption">Chocolatey</span>
+                <code>choco install sp2p</code>
                 <span class="copy-hint">click to copy</span>
               </button>
             </div>
