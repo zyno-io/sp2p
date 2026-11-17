@@ -84,10 +84,12 @@ across all four pairings, on `clean` and `wan150` profiles). It runs:
 title "Extended checks failed") when any job fails or is cancelled, except on
 a manual dispatch, which only reports in the run itself.
 
-**Release gate:** `release.yml`'s `extended-checks` job refuses to publish a
-release unless Extended checks passed on the tagged commit. If a run is
-already in progress on that commit, it waits (up to ~2 hours) instead of
-failing immediately.
+**Release check:** `release.yml`'s `extended-checks` job reports whether
+Extended checks passed on the tagged commit, waiting (up to ~2 hours) for a
+run already in progress. It runs alongside the release jobs and does not
+block them: a failed or missing run marks the release run red after the
+release has already published and deployed, so check it before publishing
+packages.
 
 ## Lane-diagnostics stress
 
@@ -218,10 +220,10 @@ version fails the test rather than assuming a default.
 Every plain `vX.Y.Z` release needs an entry in
 `testdata/release-capabilities.json`, added before the tag is pushed. Once
 tagged it becomes "the previous release" for CI, and the lookup fails closed
-for unlisted versions. Releases also require a green Extended checks run on
-the tagged commit: `release.yml`'s `extended-checks` job waits for one already
-in progress (up to ~2 hours) or refuses to publish without it — see
-[Extended checks](#extended-checks) above. After the tag is pushed,
+for unlisted versions. Releases should also have a green Extended checks run
+on the tagged commit: `release.yml`'s `extended-checks` job reports it in
+parallel with publishing (waiting up to ~2 hours for a run in progress) but
+does not block the release — see [Extended checks](#extended-checks) above. After the tag is pushed,
 `release.yml`'s `smoke` job runs automatically against production once the
 deploy lands (see [Production smoke test](#production-smoke-test)); package
 manifests (Homebrew, Scoop, AUR, Chocolatey, WinGet) are always published
