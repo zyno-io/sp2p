@@ -42,6 +42,10 @@ class DeployHookTest(unittest.TestCase):
         stub = cls.root / "docker"
         stub.write_text("""#!/bin/sh
 set -eu
+if [ "$1" = image ] && [ "$2" = tag ]; then
+    printf '%s\\n' "$@" > /test/tag-args
+    exit 0
+fi
 printf '%s\\n' "$@" > /test/args
 for arg do
     case "$arg" in /run/sp2p-deploy-override.*) cat "$arg" > /test/override.json ;; esac
@@ -125,7 +129,7 @@ if [ -f /test/fail ]; then exit 17; fi
         raise AssertionError("Timed out waiting for the test sidecar")
 
     def setUp(self):
-        for name in ["block", "fail", "started", "args", "override.json"]:
+        for name in ["block", "fail", "started", "args", "tag-args", "override.json"]:
             (self.root / name).unlink(missing_ok=True)
 
     def tearDown(self):
@@ -138,6 +142,7 @@ if [ -f /test/fail ]; then exit 17; fi
     def assert_no_deploy(self):
         time.sleep(0.2)
         self.assertFalse((self.root / "started").exists())
+        self.assertFalse((self.root / "tag-args").exists())
 
     def test_unsigned_and_tampered_requests_cannot_deploy(self):
         body = self.payload()
@@ -161,12 +166,14 @@ if [ -f /test/fail ]; then exit 17; fi
 
     def test_signed_request_updates_only_the_fixed_service_and_image(self):
         self.assertEqual(self.request(self.payload())[0], 202)
-        self.wait_until(lambda: (self.root / "started").exists())
+        self.wait_until(lambda: (self.root / "tag-args").exists())
         args = (self.root / "args").read_text().splitlines()
         self.assertEqual(args[:5], ["compose", "--project-directory", "/test", "--file", "docker-compose.yml"])
         self.assertEqual(args[-7:], ["up", "--detach", "--no-deps", "--no-build", "--pull", "always", "sp2p"])
         override = json.loads((self.root / "override.json").read_text())
         self.assertEqual(override, {"services": {"sp2p": {"image": "ghcr.io/zyno-io/sp2p-server:0.7.1"}}})
+        self.assertEqual((self.root / "tag-args").read_text().splitlines(),
+                         ["image", "tag", "ghcr.io/zyno-io/sp2p-server:0.7.1", "ghcr.io/zyno-io/sp2p-server:latest"])
 
     def test_concurrent_request_does_not_start_a_second_deploy(self):
         (self.root / "block").touch()

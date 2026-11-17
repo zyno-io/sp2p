@@ -29,6 +29,9 @@ A temporary Compose override selects
 the service's environment, ports, volumes, and other settings. Requests cannot
 select another image repository, service, command, or Compose file. The sidecar
 does not update itself, the reverse proxy, or TURN services.
+After a successful update, the local `:latest` alias points to the deployed
+image too, so a manual Compose restart uses the same image. The production
+service's base image should remain `ghcr.io/zyno-io/sp2p-server:latest`.
 
 HTTP 202 means the authenticated request was accepted for execution, **not**
 that deployment succeeded. The existing production smoke workflow waits for

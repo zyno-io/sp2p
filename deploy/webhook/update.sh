@@ -31,3 +31,6 @@ printf '{"services":{"sp2p":{"image":"ghcr.io/zyno-io/sp2p-server:%s"}}}\n' "$ve
 timeout -k 10 600 docker compose --project-directory "$PWD" \
     --file "${SP2P_DEPLOY_COMPOSE_FILE:-docker-compose.yml}" --file "$override" \
     up --detach --no-deps --no-build --pull always sp2p
+# The production file uses :latest. Keep that local alias on the deployed
+# image so a later manual `compose up` cannot restore a stale cached image.
+timeout -k 10 30 docker image tag "ghcr.io/zyno-io/sp2p-server:$version" ghcr.io/zyno-io/sp2p-server:latest
