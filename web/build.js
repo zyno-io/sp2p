@@ -49,8 +49,9 @@ async function build() {
     fs.writeFileSync(path.join("dist", html), content);
   }
 
-  // Copy favicon.
+  // Copy favicon and the pre-paint theme script (loaded from <head>).
   fs.copyFileSync("favicon.svg", path.join("dist", "favicon.svg"));
+  fs.copyFileSync("theme.js", path.join("dist", "theme.js"));
 
   // Agent-facing Markdown is served directly by the Go server. Keep the
   // conventional full-context file generated from the same source so the two
