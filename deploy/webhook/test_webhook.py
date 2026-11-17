@@ -32,6 +32,10 @@ class DeployHookTest(unittest.TestCase):
         # Docker on macOS may share the workspace but not the system temp dir.
         cls.scratch = tempfile.TemporaryDirectory(prefix=".sp2p-hook-test-", dir=Path.cwd())
         cls.root = Path(cls.scratch.name)
+        # The fake Docker command writes captures as container UID 0 without
+        # DAC_OVERRIDE; Linux runner files belong to a different host UID.
+        # This directory contains generated test data, never real credentials.
+        cls.root.chmod(0o777)
         cls.secret = secrets.token_hex(32) + '"\\'
         (cls.root / "secret").write_text(cls.secret)
         (cls.root / "docker-compose.yml").write_text("services: {sp2p: {image: example.invalid/unused}}\n")
