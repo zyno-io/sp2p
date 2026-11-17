@@ -6,6 +6,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Removed
+
+- Remove the server's `-deploy-webhook-url` flag (`SP2P_DEPLOY_WEBHOOK_URL`) and its `/hooks/sp2p-deploy` forwarding route. The deployment sidecar now listens on host loopback, and the host's tunnel or reverse proxy routes the hook path to it directly. Clear the variable from production configuration.
+
 ### Changed
 
 - Redesign the website's send and receive pages. Add a plain-language Security section, per-platform Install tabs and curl/wget/PowerShell switchers that preselect the visitor's OS and architecture, a Linux amd64/arm64 switch for the download and package commands, AUR/WinGet/Chocolatey install commands, light and dark themes, and self-hosted fonts.

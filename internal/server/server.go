@@ -36,7 +36,6 @@ type Config struct {
 	ACME             bool                     // enable ACME auto-certificates (domain derived from BaseURL)
 	ACMEEmail        string                   // contact email for ACME (optional)
 	ConfigDir        string                   // directory for persistent data like ACME certs (optional)
-	DeployWebhookURL string                   // private deployment sidecar origin (optional)
 }
 
 // Server is the SP2P signaling server.
@@ -78,14 +77,6 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.TrustProxy && len(proxies) == 0 {
 		return nil, fmt.Errorf("trust-proxy requires explicit trusted-proxies IPs/CIDRs")
-	}
-	var deployHandler http.Handler
-	if cfg.DeployWebhookURL != "" {
-		handler, err := newDeployProxy(cfg.DeployWebhookURL)
-		if err != nil {
-			return nil, err
-		}
-		deployHandler = handler
 	}
 	sessions := NewSessionManager(cfg.MaxSessions, cfg.MaxSessionsPerIP)
 
@@ -137,9 +128,6 @@ func New(cfg Config) (*Server, error) {
 	wsLimiter.TrustedProxies = proxies
 
 	mux := http.NewServeMux()
-	if deployHandler != nil {
-		mux.Handle("/hooks/sp2p-deploy", deployHandler)
-	}
 
 	// WebSocket endpoint with rate limiting.
 	mux.Handle("/ws", wsLimiter.Middleware(signalHandler))
