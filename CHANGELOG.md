@@ -12,6 +12,12 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ### Changed
 
+- Run the release workflow's Extended checks job in parallel instead of as a gate, so publishing and deployment no longer wait for it. A failed or missing Extended checks run still marks the release run red.
+
+## [0.7.3] - 2026-11-17
+
+### Changed
+
 - Redesign the website's send and receive pages. Add a plain-language Security section, per-platform Install tabs and curl/wget/PowerShell switchers that preselect the visitor's OS and architecture, a Linux amd64/arm64 switch for the download and package commands, AUR/WinGet/Chocolatey install commands, light and dark themes, and self-hosted fonts.
 
 ### Fixed

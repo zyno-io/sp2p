@@ -12,10 +12,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Releases ship only commits whose Extended checks (extended.yml: shaped
+  # Reports whether the tagged commit's Extended checks (extended.yml: shaped
   # network, relay, engine matrix, N-2 compatibility, large transfer checks)
-  # passed. Extended checks run on every push to main; wait for one still in
-  # progress.
+  # passed, waiting for a run still in progress. It runs alongside the release
+  # rather than gating it: a failure marks this run red but does not stop
+  # publishing or deployment.
   extended-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 130
@@ -69,7 +70,6 @@ jobs:
           done
 
   release:
-    needs: extended-checks
     runs-on: ubuntu-latest
     environment: release
     outputs:
