@@ -125,10 +125,10 @@ docker compose -f /opt/sp2p-deploy/compose.yml exec -T deploy \
 Run the manual deployment workflow afterward to verify the HTTPS path and
 production smoke.
 
-## Migrating from the server-forwarded hook (0.7.2)
+## Migrating from the server-forwarded hook (0.7.2–0.7.3)
 
-Server 0.7.2 forwarded the hook itself through `SP2P_DEPLOY_WEBHOOK_URL`; later
-servers do not. Switch the routing **before** deploying a server without the
+Servers 0.7.2 and 0.7.3 forwarded the hook themselves through
+`SP2P_DEPLOY_WEBHOOK_URL`; later servers do not. Switch the routing **before** deploying a server without the
 forwarding route, or the next hook request reaches sp2p and returns 404:
 
 1. Attach the tunnel connector, `sp2p`, and the sidecar to a shared network
