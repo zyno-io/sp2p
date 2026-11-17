@@ -3,7 +3,8 @@
 The release workflow publishes signed artifacts and the server image, then sends
 an authenticated HTTPS request to a separate deployment sidecar. The sidecar
 uses the host's Docker socket to update the existing `sp2p` Compose service.
-SSH remains private to Tailscale, and Tailnet Lock needs no changes.
+sp2p's existing HTTPS listener forwards only this hook path to the private
+sidecar. SSH remains private to Tailscale, and Tailnet Lock needs no changes.
 
 The sidecar uses [webhook](https://github.com/adnanh/webhook), Docker CLI, and
 Compose. Its Docker socket access gives it control of the host's containers;
@@ -70,20 +71,17 @@ production file on the server.
    production `.env` and project name as it did when run through SSH. Include
    any additional configuration files referenced by that production file.
 
-4. Route only `/hooks/sp2p-deploy` through the existing HTTPS reverse proxy to
-   `127.0.0.1:9000`, with a request-body limit of 4 KiB. For host-based nginx:
+4. Set `SP2P_DEPLOY_WEBHOOK_URL=http://sp2p-deploy:9000` in the existing
+   production `sp2p` service's environment. This enables only
+   `POST /hooks/sp2p-deploy`, limits its body to 4 KiB, and forwards the exact
+   signed bytes. The route is disabled by default. Existing TLS/ACME settings
+   remain authoritative; the application never receives the Docker socket or
+   deployment secret.
 
-   ```nginx
-   location = /hooks/sp2p-deploy {
-       client_max_body_size 4k;
-       proxy_pass http://127.0.0.1:9000;
-   }
-   ```
-
-   The sidecar publishes its port on loopback only. A proxy in another
-   container should instead share a Docker network with the sidecar and use
-   `deploy:9000` as its upstream. Preserve the complete request path and
-   signature header, bypass caching for this route, and retain HTTPS publicly.
+   The sidecar joins the existing `sp2p_default` Docker network with the alias
+   `sp2p-deploy`, and publishes no host ports. Set `SP2P_DEPLOY_NETWORK` to the
+   actual production network name if different. No separate HTTPS proxy or
+   public SSH access is required.
 
 5. In the GitHub `release` environment, store the same secret as
    `DEPLOY_WEBHOOK_SECRET`, and set the environment variable
@@ -94,6 +92,21 @@ production file on the server.
    for the manual deployment workflow, retaining its existing `v*` tag rule.
    Use the environment's existing approval policy for deployments.
 
+The forwarding route requires server 0.7.2 or newer. For the initial upgrade
+from a server without it, publish the new image first, then run the fixed
+worker once through trusted Tailscale SSH:
+
+```sh
+docker compose -f /opt/sp2p-deploy/compose.yml exec -T deploy \
+    /usr/local/bin/sp2p-deploy 0.7.2 "$(date +%s)"
+```
+
+This applies the configured server environment along with the new image,
+bringing the public HTTPS forwarding route online. Run the manual deployment
+workflow to verify the HTTPS path and production smoke, or re-run a release's
+failed deployment job after bootstrap so its smoke job completes. Keep release
+tags unchanged.
+
 ## Deploy an already published release
 
 Run [Deploy published release](../.github/workflows/deploy.yml) from `main`,
@@ -101,6 +114,8 @@ providing a full release tag such as `v0.7.1`. It verifies that the GitHub
 Release is published, requests that exact server image version, and runs the
 production smoke workflow. It neither rebuilds artifacts nor publishes OS
 packages. This path can also deploy an older published image for a rollback.
+Rolling back to a server older than 0.7.2 removes the forwarding route; use
+the trusted SSH bootstrap command to upgrade again in that case.
 
 Future full releases invoke the same HTTPS request helper automatically after
 publication. A server-only release requests deployment but still needs the

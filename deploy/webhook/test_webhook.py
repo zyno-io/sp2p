@@ -44,7 +44,7 @@ class DeployHookTest(unittest.TestCase):
 set -eu
 printf '%s\\n' "$@" > /test/args
 for arg do
-    case "$arg" in /run/sp2p-deploy-override.*) cp "$arg" /test/override.json ;; esac
+    case "$arg" in /run/sp2p-deploy-override.*) cat "$arg" > /test/override.json ;; esac
 done
 touch /test/started
 while [ -f /test/block ]; do sleep 0.05; done

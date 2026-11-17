@@ -3,8 +3,9 @@ name: sp2p-deploy
 services:
   deploy:
     build: .
-    ports:
-      - "127.0.0.1:9000:9000"
+    networks:
+      production:
+        aliases: [sp2p-deploy]
     environment:
       SP2P_DEPLOY_DIR: ${SP2P_DEPLOY_DIR:-/opt/sp2p}
       SP2P_DEPLOY_COMPOSE_FILE: ${SP2P_DEPLOY_COMPOSE_FILE:-docker-compose.yml}
@@ -27,6 +28,11 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     restart: unless-stopped
+
+networks:
+  production:
+    external: true
+    name: ${SP2P_DEPLOY_NETWORK:-sp2p_default}
 
 secrets:
   deploy_secret:
