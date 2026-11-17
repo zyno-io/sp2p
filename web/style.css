@@ -274,11 +274,11 @@ a:hover { text-decoration-thickness: 2px; }
 }
 
 .wordmark {
-  font-size: clamp(7rem, 21vw, 17rem);
+  font-size: clamp(4.5rem, 12vw, 9.5rem);
   font-weight: 800;
   letter-spacing: -0.06em;
   line-height: 0.82;
-  margin: 1.2rem 0 1.6rem -0.04em;
+  margin: 1rem 0 1.25rem -0.04em;
   padding-bottom: 0.17em;
   color: var(--ink);
   display: flex;
@@ -288,9 +288,31 @@ a:hover { text-decoration-thickness: 2px; }
 
 .hero-lede {
   max-width: 34rem;
-  font-size: clamp(1.08rem, 1.4vw, 1.3rem);
-  line-height: 1.5;
+  font-size: clamp(1.15rem, 1.6vw, 1.4rem);
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.hero-points {
+  list-style: none;
+  max-width: 34rem;
+  margin-top: 1rem;
   color: var(--ink-2);
+  font-size: clamp(1rem, 1.2vw, 1.1rem);
+  line-height: 1.45;
+}
+.hero-points li { position: relative; padding-left: 1.4rem; }
+.hero-points li + li { margin-top: 0.45rem; }
+.hero-points li::before {
+  content: "";
+  position: absolute;
+  left: 0.15rem;
+  top: 0.55em;
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 2px;
+  background: var(--signal);
 }
 
 .hero-link {
@@ -309,9 +331,10 @@ a:hover { text-decoration-thickness: 2px; }
   .wm-ch:nth-child(2) { animation-delay: 0.06s; }
   .wm-ch:nth-child(3) { animation-delay: 0.12s; }
   .wm-ch:nth-child(4) { animation-delay: 0.18s; }
-  .subtitle, .hero-lede, .hero-link { animation: fade-up 0.8s var(--ease-out) both; }
+  .subtitle, .hero-lede, .hero-points, .hero-link { animation: fade-up 0.8s var(--ease-out) both; }
   .subtitle { animation-delay: 0.05s; }
   .hero-lede { animation-delay: 0.3s; }
+  .hero-points { animation-delay: 0.35s; }
   .hero-link { animation-delay: 0.4s; }
   .transfer-panel { animation: fade-up 0.9s 0.25s var(--ease-out) both; }
 }
@@ -1198,7 +1221,7 @@ footer a:hover { color: var(--ink); text-decoration: underline; }
     padding-top: 5.5rem;
     gap: 2.25rem;
   }
-  .wordmark { font-size: clamp(6rem, 34vw, 13rem); margin: 0.9rem 0 1rem -0.04em; }
+  .wordmark { font-size: clamp(4.25rem, 22vw, 7.5rem); margin: 0.8rem 0 1rem -0.04em; }
   .transfer-panel { justify-self: stretch; max-width: none; }
   .usage-panel, .platform-panel { grid-template-columns: minmax(0, 1fr); }
   .usage-aside { position: static; }
@@ -1210,6 +1233,7 @@ footer a:hover { color: var(--ink); text-decoration: underline; }
   .topbar-links { gap: 0.9rem; font-size: 0.88rem; }
   .hero { padding-bottom: 3rem; }
   .hero-lede { font-size: 1.05rem; }
+  .hero-points { font-size: 0.98rem; }
   .drop-zone { padding: 2.25rem 1.25rem; }
   .trust-list { grid-template-columns: minmax(0, 1fr); }
   .trust-map { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; gap: 0; padding: 0; }
