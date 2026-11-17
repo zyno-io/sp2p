@@ -6,9 +6,12 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-16
+
 ### Fixed
 
 - Clear the sender terminal’s AI Agent prompt together with the share panel when the receiver joins, so it does not remain above connection status or transfer progress. Preserve the full prompt at narrow terminal widths and while showing a QR code.
+- Keep waiting when GitHub temporarily returns an empty workflow listing to the release gate, and stabilize the Windows test TURN statistics writer check.
 
 ### Changed
 
