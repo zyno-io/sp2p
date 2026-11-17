@@ -320,6 +320,26 @@ older, narrower two-project config) has been folded in and removed. A fourth
 cross-engine project, `msedge`, exists only on win32 — see
 [Windows](#windows-native-cli-and-edge) below.
 
+**Local ICE discovery.** When `webkit` or `engines` is selected, global setup
+builds the existing `internal/testturn/testturnd` fixture and starts it on an
+ephemeral loopback UDP port. Its STUN URL is supplied to both the shared and
+isolated signaling servers. Only STUN is advertised: the fixture returns the
+client's observed address, and transfer data travels directly between peers.
+It does not enable TURN relay or change the application's relay-consent flow.
+Global teardown stops the fixture; its parent-exit guard also bounds orphaned
+processes if the runner is killed.
+
+This avoids relying on public STUN connectivity or mDNS resolution between
+isolated browser processes. Playwright 1.65.1's WebKit timed out in the latter
+case on both hosted macOS and the development Mac. A minimal probe connected
+with local STUN while preserving the browser's normal address-privacy policy.
+No capture permissions, privacy overrides, candidate rewriting, dependency
+downgrades, relaxed lane counts, or additional test retries are used. WebKit's
+[ICE privacy guidance](https://webkit.org/blog/7763/a-closer-look-into-webrtc/#ice-candidate-restrictions)
+describes server-reflexive candidates as a supported path for data connections.
+The tests still require complete transfers, verified hashes, and the agreed
+parallel-lane counts.
+
 **Why only three specs run cross-engine.** `firefox`/`webkit` `testMatch`
 only `interop.spec.ts`, `parallel-interop.spec.ts`, and `webrtc-policy.spec.ts`
 — the specs that exercise a real `browser`/`page` fixture and generalize
@@ -391,7 +411,10 @@ enumeration. Chromium↔Firefox and CLI↔Firefox (both directions each, 4
 cells) are tagged `@pr`; the rest — anything touching WebKit, plus
 CLI↔Chromium — is extended-checks only (after merge / weekly / pre-release).
 
-**CI wiring.** `ci.yml`'s new `browser-firefox` job (`ubuntu-latest`, not
+**CI wiring.** `ci.yml`'s `macos-rsync` job runs the WebKit transfer suite on
+every PR, alongside its native rsync checks, so a browser dependency update
+cannot defer basic WebKit failures until after merge. Its
+`browser-firefox` job (`ubuntu-latest`, not
 yet a required check) runs `--project=firefox` plus
 `--project=engines --grep @pr`. `extended.yml`'s `engines` job
 (`macos-15` — closer to Safari's WebKit than a Linux runner) runs

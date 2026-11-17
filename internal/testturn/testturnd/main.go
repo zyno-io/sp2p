@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 
-// Command testturnd runs a minimal, CI-only TURN relay server (see the
-// parent internal/testturn package) used by web/tests/relay.spec.ts to
-// prove real relay-only WebRTC transfers end-to-end.
+// Command testturnd runs a minimal, test-only STUN/TURN server (see the
+// parent internal/testturn package). Browser setup uses its STUN bindings
+// for local discovery; relay.spec.ts proves relay-only WebRTC transfers.
 //
 // This is a deliberate exception to the repo's flat internal/ package
 // layout (see AGENTS.md, CLAUDE.md's "Packages are flat within internal/"):
@@ -109,7 +109,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	defer srv.Close()
 
 	// No secret, and no session identifier of any kind, in this line.
-	fmt.Fprintf(stdout, "testturnd ready listen=%s relay=%s:%d-%d quota=%d\n", *listenAddr, relayIP.String(), *minPort, *maxPort, *userQuota)
+	fmt.Fprintf(stdout, "testturnd ready listen=%s relay=%s:%d-%d quota=%d\n", srv.Addr(), relayIP.String(), *minPort, *maxPort, *userQuota)
 
 	sigCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

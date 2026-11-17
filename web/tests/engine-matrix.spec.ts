@@ -23,8 +23,8 @@
 // tagged @pr and gate PRs cheaply (ci.yml's browser-firefox job, `--project
 // engines --grep @pr`). Every other cell — anything touching WebKit, plus
 // CLI↔Chromium — is extended-checks only (extended.yml's engines job,
-// macos-15, running after each merge / weekly / pre-release) until WebKit
-// is promoted to gate PRs too.
+// macos-15, running after each merge / weekly / pre-release). The standalone
+// WebKit transfer suite also gates PRs through ci.yml's macos-rsync job.
 
 import { spawn } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -57,7 +57,8 @@ type Playwright = PlaywrightWorkerArgs["playwright"];
 // Hosted CI runners don't reliably resolve the mDNS (.local) names Chromium and
 // Firefox use to hide host candidates, which breaks browser-to-browser ICE
 // while CLI peers (plain addresses) still connect. Expose plain local
-// addresses; WebKit doesn't obfuscate them.
+// addresses. WebKit keeps its normal privacy policy and uses the local STUN
+// discovery configured by global-setup.ts for this project.
 const LAUNCH_OPTIONS: Record<EngineName, Parameters<Playwright["chromium"]["launch"]>[0]> = {
   chromium: { headless: true, args: ["--disable-features=WebRtcHideLocalIpsWithMdns"] },
   firefox: { headless: true, firefoxUserPrefs: { "media.peerconnection.ice.obfuscate_host_addresses": false } },

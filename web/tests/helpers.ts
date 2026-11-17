@@ -35,7 +35,10 @@ export const isolatedServerTest = base.extend<{}, { isolatedServer: string }>({
     // with the platform-correct ".exe" suffix on Windows) — use it directly
     // rather than rebuilding a tmpDir-relative path, which would drop that
     // suffix and silently target a POSIX-only binary name.
-    const server = spawn(state.serverBin, ["-addr", `127.0.0.1:${port}`, "-base-url", url], { stdio: "ignore" });
+    const server = spawn(state.serverBin, [
+      "-addr", `127.0.0.1:${port}`, "-base-url", url,
+      ...(state.stunURL ? ["-turn-servers", state.stunURL] : []),
+    ], { stdio: "ignore" });
     const exited = new Promise<void>(resolve => { server.once("exit", () => resolve()); server.once("error", () => resolve()); });
     try {
       await expect.poll(async () => {

@@ -185,9 +185,9 @@ jobs:
   # WebKit's real DataChannel/ICE/OPFS behavior is closest to Safari's on
   # macOS, so this always builds and runs on macos-15 (never ubuntu-latest),
   # and Firefox/Chromium cells of the full matrix ride along here too since
-  # the runner is already paid for. WebKit starts extended-checks only (after
-  # merge / weekly / pre-release); browser-firefox (ci.yml) already gates PRs
-  # on Firefox plus the @pr-tagged engine-matrix
+  # the runner is already paid for. ci.yml's macos-rsync job also gates PRs
+  # on WebKit transfers; browser-firefox gates them on Firefox plus the
+  # @pr-tagged engine-matrix
   # cells. See docs/testing.md's "Engines" section for local validation.
   engines:
     runs-on: macos-15

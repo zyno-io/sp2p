@@ -1,4 +1,8 @@
+// SPDX-License-Identifier: MIT
+
 import { execSync, execFileSync, spawn, ChildProcess } from "child_process";
+import { randomBytes } from "node:crypto";
+import type { FullConfig } from "@playwright/test";
 import { existsSync, writeFileSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir, platform } from "os";
 import { join } from "path";
@@ -33,7 +37,42 @@ function waitForPort(port: number, timeout = 10_000): Promise<void> {
   });
 }
 
-export default async function globalSetup() {
+// The existing test TURN server also answers unauthenticated STUN bindings.
+// Only its STUN URL is advertised: payloads still travel directly between
+// peers, with normal browser privacy settings and no TURN consent or relay.
+async function startLocalSTUN(tmpDir: string): Promise<{ pid: number; url: string }> {
+  const binary = join(tmpDir, `testturnd${EXE}`);
+  execFileSync("go", ["build", "-o", binary, "./internal/testturn/testturnd"], {
+    cwd: ROOT,
+    stdio: "pipe",
+  });
+  const child = spawn(binary, [
+    "-listen", "127.0.0.1:0", "-relay-ip", "127.0.0.1",
+    "-stats", join(tmpDir, "stun-stats.json"), "-exit-with-parent",
+  ], {
+    stdio: ["ignore", "pipe", "ignore"],
+    env: { ...process.env, SP2P_TESTTURN_SECRET: randomBytes(32).toString("hex") },
+  });
+  try {
+    const url = await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("Local STUN fixture startup timed out")), 10_000);
+      let output = "";
+      child.once("error", error => { clearTimeout(timer); reject(error); });
+      child.once("exit", code => { clearTimeout(timer); reject(new Error(`Local STUN fixture exited (${code})`)); });
+      child.stdout.on("data", data => {
+        output += data.toString();
+        const ready = /testturnd ready listen=(127\.0\.0\.1:[1-9]\d*) /.exec(output);
+        if (ready) { clearTimeout(timer); resolve(`stun:${ready[1]}`); }
+      });
+    });
+    return { pid: child.pid!, url };
+  } catch (error) {
+    child.kill();
+    throw error;
+  }
+}
+
+export default async function globalSetup(config: FullConfig) {
   // Stale records from an earlier local run would hide a MISSING pairing.
   if (process.env.SP2P_NETEM_PROFILE) rmSync(join(__dirname, "..", "..", "test-results", "perf"), { recursive: true, force: true });
   if (process.env.SP2P_RELAY_TEST) rmSync(join(__dirname, "..", "..", "test-results", "relay"), { recursive: true, force: true });
@@ -88,11 +127,17 @@ export default async function globalSetup() {
     });
   }
 
+  // WebKit and the full engine matrix must not depend on public STUN being
+  // reachable or on mDNS resolution between isolated browser processes.
+  const needsLocalSTUN = config.filteredProjects.some(project => project.name === "webkit" || project.name === "engines");
+  const localSTUN = needsLocalSTUN ? await startLocalSTUN(tmpDir) : undefined;
+
   // Start the signaling server.
   console.log(`Starting server on :${PORT}...`);
   const server = spawn(serverBin, [
     "--addr", `:${PORT}`,
     "--base-url", `http://localhost:${PORT}`,
+    ...(localSTUN ? ["--turn-servers", localSTUN.url] : []),
   ], {
     cwd: ROOT,
     stdio: "pipe",
@@ -127,6 +172,8 @@ export default async function globalSetup() {
     serverBin,
     port: PORT,
     stateFile,
+    stunPid: localSTUN?.pid,
+    stunURL: localSTUN?.url,
   }));
   process.env.SP2P_PW_STATE = knownPath;
 
