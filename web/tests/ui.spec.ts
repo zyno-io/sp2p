@@ -9,7 +9,7 @@ test.describe("Send page", () => {
 
   test("shows header and subtitle", async ({ page }) => {
     await page.goto("/");
-    await expect(page.locator("h1")).toContainText("SP2P");
+    await expect(page.locator("h1")).toHaveText("sp2p");
     await expect(page.locator(".subtitle")).toContainText("peer-to-peer");
   });
 
@@ -39,7 +39,6 @@ test.describe("Send page", () => {
     const agentTab = page.getByRole("tab", { name: "AI agent" });
     const rsyncTab = page.getByRole("tab", { name: "rsync" });
     const tunnelTab = page.getByRole("tab", { name: "Tunnels" });
-    const installTab = page.getByRole("tab", { name: "Install", exact: true });
 
     await rsyncTab.click();
     await expect(rsyncTab).toHaveAttribute("aria-selected", "true");
@@ -50,10 +49,13 @@ test.describe("Send page", () => {
     await rsyncTab.press("ArrowRight");
     await expect(tunnelTab).toBeFocused();
     await expect(tunnelTab).toHaveAttribute("aria-selected", "true");
-    await tunnelTab.press("End");
-    await expect(installTab).toBeFocused();
-    await expect(installTab).toHaveAttribute("aria-selected", "true");
-    await installTab.press("Home");
+    await tunnelTab.press("ArrowRight");
+    await expect(agentTab).toBeFocused();
+    await expect(agentTab).toHaveAttribute("aria-selected", "true");
+    await agentTab.press("End");
+    await expect(tunnelTab).toBeFocused();
+    await expect(tunnelTab).toHaveAttribute("aria-selected", "true");
+    await tunnelTab.press("Home");
     await expect(agentTab).toBeFocused();
     await expect(agentTab).toHaveAttribute("aria-selected", "true");
   });
@@ -116,32 +118,33 @@ test.describe("Send page", () => {
   });
 
   for (const width of [1280, 390]) {
-    test(`keeps zero-install commands between the drop zone and tabs at ${width}px`, async ({ page }) => {
+    test(`keeps zero-install commands between the drop zone and usage tabs at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await page.goto("/");
       const commands = page.getByRole("region", { name: "Send without installing" });
       const origin = new URL(page.url()).origin;
-      await expect(commands.locator(".send-curl")).toHaveText(`curl -f ${origin} | sh -s <file>`);
-      await expect(commands.locator(".send-wget")).toHaveText(`wget -O- ${origin} | sh -s <file>`);
-      await expect(commands.locator(".send-powershell")).toHaveText(
-        `& ([scriptblock]::Create((irm ${origin}/ps))) '<file>'`
-      );
-      await expect(page.locator(".drop-zone + .zero-install-section + .usage-section")).toHaveCount(1);
-
-      for (const tab of ["AI agent", "rsync", "Tunnels", "Install"]) {
-        await page.getByRole("tab", { name: tab, exact: true }).click();
-        for (const command of ["send-curl", "send-wget", "send-powershell"]) {
-          await expect(commands.locator(`.${command}`)).toBeVisible();
-        }
-        const dropBox = await page.locator(".drop-zone").boundingBox();
-        const commandsBox = await commands.boundingBox();
-        const tabsBox = await page.getByRole("tablist").boundingBox();
-        expect(dropBox).not.toBeNull();
-        expect(commandsBox).not.toBeNull();
-        expect(tabsBox).not.toBeNull();
-        expect(commandsBox!.y).toBeGreaterThanOrEqual(dropBox!.y + dropBox!.height);
-        expect(tabsBox!.y).toBeGreaterThanOrEqual(commandsBox!.y + commandsBox!.height);
+      const expected: Array<[string, string, string]> = [
+        ["curl", "send-curl", `curl -f ${origin} | sh -s <file>`],
+        ["wget", "send-wget", `wget -O- ${origin} | sh -s <file>`],
+        ["PowerShell", "send-powershell", `& ([scriptblock]::Create((irm ${origin}/ps))) '<file>'`],
+      ];
+      for (const [tab, command, text] of expected) {
+        await commands.getByRole("tab", { name: tab, exact: true }).click();
+        await expect(commands.locator(`.${command}`)).toBeVisible();
+        await expect(commands.locator(`.${command}`)).toHaveText(text);
       }
+
+      const dropBox = await page.locator(".drop-zone").boundingBox();
+      const commandsBox = await commands.boundingBox();
+      const tabsBox = await page.getByRole("tablist", { name: "SP2P usage guides" }).boundingBox();
+      expect(dropBox).not.toBeNull();
+      expect(commandsBox).not.toBeNull();
+      expect(tabsBox).not.toBeNull();
+      expect(commandsBox!.y).toBeGreaterThanOrEqual(dropBox!.y + dropBox!.height);
+      expect(tabsBox!.y).toBeGreaterThanOrEqual(commandsBox!.y + commandsBox!.height);
+
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      expect(overflow).toBeLessThanOrEqual(0);
     });
   }
 
@@ -164,7 +167,10 @@ test.describe("Send page", () => {
       ["send-wget", `wget -O- ${origin} | sh -s `],
       ["send-powershell", `& ([scriptblock]::Create((irm ${origin}/ps))) '`],
     ];
+    const tabFor: Record<string, string> = { "send-curl": "curl", "send-wget": "wget", "send-powershell": "PowerShell" };
+    const zeroInstall = page.getByRole("region", { name: "Send without installing" });
     for (const [name, prefix] of commands) {
+      await zeroInstall.getByRole("tab", { name: tabFor[name], exact: true }).click();
       const command = page.locator(`button[data-copy="${name}"]`);
       await command.focus();
       await command.press("Enter");
@@ -177,18 +183,46 @@ test.describe("Send page", () => {
     await expect(page.getByRole("tab", { name: "AI agent" })).toHaveAttribute("aria-selected", "true");
   });
 
-  test("keeps platform download and installed CLI commands in Install", async ({ page }) => {
+  test("keeps platform downloads, packages, and installed CLI commands in Install", async ({ page }) => {
     await page.goto("/");
-    await page.getByRole("tab", { name: "Install", exact: true }).click();
-    await expect(page.locator(".download-btn")).toHaveAttribute("href", /^\/dl\/(linux|darwin|windows)\/(amd64|arm64)$/);
-    await expect(page.locator(".download-platform")).not.toBeEmpty();
-    await expect(page.locator(".cli-send-command")).toHaveText(
-      `sp2p send -server ${new URL(page.url()).origin} <file>`
-    );
-    await expect(page.locator(".cli-recv-command")).toHaveText(
-      `sp2p receive -server ${new URL(page.url()).origin} CODE`
-    );
-    await expect(page.getByRole("tabpanel", { name: "Install", exact: true }).locator(".send-curl, .send-wget, .send-powershell")).toHaveCount(0);
+    const install = page.getByRole("region", { name: "Install the CLI" });
+    const origin = new URL(page.url()).origin;
+    for (const [tab, os] of [["macOS", "darwin"], ["Linux", "linux"], ["Windows", "windows"]]) {
+      await install.getByRole("tab", { name: tab, exact: true }).click();
+      const panel = install.getByRole("tabpanel", { name: tab, exact: true });
+      await expect(panel.locator(".download-btn")).toHaveAttribute("href", new RegExp(`^/dl/${os}/(amd64|arm64)$`));
+      await expect(panel.locator(".download-alt")).toHaveAttribute("href", new RegExp(`^/dl/${os}/(amd64|arm64)$`));
+      await expect(panel.locator(".download-platform")).not.toBeEmpty();
+    }
+    await install.getByRole("tab", { name: "Linux", exact: true }).click();
+    await expect(install.getByRole("tabpanel", { name: "Linux" })).toContainText(`curl -fLO ${origin}/dl/sp2p_amd64.deb`);
+    await expect(install.getByRole("tabpanel", { name: "Linux" })).toContainText(`curl -fLO ${origin}/dl/sp2p_amd64.rpm`);
+    await expect(install.getByRole("tabpanel", { name: "Linux" })).toContainText(`apk add sp2p_amd64.apk`);
+    await expect(page.locator(".cli-send-command")).toHaveText(`sp2p send -server ${origin} <file>`);
+    await expect(page.locator(".cli-recv-command")).toHaveText(`sp2p receive -server ${origin} CODE`);
+    await expect(install.locator(".send-curl, .send-wget, .send-powershell")).toHaveCount(0);
+  });
+
+  test("preselects platform tabs and architecture from the browser", async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(Navigator.prototype, "userAgentData", {
+        configurable: true,
+        get: () => ({
+          platform: "Windows",
+          getHighEntropyValues: () => Promise.resolve({ architecture: "arm" }),
+        }),
+      });
+    });
+    await page.goto("/");
+    const install = page.getByRole("region", { name: "Install the CLI" });
+    await expect(install.getByRole("tab", { name: "Windows", exact: true })).toHaveAttribute("aria-selected", "true");
+    await expect(install.getByRole("tabpanel", { name: "Windows" }).locator(".download-btn")).toHaveAttribute("href", "/dl/windows/arm64");
+    await expect(install.getByRole("tabpanel", { name: "Windows" }).locator(".download-alt")).toHaveAttribute("href", "/dl/windows/amd64");
+    const zeroInstall = page.getByRole("region", { name: "Send without installing" });
+    await expect(zeroInstall.getByRole("tab", { name: "PowerShell" })).toHaveAttribute("aria-selected", "true");
+    await expect(zeroInstall.locator(".send-powershell")).toBeVisible();
+    // Usage guides keep their fixed default.
+    await expect(page.getByRole("tab", { name: "AI agent" })).toHaveAttribute("aria-selected", "true");
   });
 
   test("steps are initially hidden", async ({ page }) => {
@@ -211,6 +245,7 @@ test.describe("Send page", () => {
     await expect(page.locator(".drop-zone")).toBeHidden();
     await expect(page.locator(".zero-install-section")).toBeHidden();
     await expect(page.locator(".usage-section")).toBeHidden();
+    await expect(page.locator(".install-section")).toBeHidden();
     await expect(page.locator(".steps")).toBeVisible();
 
     // Should show connecting step.

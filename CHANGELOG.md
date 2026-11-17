@@ -6,6 +6,15 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Changed
+
+- Redesign the website's send and receive pages. Add a plain-language Security section, per-platform Install tabs and curl/wget/PowerShell switchers that preselect the visitor's OS and architecture, and self-hosted fonts.
+
+### Fixed
+
+- Use the published `sp2p_amd64.rpm` and `sp2p_amd64.apk` package names in install instructions; the documented `x86_64` names do not exist in releases.
+- Fill in the receive page's terminal commands even when the encrypted file preview is unavailable.
+
 ## [0.7.2] - 2026-11-17
 
 ### Changed

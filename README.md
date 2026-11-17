@@ -70,15 +70,15 @@ sudo dpkg -i sp2p_amd64.deb
 
 **Fedora / RHEL:**
 ```bash
-curl -LO https://sp2p.io/dl/sp2p_x86_64.rpm
-sudo rpm -i sp2p_x86_64.rpm
+curl -LO https://sp2p.io/dl/sp2p_amd64.rpm
+sudo rpm -i sp2p_amd64.rpm
 ```
 
 **Alpine:**
 ```bash
-curl -LO https://sp2p.io/dl/sp2p_x86_64.apk
+curl -LO https://sp2p.io/dl/sp2p_amd64.apk
 wget -O /etc/apk/keys/oss@zyno.io-sp2p.rsa.pub https://cdn.zyno.io/apps/sp2p/sp2p.rsa.pub
-apk add sp2p_x86_64.apk
+apk add sp2p_amd64.apk
 ```
 
 **Arch (AUR):** *(pending)*

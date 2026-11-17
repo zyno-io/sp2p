@@ -143,8 +143,9 @@ func servePlaceholder(w http.ResponseWriter, title, body string) {
 	w.Write([]byte(`<!DOCTYPE html><html><body><h1>` + html.EscapeString(title) + `</h1><p>` + body + `</p></body></html>`))
 }
 
-// hashedAssetPattern matches filenames with a content hash (e.g., main-IMLNX3OE.js).
-var hashedAssetPattern = regexp.MustCompile(`-[A-Z0-9]{8}\.(js|css)(\.map)?$`)
+// hashedAssetPattern matches filenames with a content hash (e.g., main-IMLNX3OE.js,
+// or a bundled font such as jetbrains-mono-latin-wght-normal-ABCD1234.woff2).
+var hashedAssetPattern = regexp.MustCompile(`-[A-Z0-9]{8}\.((js|css)(\.map)?|woff2?)$`)
 
 // setAssetCacheHeaders sets cache headers for static assets.
 // Hashed assets get long-lived immutable caching; unhashed assets get no-cache.

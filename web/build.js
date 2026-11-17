@@ -19,13 +19,16 @@ async function build() {
     metafile: true,
   });
 
-  // Bundle CSS.
+  // Bundle CSS. Fonts are imported from @fontsource packages and emitted as
+  // hashed files next to the stylesheet (the CSP only allows same-origin fonts).
   const cssResult = await esbuild.build({
     entryPoints: ["style.css"],
     bundle: true,
     outdir: "dist",
     minify: true,
     entryNames: "[name]-[hash]",
+    assetNames: "[name]-[hash]",
+    loader: { ".woff2": "file", ".woff": "file" },
     metafile: true,
   });
 
