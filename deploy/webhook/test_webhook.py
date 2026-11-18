@@ -75,6 +75,7 @@ if [ -f /test/fail ]; then exit 17; fi
         # cannot publish ports itself.
         docker("create", "--name", cls.gate, "--read-only", "--cap-drop", "ALL",
                "--security-opt", "no-new-privileges:true", "-p", "127.0.0.1::9000",
+               "--memory", "32m", "--pids-limit", "64", "-e", "GOMAXPROCS=2",
                os.environ.get("DEPLOY_GATE_TEST_IMAGE", "sp2p-deploy-gate:test"),
                "-upstream", "http://webhook:9000")
         docker("network", "connect", network, cls.gate)

@@ -5,12 +5,14 @@ package main
 import (
 	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type upstreamRecorder struct {
@@ -98,6 +100,64 @@ func TestRejectsOversizedBodies(t *testing.T) {
 	}
 	if n := rec.calls.Load(); n != 0 {
 		t.Fatalf("upstream called %d times", n)
+	}
+}
+
+func TestRejectsUpgrades(t *testing.T) {
+	gate, rec := newGate(t)
+	req, err := http.NewRequest(http.MethodPost, gate.URL+hookPath, strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || rec.calls.Load() != 0 {
+		t.Fatalf("status %d with %d upstream calls, want 400 and none", resp.StatusCode, rec.calls.Load())
+	}
+}
+
+func TestLimitListenerCapsOpenConnections(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := newLimitListener(inner, 1)
+	defer l.Close()
+	accepted := make(chan net.Conn, 2)
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			accepted <- c
+		}
+	}()
+	for range 2 {
+		c, err := net.Dial("tcp", inner.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+	}
+	first := <-accepted
+	select {
+	case <-accepted:
+		t.Fatal("accepted a second connection while the first was open")
+	case <-time.After(100 * time.Millisecond):
+	}
+	first.Close()
+	first.Close() // Releases its slot only once.
+	select {
+	case c := <-accepted:
+		c.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("second connection not accepted after the first closed")
 	}
 }
 

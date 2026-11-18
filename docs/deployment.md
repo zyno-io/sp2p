@@ -16,7 +16,7 @@ webhook reads whole request bodies before checking signatures and has no size
 limit, so the tunnel never reaches it directly. A small gate container
 ([deploy/webhook/gate](../deploy/webhook/gate/)) is the only listener on the
 shared network. It accepts only `POST /hooks/sp2p-deploy`, rejects bodies over
-4 KiB with 413, times out slow clients, and forwards the rest to webhook over a
+4 KiB with 413, times out slow clients, holds at most 32 connections open, and forwards the rest to webhook over a
 private internal network. The gate has no shell, Docker socket, or secret.
 
 ## Request and deployment behavior

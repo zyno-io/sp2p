@@ -14,9 +14,13 @@ services:
         aliases: [sp2p-deploy]
       hook: {}
     command: ["-upstream", "http://webhook:9000"]
+    # Go sizes its thread pool to the host's CPUs; pin it so pids_limit holds
+    # on large hosts. The gate also caps open connections at 32.
+    environment:
+      GOMAXPROCS: "2"
     mem_limit: 32m
     memswap_limit: 32m
-    pids_limit: 32
+    pids_limit: 64
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -32,6 +36,8 @@ services:
       hook:
         aliases: [webhook]
     environment:
+      # webhook and the Docker CLI are Go; keep threads within pids_limit.
+      GOMAXPROCS: "2"
       SP2P_DEPLOY_DIR: ${SP2P_DEPLOY_DIR:-/opt/sp2p}
       SP2P_DEPLOY_COMPOSE_FILE: ${SP2P_DEPLOY_COMPOSE_FILE:-docker-compose.yml}
     volumes:
