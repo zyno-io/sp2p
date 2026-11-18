@@ -12,6 +12,13 @@ The sidecar uses [webhook](https://github.com/adnanh/webhook), Docker CLI, and
 Compose. Its Docker socket access gives it control of the host's containers;
 the deployment secret therefore grants administrative access.
 
+webhook reads whole request bodies before checking signatures and has no size
+limit, so the tunnel never reaches it directly. A small gate container
+([deploy/webhook/gate](../deploy/webhook/gate/)) is the only listener on the
+shared network. It accepts only `POST /hooks/sp2p-deploy`, rejects bodies over
+4 KiB with 413, times out slow clients, and forwards the rest to webhook over a
+private internal network. The gate has no shell, Docker socket, or secret.
+
 ## Request and deployment behavior
 
 `POST /hooks/sp2p-deploy` accepts a JSON object containing a release `version`
@@ -76,12 +83,12 @@ production file on the server.
    production `.env` and project name as it did when run through SSH. Include
    any additional configuration files referenced by that production file.
 
-   The sidecar joins the Docker network named by `SP2P_DEPLOY_NETWORK`
-   (default `sp2p_default`) with the alias `sp2p-deploy`, and publishes no
-   host ports. Set it to the network the tunnel connector shares with sp2p.
-
-   The container is capped at 128 MiB because webhook buffers request bodies
-   before verifying signatures. An oversized request only restarts the sidecar.
+   The gate joins the Docker network named by `SP2P_DEPLOY_NETWORK`
+   (default `sp2p_default`) with the alias `sp2p-deploy`; neither container
+   publishes host ports. Set it to the network the tunnel connector shares
+   with sp2p. The webhook container is attached only to the gate's internal
+   network, which has no outbound access; the host's Docker daemon still pulls
+   images. Both containers are memory-capped as defense in depth.
 
 4. Route the hook path through the Cloudflare Tunnel. Production runs a
    standalone cloudflared container that joins a dedicated network shared with
@@ -146,6 +153,17 @@ forwarding route, or the next hook request reaches sp2p and returns 404:
 
 If the hook path is broken, use the trusted SSH command below to deploy.
 
+## Adding the request-size gate
+
+Sidecars installed before the gate exposed webhook to the tunnel directly.
+Copy the updated [deploy/webhook](../deploy/webhook/) over the installed copy
+and rerun step 3's `docker compose ... up -d --build` with the same
+`SP2P_DEPLOY_*` variables. Compose starts the gate under the existing
+`sp2p-deploy` alias and moves webhook to the internal network; the tunnel
+routes do not change. Confirm that an unsigned `POST` to the hook still
+returns 403 and that a body over 4 KiB returns 413, then run the manual
+deployment workflow.
+
 ## Deploy an already published release
 
 Run [Deploy published release](../.github/workflows/deploy.yml) from `main`,
@@ -163,11 +181,14 @@ separate production smoke workflow with a suitable CLI tag, as before.
 
 ```sh
 docker build -t sp2p-deploy-hook:test deploy/webhook
+docker build --target gate -t sp2p-deploy-gate:test deploy/webhook
 python3 deploy/webhook/test_webhook.py
+go test ./deploy/webhook/gate
 ```
 
-The tests run the actual sidecar with a fake Docker executable and **no Docker
-socket** mounted. They exercise signed requests, rejection of invalid requests,
+The tests run the actual gate and sidecar, connected as in production, with a
+fake Docker executable and **no Docker socket** mounted. They exercise the
+4 KiB body limit, signed requests, rejection of invalid requests,
 request age, deployment serialization, command failure cleanup, the fixed
 service/image selection, and the caller's HTTPS certificate and redirect
 handling. Test containers, generated certificates, and scratch files are

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Exercise the actual sidecar and HTTPS caller without mounting a Docker socket."""
+"""Exercise the actual gate, sidecar, and HTTPS caller without mounting a Docker socket."""
 
 import hashlib
 import hmac
+import http.client
 import http.server
 import json
 import os
@@ -55,18 +56,33 @@ while [ -f /test/block ]; do sleep 0.05; done
 if [ -f /test/fail ]; then exit 17; fi
 """)
         stub.chmod(0o755)
-        cls.container = "sp2p-hook-test-" + secrets.token_hex(6)
+        suffix = secrets.token_hex(6)
+        cls.container = "sp2p-hook-test-" + suffix
+        cls.gate = "sp2p-gate-test-" + suffix
+        network = "sp2p-hook-test-" + suffix
         cls.addClassCleanup(cls.scratch.cleanup)
-        cls.addClassCleanup(lambda: docker("rm", "-f", cls.container, check=False))
+        cls.addClassCleanup(lambda: docker("network", "rm", network, check=False))
+        cls.addClassCleanup(lambda: docker("rm", "-f", cls.container, cls.gate, check=False))
+        # As in compose.yml: webhook is reachable only through the gate.
+        docker("network", "create", "--internal", network)
         docker("run", "-d", "--name", cls.container, "--read-only", "--cap-drop", "ALL",
                "--security-opt", "no-new-privileges:true", "--tmpfs", "/run", "--tmpfs", "/tmp",
-               "-p", "127.0.0.1::9000", "-e", "SP2P_DEPLOY_DIR=/test",
+               "--network", network, "--network-alias", "webhook", "-e", "SP2P_DEPLOY_DIR=/test",
                "-v", f"{cls.root}:/test", "-v", f"{stub}:/usr/local/bin/docker:ro",
                "-v", f"{cls.root / 'secret'}:/run/secrets/deploy_secret:ro",
                os.environ.get("DEPLOY_HOOK_TEST_IMAGE", "sp2p-deploy-hook:test"))
-        port_result = docker("port", cls.container, "9000/tcp")
+        # Publish the gate's port before joining the internal network, which
+        # cannot publish ports itself.
+        docker("create", "--name", cls.gate, "--read-only", "--cap-drop", "ALL",
+               "--security-opt", "no-new-privileges:true", "-p", "127.0.0.1::9000",
+               os.environ.get("DEPLOY_GATE_TEST_IMAGE", "sp2p-deploy-gate:test"),
+               "-upstream", "http://webhook:9000")
+        docker("network", "connect", network, cls.gate)
+        docker("start", cls.gate)
+        port_result = docker("port", cls.gate, "9000/tcp")
         cls.url = "http://" + port_result.stdout.strip() + "/hooks/sp2p-deploy"
-        cls.wait_until(lambda: cls.request(b"{}", signed=False)[0] != 0)
+        # The gate answers 502 until webhook is listening behind it.
+        cls.wait_until(lambda: cls.request(b"{}", signed=False)[0] not in (0, 502))
 
         cls.cert = cls.root / "cert.pem"
         key = cls.root / "key.pem"
@@ -139,6 +155,10 @@ if [ -f /test/fail ]; then exit 17; fi
     def payload(self, version="0.7.1", timestamp=None):
         return json.dumps({"version": version, "timestamp": str(timestamp or int(time.time()))}).encode()
 
+    def padded_payload(self, size):
+        body = self.payload()
+        return body[:-1] + b" " * (size - len(body)) + b"}"
+
     def assert_no_deploy(self):
         time.sleep(0.2)
         self.assertFalse((self.root / "started").exists())
@@ -149,6 +169,26 @@ if [ -f /test/fail ]; then exit 17; fi
         self.assertNotEqual(self.request(body, signed=False)[0], 202)
         self.assertNotEqual(self.request(body, signature="sha256=" + "0" * 64)[0], 202)
         self.assert_no_deploy()
+
+    def test_gate_rejects_oversized_bodies_before_webhook(self):
+        body = self.padded_payload(4097)
+        self.assertEqual(len(body), 4097)
+        self.assertEqual(self.request(body)[0], 413)
+        host, port = self.url.split("/")[2].split(":")
+        connection = http.client.HTTPConnection(host, int(port), timeout=2)
+        try:
+            connection.request("POST", "/hooks/sp2p-deploy", body=iter([body]),
+                               headers={"Transfer-Encoding": "chunked"}, encode_chunked=True)
+            self.assertEqual(connection.getresponse().status, 413)
+        finally:
+            connection.close()
+        self.assert_no_deploy()
+
+    def test_signed_body_at_the_limit_deploys(self):
+        body = self.padded_payload(4096)
+        self.assertEqual(len(body), 4096)
+        self.assertEqual(self.request(body)[0], 202)
+        self.wait_until(lambda: (self.root / "tag-args").exists())
 
     def test_get_cannot_deploy(self):
         self.assertEqual(self.request(self.payload(), method="GET")[0], 405)
