@@ -786,6 +786,11 @@ func TestIsScriptClient(t *testing.T) {
 		{"curl-with-accept", "curl/7.81", "text/html", false}, // Accept overrides UA
 		{"unknown-no-html", "SomeAgent", "application/json", true},
 		{"no-headers", "", "", true},
+		{"slackbot", "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)", "*/*", false},
+		{"discordbot", "Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)", "", false},
+		{"facebook", "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)", "*/*", false},
+		{"whatsapp", "WhatsApp/2.23.20.0", "", false},
+		{"teams", "Mozilla/5.0 (Windows NT 6.1; WOW64) SkypeUriPreview Preview/0.5", "*/*", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1004,6 +1009,21 @@ func TestWebHandlerInjectsConfiguredAgentServerURL(t *testing.T) {
 	got := string(h.injectAgentGuidePlaceholders([]byte(`-server "{{SP2P_SERVER_URL}}"`)))
 	if got != `-server "https://transfer.example"` {
 		t.Fatalf("agent guide = %q", got)
+	}
+}
+
+func TestWebHandlerInjectsServerURLIntoHTML(t *testing.T) {
+	in := []byte(`<meta property="og:image" content="{{SP2P_SERVER_URL}}/og-image.png">`)
+
+	h := &WebHandler{baseURL: "https://transfer.example"}
+	if got := string(h.injectHTMLPlaceholders(in)); got != `<meta property="og:image" content="https://transfer.example/og-image.png">` {
+		t.Fatalf("configured base URL: %q", got)
+	}
+
+	// No base URL (dev mode): the URL stays root-relative.
+	h = &WebHandler{}
+	if got := string(h.injectHTMLPlaceholders(in)); got != `<meta property="og:image" content="/og-image.png">` {
+		t.Fatalf("empty base URL: %q", got)
 	}
 }
 

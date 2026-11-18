@@ -6,6 +6,14 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Added
+
+- Add Open Graph and Twitter card tags, with a share image, to the send and receive pages so shared links unfurl with a preview. The image and page URLs use the server's `--base-url`.
+
+### Fixed
+
+- Serve the HTML page instead of the shell bootstrap script to link-preview crawlers (Slackbot, facebookexternalhit, Discordbot, WhatsApp, Teams, …) that request `/` or `/r` without `text/html` in `Accept`.
+
 ### Security
 
 - Put a request-size gate in front of the deployment sidecar's webhook, restoring the 4 KiB body limit that sp2p enforced before 0.7.4. The tunnel now reaches only the gate, which rejects larger bodies and slow clients; webhook moves to a private internal network. Reinstall the sidecar to apply it (see `docs/deployment.md`).

@@ -53,6 +53,9 @@ async function build() {
   fs.copyFileSync("favicon.svg", path.join("dist", "favicon.svg"));
   fs.copyFileSync("theme.js", path.join("dist", "theme.js"));
 
+  // Open Graph share image (source: og/og-image.html, render: node og/render.js).
+  fs.copyFileSync("og/og-image.png", path.join("dist", "og-image.png"));
+
   // Agent-facing Markdown is served directly by the Go server. Keep the
   // conventional full-context file generated from the same source so the two
   // documents cannot drift.
