@@ -6,6 +6,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Security
+
+- Put a request-size gate in front of the deployment sidecar's webhook, restoring the 4 KiB body limit that sp2p enforced before 0.7.4. The tunnel now reaches only the gate, which rejects larger bodies and slow clients; webhook moves to a private internal network. Reinstall the sidecar to apply it (see `docs/deployment.md`).
+
 ## [0.7.4] - 2026-11-17
 
 ### Removed

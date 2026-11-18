@@ -1,14 +1,43 @@
 # SPDX-License-Identifier: MIT
 name: sp2p-deploy
 services:
-  deploy:
-    build: .
+  gate:
+    build:
+      context: .
+      target: gate
     # Join the network the tunnel connector (or reverse proxy) uses to reach
     # sp2p; it routes the hook path to http://sp2p-deploy:9000. No host ports.
+    # webhook has no request size limit, so this is the only listener the
+    # tunnel can reach: it rejects bodies over 4 KiB and slow clients.
     networks:
       production:
         aliases: [sp2p-deploy]
+      hook: {}
+    command: ["-upstream", "http://webhook:9000"]
+    # Go sizes its thread pool to the host's CPUs; pin it so pids_limit holds
+    # on large hosts. The gate also caps open connections at 32.
     environment:
+      GOMAXPROCS: "2"
+    mem_limit: 32m
+    memswap_limit: 32m
+    pids_limit: 64
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  deploy:
+    build:
+      context: .
+      target: hook
+    # Reachable only from the gate; the internal network has no egress, and
+    # image pulls go through the host's Docker daemon.
+    networks:
+      hook:
+        aliases: [webhook]
+    environment:
+      # webhook and the Docker CLI are Go; keep threads within pids_limit.
+      GOMAXPROCS: "2"
       SP2P_DEPLOY_DIR: ${SP2P_DEPLOY_DIR:-/opt/sp2p}
       SP2P_DEPLOY_COMPOSE_FILE: ${SP2P_DEPLOY_COMPOSE_FILE:-docker-compose.yml}
     volumes:
@@ -23,9 +52,8 @@ services:
           create_host_path: false
     secrets:
       - deploy_secret
-    # webhook buffers whole request bodies before checking the signature and
-    # has no size limit. Cap memory so oversized unsigned requests can only
-    # OOM-kill this container (restart policy recovers it), not the host.
+    # Defense in depth behind the gate's body limit: webhook buffers whole
+    # request bodies before checking signatures.
     mem_limit: 128m
     memswap_limit: 128m
     pids_limit: 64
@@ -38,6 +66,8 @@ services:
     restart: unless-stopped
 
 networks:
+  hook:
+    internal: true
   production:
     external: true
     name: ${SP2P_DEPLOY_NETWORK:-sp2p_default}
