@@ -436,5 +436,30 @@ func isScriptClient(r *http.Request) bool {
 			return true
 		}
 	}
+	if isLinkPreviewBot(ua) {
+		return false
+	}
 	return accept == "" || !strings.Contains(accept, "text/html")
+}
+
+// linkPreviewBotMarkers are lowercase User-Agent substrings of crawlers that
+// unfurl shared links. Many send Accept: */* (or none), which would otherwise
+// get the shell script instead of the HTML page and its Open Graph tags.
+var linkPreviewBotMarkers = []string{
+	"bot",                 // Slackbot, Twitterbot, Discordbot, TelegramBot, LinkedInBot, Googlebot, ...
+	"facebookexternalhit", // Facebook, Messenger, Instagram
+	"whatsapp",
+	"skypeuripreview", // Skype, Teams
+	"mastodon",
+	"embedly",
+	"iframely",
+}
+
+func isLinkPreviewBot(ua string) bool {
+	for _, m := range linkPreviewBotMarkers {
+		if strings.Contains(ua, m) {
+			return true
+		}
+	}
+	return false
 }

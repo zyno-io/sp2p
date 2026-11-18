@@ -45,11 +45,14 @@ func NewWebHandler(webFS *embed.FS, version, buildTime, baseURL string) *WebHand
 	return h
 }
 
-// injectVersionPlaceholders replaces version/build-time placeholders in HTML.
-func (h *WebHandler) injectVersionPlaceholders(data []byte) []byte {
+// injectHTMLPlaceholders replaces version/build-time placeholders and the
+// server URL (used by absolute Open Graph URLs) in HTML. With no base URL
+// configured the URLs stay root-relative.
+func (h *WebHandler) injectHTMLPlaceholders(data []byte) []byte {
 	s := string(data)
 	s = strings.ReplaceAll(s, "<!--SP2P_VERSION-->", html.EscapeString(h.version))
 	s = strings.ReplaceAll(s, "<!--SP2P_BUILD_TIME-->", html.EscapeString(h.buildTime))
+	s = strings.ReplaceAll(s, "{{SP2P_SERVER_URL}}", html.EscapeString(h.baseURL))
 	return []byte(s)
 }
 
@@ -113,7 +116,7 @@ func (h *WebHandler) serveHTML(w http.ResponseWriter, r *http.Request, name stri
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(h.injectVersionPlaceholders(data))
+	w.Write(h.injectHTMLPlaceholders(data))
 }
 
 func (h *WebHandler) serveMarkdown(w http.ResponseWriter, r *http.Request, name string) {
