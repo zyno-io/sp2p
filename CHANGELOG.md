@@ -6,6 +6,8 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-11-18
+
 ### Added
 
 - Add Open Graph and Twitter card tags, with a share image, to the send and receive pages so shared links unfurl with a preview. The image and page URLs use the server's `--base-url`.
