@@ -220,7 +220,8 @@ render_chocolatey() {
     <title>SP2P - Secure P2P File Transfer</title>
     <authors>Zyno Consulting</authors>
     <owners>zyno-io</owners>
-    <iconUrl>https://raw.githubusercontent.com/zyno-io/sp2p/main/web/icon.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/zyno-io/sp2p@${TAG}/web/icon.png</iconUrl>
+    <copyright>Copyright (c) 2025 Signal24 LLC dba Zyno Consulting</copyright>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <licenseUrl>https://github.com/zyno-io/sp2p/blob/main/LICENSE</licenseUrl>
     <projectUrl>https://sp2p.io</projectUrl>
