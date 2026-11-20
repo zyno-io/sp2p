@@ -208,8 +208,9 @@ EOF
 }
 
 render_chocolatey() {
-  local SHA_AMD64
+  local SHA_AMD64 YEAR
   SHA_AMD64="$(sha sp2p_windows_amd64.zip)"
+  YEAR="$(date -u +%Y)"
   mkdir -p "$OUTDIR/tools"
   cat >"$OUTDIR/sp2p.nuspec" <<NUSPEC
 <?xml version="1.0" encoding="utf-8"?>
@@ -221,7 +222,7 @@ render_chocolatey() {
     <authors>Zyno Consulting</authors>
     <owners>zyno-io</owners>
     <iconUrl>https://cdn.jsdelivr.net/gh/zyno-io/sp2p@${TAG}/web/icon.png</iconUrl>
-    <copyright>Copyright (c) 2025 Signal24 LLC dba Zyno Consulting</copyright>
+    <copyright>Copyright (c) ${YEAR} Signal24 LLC dba Zyno Consulting</copyright>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <licenseUrl>https://github.com/zyno-io/sp2p/blob/main/LICENSE</licenseUrl>
     <projectUrl>https://sp2p.io</projectUrl>
