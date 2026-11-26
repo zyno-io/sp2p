@@ -225,6 +225,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APK_SIGNING_KEY: /tmp/apk-signing.rsa
           SP2P_VERSION: ${{ steps.parse.outputs.clean_version }}
+          # A scoped tag (e.g. v0.7.6-server) on the same commit would
+          # otherwise win goreleaser's tag pick and leak into package versions.
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
 
       - name: Sign macOS binaries
         if: steps.parse.outputs.has_darwin == 'true'
@@ -418,7 +421,7 @@ jobs:
             echo "No release assets found"
             exit 1
           fi
-          bash scripts/release-notes.sh "$CLEAN_TAG" > "$RUNNER_TEMP/release-notes.md"
+          bash scripts/release-notes.sh "$CLEAN_TAG" "$RELEASE_TAG" > "$RUNNER_TEMP/release-notes.md"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             # Build/sign/attest first, then replace artifacts. Publish the new
             # manifest last: bootstrap always fails closed on a hash mismatch.
@@ -426,12 +429,12 @@ jobs:
             gh release upload "$RELEASE_TAG" dist/checksums.txt --clobber
             gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
-            # Scoped releases (-server, -cli, ...) lack the other platforms'
-            # assets, so never let GitHub auto-mark one as Latest: links to
-            # /releases/latest must keep resolving to a full release. Full
-            # releases keep GitHub's automatic choice (e.g. for backports).
+            # Server-only and single-platform CLI releases lack assets that
+            # /releases/latest consumers need (every platform's CLI), so never
+            # let GitHub mark one Latest. Full and full-CLI releases keep the
+            # existing behavior.
             LATEST_ARGS=()
-            if [ "$SCOPE" != "all" ]; then LATEST_ARGS=(--latest=false); fi
+            case "$SCOPE" in all|cli) ;; *) LATEST_ARGS=(--latest=false) ;; esac
             gh release create "$RELEASE_TAG" \
               --title "$RELEASE_TITLE" \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
