@@ -6,6 +6,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Added
+
+- Add an [Agent Skill](https://agentskills.io) at `skills/sp2p/SKILL.md` so coding agents (Claude Code, Codex, Cursor, OpenCode, Copilot, …) know when to reach for sp2p and how to handle codes, events, and relay prompts. Install with `npx skills add zyno-io/sp2p`.
+
 ## [0.7.5] - 2026-11-18
 
 ### Added
