@@ -45,9 +45,7 @@ skill doesn't cover.
 - **Relay needs consent.** Direct P2P is tried first. If JSON mode emits `relay_required`, the
   relay is still end-to-end encrypted but sees connection metadata. Write `allow` or `deny` to the
   event's `response_file` according to the user's policy; for sensitive data, ask first unless
-  already authorized. Don't pass `-allow-relay` yourself by default. The one-shot bootstrap
-  scripts allow relay automatically; append `-allow-relay=false` to their arguments when the user
-  wants a per-session relay decision.
+  already authorized. Don't pass `-allow-relay` by default.
 - **Never pass `--insecure-skip-checksum`** to the bootstrap unless the user explicitly asks for
   it. Never add it after a checksum failure or because a hash tool is missing.
 - **Don't install sp2p permanently** on a shared host or inside a pod the user didn't ask you to

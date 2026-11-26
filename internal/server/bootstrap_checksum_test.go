@@ -317,7 +317,6 @@ func TestBootstrapTemplatesMatchGenerator(t *testing.T) {
 			t.Fatal(err)
 		}
 		template := strings.Replace(string(data), "# SPDX-License-Identifier: MIT\n", "", 1)
-		template = strings.Replace(template, command+" -allow-relay", command, 1)
 		if template != generateScript(command, "{{BASE_URL}}", "{{WS_URL}}") {
 			t.Fatalf("%s differs from generated bootstrap", name)
 		}
