@@ -479,6 +479,7 @@ function initUsageSection(): void {
     element.dataset.copyText = copyText;
   };
 
+  setCommand(".agent-skill-command", `npx skills add ${origin}`);
   setCommand(".agent-send-prompt", `Please send [file] using ${origin}/llm`);
   setCommand(".agent-rsync-prompt", `Please sync [source directory] to [destination directory] with rsync using ${origin}/llm`);
   setCommand(".agent-tunnel-prompt", `Please forward [TCP or Unix target endpoint] to [TCP or Unix local listener endpoint] using ${origin}/llm`);

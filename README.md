@@ -294,7 +294,17 @@ Good to know:
 
 ### AI Agents and Automation
 
-Paste one of these prompts into an agent and replace the bracketed parts:
+[`plugins/sp2p/skills/sp2p`](plugins/sp2p/skills/sp2p/SKILL.md) is an [Agent Skill](https://agentskills.io) that teaches coding agents when to use sp2p and how to handle the code, events, and relay prompts safely. Install it into Claude Code, Codex, Cursor, OpenCode, GitHub Copilot, and other skill-aware agents with:
+
+```bash
+npx skills add https://sp2p.io      # add -g to install for your user instead of the current project
+```
+
+A self-hosted server serves a skill that points at itself: `npx skills add https://your-server`. To install from GitHub instead: `npx skills add zyno-io/sp2p`.
+
+In Claude Code you can also install it as a plugin: `/plugin marketplace add zyno-io/sp2p`, then `/plugin install sp2p@sp2p`. Or copy the `plugins/sp2p/skills/sp2p` folder into your agent's skills directory.
+
+Without the skill, paste one of these prompts into an agent and replace the bracketed parts:
 
 ```text
 Please send [file] using https://sp2p.io/llm
@@ -728,6 +738,8 @@ internal/
 web/
   src/              TypeScript source for browser-based sending and receiving
   dist/             Built web UI (embedded into server binary)
+plugins/
+  sp2p/             Agent Skill and Claude Code plugin (skill embedded into server binary)
 ```
 
 ## License

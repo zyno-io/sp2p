@@ -22,6 +22,7 @@ type Config struct {
 	Addr             string
 	BaseURL          string                   // e.g., "https://sp2p.io"
 	WebFS            *embed.FS                // embedded web UI files (optional)
+	AgentSkill       []byte                   // embedded Agent Skill (optional)
 	Version          string                   // server version (e.g., "1.0.0" or "dev")
 	BuildTime        string                   // build timestamp (e.g., "2025-01-15T12:00:00Z")
 	STUNServers      []signal.ICEServer       // STUN servers to advertise to clients (optional)
@@ -122,6 +123,11 @@ func New(cfg Config) (*Server, error) {
 	}
 	webHandler := NewWebHandler(cfg.WebFS, cfg.Version, cfg.BuildTime, cfg.BaseURL)
 
+	skillHandler, err := NewSkillHandler(cfg.AgentSkill, cfg.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("agent skill: %w", err)
+	}
+
 	// Rate limit: 30 WebSocket connections per IP per minute.
 	wsLimiter := NewRateLimiter(30, time.Minute)
 	wsLimiter.TrustProxy = cfg.TrustProxy
@@ -152,6 +158,9 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("/llm", webHandler.ServeAgentGuide)
 	mux.HandleFunc("/llm.md", webHandler.ServeAgentGuide)
 	mux.HandleFunc("/agents.md", webHandler.ServeAgentGuide)
+
+	// Agent Skills discovery (current and legacy well-known layouts).
+	skillHandler.Register(mux)
 
 	// Root: curl gets send bootstrap script, browser gets send UI.
 	// Non-root paths are served as static assets from the embedded web UI

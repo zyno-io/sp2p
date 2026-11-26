@@ -82,6 +82,6 @@ main() {
     tar xz -C "$SP2P_TMP" -f "$SP2P_TMP/sp2p.tar.gz"
     chmod +x "$SP2P_TMP/sp2p"
 
-    SP2P_SERVER="{{WS_URL}}" SP2P_URL="{{BASE_URL}}" "$SP2P_TMP/sp2p" send -allow-relay "$@"
+    SP2P_SERVER="{{WS_URL}}" SP2P_URL="{{BASE_URL}}" "$SP2P_TMP/sp2p" send "$@"
 }
 main "$@"

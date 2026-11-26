@@ -6,6 +6,12 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-11-26
+
+### Added
+
+- Add an [Agent Skill](https://agentskills.io) at `plugins/sp2p/skills/sp2p/SKILL.md` so coding agents (Claude Code, Codex, Cursor, OpenCode, Copilot, …) know when to reach for sp2p and how to handle codes, events, and relay prompts. Install with `npx skills add https://sp2p.io` or `npx skills add zyno-io/sp2p`. The server also serves the skill at `/.well-known/agent-skills/` with its own URL substituted, so `npx skills add https://<server>` works for self-hosted servers. The repo is also a Claude Code plugin marketplace (`/plugin marketplace add zyno-io/sp2p`).
+
 ## [0.7.5] - 2026-11-18
 
 ### Added
