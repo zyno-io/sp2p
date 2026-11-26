@@ -1,0 +1,16 @@
+{
+  "name": "sp2p",
+  "displayName": "sp2p",
+  "description": "Move files, folders, and streams between machines, containers, Kubernetes pods, and remote hosts with sp2p, an end-to-end encrypted peer-to-peer transfer tool. Also covers incremental rsync and one-shot TCP, Unix-socket, or stdio tunnels.",
+  "author": {
+    "name": "Zyno Consulting",
+    "url": "https://zyno.io"
+  },
+  "homepage": "https://sp2p.io",
+  "repository": "https://github.com/zyno-io/sp2p",
+  "license": "MIT",
+  "keywords": ["file-transfer", "p2p", "encryption", "kubernetes", "rsync", "tunnel", "webrtc"],
+  "icon": "./icon.png",
+  "documentationUrl": "https://sp2p.io/llm",
+  "supportUrl": "https://github.com/zyno-io/sp2p/issues"
+}

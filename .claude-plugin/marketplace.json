@@ -1,0 +1,15 @@
+{
+  "name": "sp2p",
+  "description": "Plugins for sp2p, the end-to-end encrypted peer-to-peer transfer tool.",
+  "owner": {
+    "name": "Zyno Consulting",
+    "url": "https://zyno.io"
+  },
+  "plugins": [
+    {
+      "name": "sp2p",
+      "source": "./plugins/sp2p",
+      "description": "End-to-end encrypted peer-to-peer file, stream, rsync, and tunnel transfers between machines, containers, and pods."
+    }
+  ]
+}

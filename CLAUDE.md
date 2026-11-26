@@ -30,6 +30,8 @@ internal/
   transfer/         Frame-based transfer protocol (FrameReadWriter interface)
 web/src/            TypeScript frontend (esbuild → web/dist/)
 man/                Man pages
+plugins/sp2p/       Agent Skill (skills/sp2p/SKILL.md, embedded by web.go and served at /.well-known/agent-skills/) + Claude Code plugin manifest
+.claude-plugin/     Marketplace manifest (/plugin marketplace add zyno-io/sp2p)
 ```
 
 ## Architecture

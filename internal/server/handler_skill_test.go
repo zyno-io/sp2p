@@ -209,7 +209,7 @@ func TestSkill_InvalidFrontmatter(t *testing.T) {
 }
 
 func TestSkill_RepoFile(t *testing.T) {
-	data, err := os.ReadFile("../../skills/sp2p/SKILL.md")
+	data, err := os.ReadFile("../../plugins/sp2p/skills/sp2p/SKILL.md")
 	if err != nil {
 		t.Fatal(err)
 	}

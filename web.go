@@ -14,5 +14,5 @@ var WebFS embed.FS
 // discovery. The signaling server substitutes its own base URL for the
 // canonical https://sp2p.io before serving it.
 //
-//go:embed skills/sp2p/SKILL.md
+//go:embed plugins/sp2p/skills/sp2p/SKILL.md
 var AgentSkill []byte
