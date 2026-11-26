@@ -192,10 +192,15 @@
 
           <div id="usage-panel-agent" class="usage-panel agent-section" role="tabpanel" aria-labelledby="usage-tab-agent">
             <div class="usage-aside">
-              <p class="usage-intro">Paste a prompt into your AI agent and fill in the bracketed parts. The agent reads the guide and runs the CLI for you.</p>
+              <p class="usage-intro">Skill-aware agents (Claude Code, Codex, Cursor, &hellip;) can install the skill. Otherwise, paste a prompt and fill in the bracketed parts; the agent reads the guide and runs the CLI for you.</p>
               <p class="usage-link"><a href="/llm">Read the complete agent guide &rarr;</a></p>
             </div>
             <div class="usage-main">
+              <button class="copy-box" type="button">
+                <span class="copy-caption">Install the agent skill</span>
+                <code class="agent-skill-command"></code>
+                <span class="copy-hint">click to copy</span>
+              </button>
               <button class="copy-box" type="button">
                 <span class="copy-caption">Send files or folders</span>
                 <code class="agent-send-prompt"></code>

@@ -26,6 +26,7 @@ test.describe("Send page", () => {
     await expect(page.getByRole("tabpanel", { name: "AI agent" })).toContainText(
       `Please send [file] using ${agentGuide}`
     );
+    await expect(page.locator(".agent-skill-command")).toHaveText(`npx skills add ${new URL(page.url()).origin}`);
     await expect(page.locator(".agent-rsync-prompt")).toContainText(agentGuide);
     await expect(page.locator(".agent-tunnel-prompt")).toContainText(
       `Please forward [TCP or Unix target endpoint] to [TCP or Unix local listener endpoint] using ${agentGuide}`

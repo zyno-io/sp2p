@@ -130,6 +130,7 @@ func main() {
 		Addr:             *addr,
 		BaseURL:          *baseURL,
 		WebFS:            &webFS,
+		AgentSkill:       sp2p.AgentSkill,
 		Version:          version,
 		BuildTime:        buildTime,
 		STUNServers:      stunServers,

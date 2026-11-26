@@ -297,8 +297,10 @@ Good to know:
 [`skills/sp2p`](skills/sp2p/SKILL.md) is an [Agent Skill](https://agentskills.io) that teaches coding agents when to use sp2p and how to handle the code, events, and relay prompts safely. Install it into Claude Code, Codex, Cursor, OpenCode, GitHub Copilot, and other skill-aware agents with:
 
 ```bash
-npx skills add zyno-io/sp2p      # add -g to install for your user instead of the current project
+npx skills add https://sp2p.io      # add -g to install for your user instead of the current project
 ```
+
+A self-hosted server serves a skill that points at itself: `npx skills add https://your-server`. To install from GitHub instead: `npx skills add zyno-io/sp2p`.
 
 Or copy the `skills/sp2p` folder into your agent's skills directory.
 

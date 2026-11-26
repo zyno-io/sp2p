@@ -12,6 +12,7 @@ Use the agent guide for the complete command contract. A transfer code is a secr
 - [Socket forwarding](/llm#socket-forwarding): TCP, Unix, mixed-endpoint, and duplex stdio tunnels.
 - [Automation events and status](/llm#automation-events-and-status): JSON schema 1, subprocess bytes, status snapshots, and terminal results.
 - [Relay decisions](/llm#respond-when-relay-is-required): Temporary response-file consent and unattended policy.
+- [Agent skill](/.well-known/agent-skills/sp2p/SKILL.md): Installable Agent Skill for skill-aware agents; install with `npx skills add {{SP2P_SERVER_URL}}`.
 - [Agent handoff prompts](/llm#agent-handoff-prompts): Required source, destination, endpoint, and code ownership context.
 - [Full agent guide](/llms-full.txt): The same complete guide in a conventional full-context location.
 

@@ -6,6 +6,8 @@ The transfer code is a secret capability. Give it only to the intended peer, do 
 
 This guide belongs to the signaling server at `{{SP2P_SERVER_URL}}`. Pass that exact URL with `--server` on both peers so a self-hosted creator and joiner use the same server. SP2P accepts HTTP(S) URLs and derives the signaling WebSocket endpoint.
 
+Skill-aware agents can keep these rules loaded by installing the skill with `npx skills add {{SP2P_SERVER_URL}}`.
+
 ## Choose a workflow
 
 | Need | Creator | Joining peer | Important limit |
