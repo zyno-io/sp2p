@@ -426,13 +426,21 @@ jobs:
             gh release upload "$RELEASE_TAG" dist/checksums.txt --clobber
             gh release edit "$RELEASE_TAG" --title "$RELEASE_TITLE" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
+            # Scoped releases (-server, -cli, ...) lack the other platforms'
+            # assets, so never let GitHub auto-mark one as Latest: links to
+            # /releases/latest must keep resolving to a full release. Full
+            # releases keep GitHub's automatic choice (e.g. for backports).
+            LATEST_ARGS=()
+            if [ "$SCOPE" != "all" ]; then LATEST_ARGS=(--latest=false); fi
             gh release create "$RELEASE_TAG" \
               --title "$RELEASE_TITLE" \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
+              "${LATEST_ARGS[@]}" \
               "${ASSETS[@]}" dist/checksums.txt
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SCOPE: ${{ needs.release.outputs.scope }}
           RELEASE_TAG: ${{ github.ref_name }}
           CLEAN_TAG: ${{ needs.release.outputs.clean_tag }}
           RELEASE_TITLE: ${{ steps.title.outputs.title }}
