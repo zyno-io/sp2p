@@ -160,6 +160,7 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 	// Tune the SCTP transport for high-throughput bulk transfers.
 	se := webrtc.SettingEngine{}
 	se.SetSCTPMaxMessageSize(sctpMaxMsgSize)
+	installRedundantIPv6Filter(&se)
 	// Increase the receive buffer from the 1 MB default so the receiver
 	// can advertise a larger window, preventing the sender's congestion
 	// window from being capped by the receiver's RWND.
@@ -252,9 +253,10 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 
 		// Send the offer with ICE candidates included.
 		localDesc := pc.LocalDescription()
-		logVerbose(cfg.OnLog, "WebRTC: sending SDP offer:\n%s", localDesc.SDP)
+		offerSDP := stripRTCPCandidates(localDesc.SDP)
+		logVerbose(cfg.OnLog, "WebRTC: sending SDP offer:\n%s", offerSDP)
 		if err := sigClient.Send(ctx, signal.TypeOffer, signal.SDP{
-			SDP:  localDesc.SDP,
+			SDP:  offerSDP,
 			Type: localDesc.Type.String(),
 		}); err != nil {
 			conn.Close()
@@ -351,9 +353,10 @@ func processSignaling(ctx context.Context, sigClient *signal.Client, pc *webrtc.
 				}
 
 				localDesc := pc.LocalDescription()
-				logVerbose(onLog, "WebRTC: sending SDP answer:\n%s", localDesc.SDP)
+				answerSDP := stripRTCPCandidates(localDesc.SDP)
+				logVerbose(onLog, "WebRTC: sending SDP answer:\n%s", answerSDP)
 				if err := sigClient.Send(ctx, signal.TypeAnswer, signal.SDP{
-					SDP:  localDesc.SDP,
+					SDP:  answerSDP,
 					Type: localDesc.Type.String(),
 				}); err != nil {
 					return fmt.Errorf("sending answer: %w", err)

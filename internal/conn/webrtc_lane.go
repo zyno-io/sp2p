@@ -97,6 +97,7 @@ func (primary *WebRTCConn) NewLane(sender bool) (*WebRTCLane, error) {
 	se := webrtc.SettingEngine{}
 	se.SetSCTPMaxMessageSize(sctpMaxMsgSize)
 	se.SetSCTPMaxReceiveBufferSize(2 * 1024 * 1024)
+	installRedundantIPv6Filter(&se)
 	pc, err := newOfferPeerConnection(se, primary.pc.GetConfiguration(), primary.browserPeer, sender)
 	if err != nil {
 		return nil, fmt.Errorf("creating WebRTC lane: %w", err)
@@ -249,7 +250,7 @@ func (l *WebRTCLane) Description(ctx context.Context, offer bool) (string, error
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	return l.Conn.pc.LocalDescription().SDP, nil
+	return stripRTCPCandidates(l.Conn.pc.LocalDescription().SDP), nil
 }
 
 func (l *WebRTCLane) SetDescription(sdp string, offer bool) error {
