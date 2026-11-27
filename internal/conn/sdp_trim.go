@@ -5,64 +5,136 @@ package conn
 import (
 	"net"
 	"strings"
-
-	"github.com/pion/webrtc/v4"
 )
 
-// stripRTCPCandidates removes component-2 (RTCP) "a=candidate:" lines from an
-// outgoing SDP. pion writes every candidate for components 1 and 2 for RTCP
-// compatibility, but sp2p only uses data channels over BUNDLE, so component 2
-// is dead weight. All other lines, and the line endings, are preserved
-// byte-for-byte. Apply this only to SDP sent to the peer, never to what is
-// given to SetLocalDescription.
-func stripRTCPCandidates(sdp string) string {
+// trimOutgoingSDP shrinks an SDP before it is sent to the peer. Apply it only
+// to SDP that leaves the process, never to what is given to
+// SetLocalDescription. It removes:
+//
+//   - component-2 (RTCP) candidate lines: pion writes every candidate for
+//     components 1 and 2 for RTCP compatibility, but sp2p only uses data
+//     channels over BUNDLE with rtcp-mux, so component 2 is dead weight;
+//   - redundant IPv6 host candidates: hosts with IPv6 privacy extensions
+//     (notably macOS) keep many temporary addresses per interface and
+//     prefix, and one address per (interface, prefix) reaches the same
+//     network.
+//
+// This is deliberately a text pass over the outgoing SDP rather than a pion
+// IP or interface filter: setting either filter switches pion's STUN and
+// TURN gathering from wildcard sockets to one socket per local address,
+// which slows gathering by seconds and multiplies TURN allocations.
+func trimOutgoingSDP(sdp string) string {
+	var groups map[string]v6Group
+	if ifaces, err := systemIfaceAddrs(); err == nil {
+		groups = ipv6Groups(ifaces)
+	}
+	return trimSDP(sdp, groups)
+}
+
+// trimSDP is trimOutgoingSDP with the interface data injected. All lines it
+// keeps, and their line endings, are preserved byte-for-byte.
+func trimSDP(sdp string, groups map[string]v6Group) string {
 	if !strings.Contains(sdp, "a=candidate:") {
 		return sdp
 	}
+	lines := splitLinesKeepEnds(sdp)
+
+	// For each (interface, prefix) group, find the best-ranked address that
+	// pion actually gathered, so a group never loses all of its candidates
+	// (e.g. when the OS-preferred address failed to bind).
+	best := map[string]int{}
+	for _, line := range lines {
+		c, ok := parseCandidateLine(line)
+		if !ok || c.component == "2" || c.typ != "host" {
+			continue
+		}
+		if g, ok := groups[c.ip16]; ok {
+			if r, seen := best[g.key]; !seen || g.rank < r {
+				best[g.key] = g.rank
+			}
+		}
+	}
+
 	var b strings.Builder
 	b.Grow(len(sdp))
-	rest := sdp
-	for len(rest) > 0 {
-		end := strings.IndexByte(rest, '\n')
-		var line string
-		if end < 0 {
-			line, rest = rest, ""
-		} else {
-			line, rest = rest[:end+1], rest[end+1:]
+	for _, line := range lines {
+		if c, ok := parseCandidateLine(line); ok {
+			if c.component == "2" {
+				continue
+			}
+			if g, grouped := groups[c.ip16]; c.typ == "host" && grouped && best[g.key] != g.rank {
+				continue
+			}
 		}
-		if !isRTCPCandidateLine(line) {
-			b.WriteString(line)
-		}
+		b.WriteString(line)
 	}
 	return b.String()
 }
 
-func isRTCPCandidateLine(line string) bool {
-	const prefix = "a=candidate:"
-	if !strings.HasPrefix(line, prefix) {
-		return false
+func splitLinesKeepEnds(s string) []string {
+	var lines []string
+	for len(s) > 0 {
+		end := strings.IndexByte(s, '\n')
+		if end < 0 {
+			lines = append(lines, s)
+			break
+		}
+		lines = append(lines, s[:end+1])
+		s = s[end+1:]
 	}
-	// a=candidate:<foundation> <component> <transport> ...
-	fields := strings.Fields(line[len(prefix):])
-	return len(fields) >= 2 && fields[1] == "2"
+	return lines
 }
 
-// ifaceAddrs is the testable input of ipv6DropSet.
+type candidateLine struct {
+	component string
+	ip16      string // 16-byte form of the address, or "" if not an IP
+	typ       string
+}
+
+// parseCandidateLine parses
+// "a=candidate:<foundation> <component> <transport> <priority> <address> <port> typ <type> ...".
+func parseCandidateLine(line string) (candidateLine, bool) {
+	const prefix = "a=candidate:"
+	if !strings.HasPrefix(line, prefix) {
+		return candidateLine{}, false
+	}
+	f := strings.Fields(line[len(prefix):])
+	if len(f) < 2 {
+		return candidateLine{}, false
+	}
+	c := candidateLine{component: f[1]}
+	if len(f) >= 8 && f[6] == "typ" {
+		c.typ = f[7]
+		if ip := net.ParseIP(f[4]); ip != nil {
+			c.ip16 = string(ip.To16())
+		}
+	}
+	return c, true
+}
+
+// ifaceAddrs is the testable input of ipv6Groups.
 type ifaceAddrs struct {
 	name  string
 	addrs []net.Addr
 }
 
-// ipv6DropSet returns the IPv6 global unicast addresses that are redundant
-// because another address in the same (interface, prefix) group is kept. The
-// first address of each group in OS order is kept. On macOS Go returns the
-// stable "secured" address first and the deprecated temporary addresses after
-// it; on Linux the current temporary address usually comes first. Either way,
-// one address per group reaches the same network. IPv4, link-local and
-// loopback addresses are never dropped.
-func ipv6DropSet(ifaces []ifaceAddrs) map[string]struct{} {
-	drop := map[string]struct{}{}
-	seen := map[string]struct{}{}
+// v6Group identifies an address's (interface, prefix) group and its rank in
+// OS order within that group (0 = first).
+type v6Group struct {
+	key  string
+	rank int
+}
+
+// ipv6Groups maps each IPv6 global unicast address to its (interface,
+// prefix) group and its OS-order rank within it. OS order is the preference:
+// on macOS Go returns the stable "secured" address first and the deprecated
+// temporary addresses after it; on Linux the current temporary address
+// usually comes first. IPv4, IPv4-mapped, link-local, loopback, and
+// unexpected mask shapes are left out, so their candidates are never
+// dropped. An address seen on several interfaces keeps its first group.
+func ipv6Groups(ifaces []ifaceAddrs) map[string]v6Group {
+	groups := map[string]v6Group{}
+	next := map[string]int{}
 	for _, ifc := range ifaces {
 		for _, a := range ifc.addrs {
 			ipn, ok := a.(*net.IPNet)
@@ -76,16 +148,15 @@ func ipv6DropSet(ifaces []ifaceAddrs) map[string]struct{} {
 			if _, bits := ipn.Mask.Size(); bits != 128 {
 				continue
 			}
-			prefix := (&net.IPNet{IP: ip16.Mask(ipn.Mask), Mask: ipn.Mask}).String()
-			key := ifc.name + "|" + prefix
-			if _, dup := seen[key]; dup {
-				drop[string(ip16)] = struct{}{}
+			if _, dup := groups[string(ip16)]; dup {
 				continue
 			}
-			seen[key] = struct{}{}
+			key := ifc.name + "|" + (&net.IPNet{IP: ip16.Mask(ipn.Mask), Mask: ipn.Mask}).String()
+			groups[string(ip16)] = v6Group{key: key, rank: next[key]}
+			next[key]++
 		}
 	}
-	return drop
+	return groups
 }
 
 func systemIfaceAddrs() ([]ifaceAddrs, error) {
@@ -102,31 +173,4 @@ func systemIfaceAddrs() ([]ifaceAddrs, error) {
 		out = append(out, ifaceAddrs{name: ifc.Name, addrs: addrs})
 	}
 	return out, nil
-}
-
-// ipFilterFromDropSet returns a fail-open filter: only IPs in the drop set
-// are rejected; unknown addresses are allowed.
-func ipFilterFromDropSet(drop map[string]struct{}) func(net.IP) bool {
-	return func(ip net.IP) bool {
-		if ip16 := ip.To16(); ip16 != nil {
-			if _, dropped := drop[string(ip16)]; dropped {
-				return false
-			}
-		}
-		return true
-	}
-}
-
-// installRedundantIPv6Filter drops redundant IPv6 privacy addresses from ICE
-// gathering. If enumeration fails or nothing is redundant, no filter is set.
-func installRedundantIPv6Filter(se *webrtc.SettingEngine) {
-	ifaces, err := systemIfaceAddrs()
-	if err != nil {
-		return
-	}
-	drop := ipv6DropSet(ifaces)
-	if len(drop) == 0 {
-		return
-	}
-	se.SetIPFilter(ipFilterFromDropSet(drop))
 }
