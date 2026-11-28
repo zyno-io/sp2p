@@ -252,9 +252,10 @@ func EstablishWebRTC(ctx context.Context, sigClient *signal.Client, cfg WebRTCCo
 
 		// Send the offer with ICE candidates included.
 		localDesc := pc.LocalDescription()
-		logVerbose(cfg.OnLog, "WebRTC: sending SDP offer:\n%s", localDesc.SDP)
+		offerSDP := trimOutgoingSDP(localDesc.SDP)
+		logVerbose(cfg.OnLog, "WebRTC: sending SDP offer:\n%s", offerSDP)
 		if err := sigClient.Send(ctx, signal.TypeOffer, signal.SDP{
-			SDP:  localDesc.SDP,
+			SDP:  offerSDP,
 			Type: localDesc.Type.String(),
 		}); err != nil {
 			conn.Close()
@@ -351,9 +352,10 @@ func processSignaling(ctx context.Context, sigClient *signal.Client, pc *webrtc.
 				}
 
 				localDesc := pc.LocalDescription()
-				logVerbose(onLog, "WebRTC: sending SDP answer:\n%s", localDesc.SDP)
+				answerSDP := trimOutgoingSDP(localDesc.SDP)
+				logVerbose(onLog, "WebRTC: sending SDP answer:\n%s", answerSDP)
 				if err := sigClient.Send(ctx, signal.TypeAnswer, signal.SDP{
-					SDP:  localDesc.SDP,
+					SDP:  answerSDP,
 					Type: localDesc.Type.String(),
 				}); err != nil {
 					return fmt.Errorf("sending answer: %w", err)

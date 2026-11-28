@@ -6,6 +6,10 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ## [Unreleased]
 
+### Fixed
+
+- The CLI now sends much smaller WebRTC descriptions by dropping duplicate RTCP-component candidates and redundant IPv6 privacy addresses. This keeps parallel WebRTC lanes under the 12 KiB description limit on hosts with many addresses.
+
 ## [0.7.6] - 2026-11-26
 
 ### Added

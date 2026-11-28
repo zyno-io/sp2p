@@ -249,7 +249,7 @@ func (l *WebRTCLane) Description(ctx context.Context, offer bool) (string, error
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	return l.Conn.pc.LocalDescription().SDP, nil
+	return trimOutgoingSDP(l.Conn.pc.LocalDescription().SDP), nil
 }
 
 func (l *WebRTCLane) SetDescription(sdp string, offer bool) error {
