@@ -847,3 +847,58 @@ func TestStreamPhysicalWriteTimeout(t *testing.T) {
 		t.Fatalf("physical write timeout took %v", elapsed)
 	}
 }
+
+// readControlFrame returns the next frame that isn't a heartbeat or credit.
+func readControlFrame(t *testing.T, raw *crypto.EncryptedStream) byte {
+	t.Helper()
+	for {
+		typ, _, err := raw.ReadFrame()
+		if err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+		if typ != msgHeartbeat && typ != msgCredit {
+			return typ
+		}
+	}
+}
+
+// A peer that sends the last FIN must receive our FinAck before our status.
+// Previously the FIN handler woke Read/Finish before queueing the FinAck, so
+// a fast Finish could put Status on the wire first; the peer then rejected
+// it and reset the connection (seen as flaky TestStreamCLI rsync pull runs).
+func TestRemoteFinAckPrecedesLocalStatus(t *testing.T) {
+	hook := func() { time.Sleep(50 * time.Millisecond) }
+	testHookAfterRemoteFin.Store(&hook)
+	t.Cleanup(func() { testHookAfterRemoteFin.Store(nil) })
+
+	s, raw, cleanup := newRawPeer(t)
+	defer cleanup()
+	handshakeRawPeer(t, s, raw)
+
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- s.CloseWrite() }()
+	if typ := readControlFrame(t, raw); typ != msgFin {
+		t.Fatalf("expected local FIN, got %x", typ)
+	}
+	if err := <-closeErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.WriteFrame(msgFinAck, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	go func() {
+		if _, err := io.ReadAll(s); err == nil {
+			_ = s.Finish(nil)
+		}
+	}()
+	if err := raw.WriteFrame(msgFin, nil); err != nil {
+		t.Fatal(err)
+	}
+	if typ := readControlFrame(t, raw); typ != msgFinAck {
+		t.Fatalf("expected FinAck before status, got %x", typ)
+	}
+	if typ := readControlFrame(t, raw); typ != msgStatus {
+		t.Fatalf("expected status after FinAck, got %x", typ)
+	}
+}
