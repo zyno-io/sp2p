@@ -35,6 +35,10 @@ The service is provided "as is" and "as available", without warranties of any ki
 
 To the fullest extent the law allows, we are not liable for any indirect, incidental, special, consequential, or punitive damages. Nor are we liable for any loss of data, profits, or revenue arising from your use of the service. Our total liability for any claim relating to the service is limited to the amount you paid us for it, which is zero.
 
+## Governing law and venue
+
+These terms are governed by the laws of the State of Florida, without regard to its conflict-of-law rules. Any dispute arising from these terms or the service must be brought exclusively in the state or federal courts located in Broward County, Florida, and you consent to those courts' jurisdiction.
+
 ## Privacy
 
 The [Privacy Policy](PRIVACY.md) describes what the service handles and what it can't see.
