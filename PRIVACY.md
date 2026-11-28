@@ -42,11 +42,11 @@ This state is removed when the session ends or goes idle. The rate limiter also 
 
 Some infrastructure providers see standard network information, such as your IP address and request details, under their own privacy policies:
 
-- **Cloudflare** serves sp2p.io and sees requests to the website and signaling server.
+- **Cloudflare** serves sp2p.io and sees requests to the website and signaling server. Cloudflare keeps any request logs for its standard retention periods. We don't configure longer retention.
 - **GitHub** hosts the CLI releases. The bootstrap scripts and install instructions download binaries from GitHub.
 - **Google** runs the public STUN servers (`stun.l.google.com`). By default, the CLI and the browser use them to discover their public address for direct connections.
 
-We don't sell personal information or share it for advertising.
+We don't sell personal information or logs, and we don't share them for advertising.
 
 ## The agent skill and plugin
 
