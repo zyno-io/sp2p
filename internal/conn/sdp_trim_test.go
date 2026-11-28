@@ -124,6 +124,13 @@ func TestTrimSDPDropsRedundantIPv6Hosts(t *testing.T) {
 	if got := trimSDP(in, groups); got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
+	// A TCP host on a lower-ranked address survives next to a UDP host on the
+	// best address: groups are per transport.
+	tcp := "a=candidate:8 1 tcp 1518280447 2001:db8:1::b 9 typ host tcptype active\r\n"
+	mixed := "v=0\r\n" + host("2001:db8:1::a") + tcp
+	if got := trimSDP(mixed, groups); got != mixed {
+		t.Fatalf("TCP host dropped because of a UDP host: %q", got)
+	}
 	// Only a lower-ranked address was gathered: it must survive.
 	only := "v=0\r\n" + host("2001:db8:1::b")
 	if got := trimSDP(only, groups); got != only {

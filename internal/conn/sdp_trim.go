@@ -39,9 +39,10 @@ func trimSDP(sdp string, groups map[string]v6Group) string {
 	}
 	lines := splitLinesKeepEnds(sdp)
 
-	// For each (interface, prefix) group, find the best-ranked address that
-	// pion actually gathered, so a group never loses all of its candidates
-	// (e.g. when the OS-preferred address failed to bind).
+	// For each (interface, prefix, transport) group, find the best-ranked
+	// address that pion actually gathered, so a group never loses all of its
+	// candidates (e.g. when the OS-preferred address failed to bind, or a
+	// TCP mux is bound to a different address than UDP).
 	best := map[string]int{}
 	for _, line := range lines {
 		c, ok := parseCandidateLine(line)
@@ -49,8 +50,9 @@ func trimSDP(sdp string, groups map[string]v6Group) string {
 			continue
 		}
 		if g, ok := groups[c.ip16]; ok {
-			if r, seen := best[g.key]; !seen || g.rank < r {
-				best[g.key] = g.rank
+			k := g.key + "|" + c.transport
+			if r, seen := best[k]; !seen || g.rank < r {
+				best[k] = g.rank
 			}
 		}
 	}
@@ -62,7 +64,7 @@ func trimSDP(sdp string, groups map[string]v6Group) string {
 			if c.component == "2" {
 				continue
 			}
-			if g, grouped := groups[c.ip16]; c.typ == "host" && grouped && best[g.key] != g.rank {
+			if g, grouped := groups[c.ip16]; c.typ == "host" && grouped && best[g.key+"|"+c.transport] != g.rank {
 				continue
 			}
 		}
@@ -87,6 +89,7 @@ func splitLinesKeepEnds(s string) []string {
 
 type candidateLine struct {
 	component string
+	transport string
 	ip16      string // 16-byte form of the address, or "" if not an IP
 	typ       string
 }
@@ -103,6 +106,9 @@ func parseCandidateLine(line string) (candidateLine, bool) {
 		return candidateLine{}, false
 	}
 	c := candidateLine{component: f[1]}
+	if len(f) >= 3 {
+		c.transport = strings.ToLower(f[2])
+	}
 	if len(f) >= 8 && f[6] == "typ" {
 		c.typ = f[7]
 		if ip := net.ParseIP(f[4]); ip != nil {
