@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 
 /* Self-hosted Inter (the CSP only allows same-origin font loads). Type and
-   colour tokens follow PixelCI's design system (../pixelci/DESIGN.md). */
+   color tokens follow PixelCI's design system (../pixelci/DESIGN.md). */
 @import "@fontsource-variable/inter/opsz.css";
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -19,7 +19,7 @@
   --line: #cfd3db;
   --line-soft: #e3e5ea;
 
-  /* PixelCI accent: the one colour for actions and emphasis */
+  /* PixelCI accent: the one color for actions and emphasis */
   --signal: #4f46e5;
   --signal-hover: #4338ca;
   --signal-ink: #ffffff;
@@ -205,7 +205,7 @@ a:hover { text-decoration-thickness: 2px; }
   padding: 6rem var(--inline-pad) 4rem;
 }
 
-/* Dot grid + colour wash: the page's atmosphere. */
+/* Dot grid + color wash: the page's atmosphere. */
 .hero::before,
 .hero::after {
   content: "";
