@@ -196,6 +196,11 @@ esac
 	}
 }
 
+// pwshTimeout bounds one PowerShell bootstrap run. pwsh's cold start alone can
+// take several seconds on a loaded CI runner, and 10s was hit once in CI
+// (TestPowerShellBootstrapChecksums/windows/valid killed at 10.02s).
+const pwshTimeout = 60 * time.Second
+
 func TestPowerShellBootstrapChecksums(t *testing.T) {
 	pwsh, err := exec.LookPath("pwsh")
 	if err != nil {
@@ -242,7 +247,7 @@ function Expand-Archive { throw 'VERIFIED_EXTRACTION' }
 				if tc.hashFailure {
 					prelude += "function Get-FileHash { throw 'hash-command-failure' }\n"
 				}
-				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				ctx, cancel := context.WithTimeout(t.Context(), pwshTimeout)
 				defer cancel()
 				script := generatePSScript("receive", "https://example.invalid", "wss://example.invalid/ws")
 				skipExpected := "0"
@@ -396,7 +401,7 @@ function Invoke-SP2PFixture {
 						want += "CLI_ARG:<argument with spaces>\nCLI_ARG:<-format>\nCLI_ARG:<json>\nCLI_ARG:<>\n"
 					}
 					script := prelude + "& {\n" + generatePSScript(command, "https://example.invalid", "wss://example.invalid/ws") + "\n}" + suffix
-					ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+					ctx, cancel := context.WithTimeout(t.Context(), pwshTimeout)
 					defer cancel()
 					cmd := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-Command", script)
 					osValue := ""
