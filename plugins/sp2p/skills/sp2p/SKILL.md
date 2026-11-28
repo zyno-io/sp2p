@@ -121,13 +121,14 @@ $REMOTE cat /tmp/sp2pjob/events.jsonl | jq -r 'select(.event=="session") | .code
 
 # Receive locally, then clean up the remote job directory.
 sp2p receive -format json -server https://sp2p.io -output "$DEST" "$(cat "$WORK/code")" > "$WORK/recv.jsonl"
-$REMOTE rm -rf /tmp/sp2pjob
+$REMOTE sh -c 'cd /tmp/sp2pjob && rm -f events.jsonl err.log code && cd / && rmdir /tmp/sp2pjob'
 ```
 
 - Local → remote is the reverse: sender locally, receiver under `nohup` remotely. Pass the code in
   over stdin (`$REMOTE sh -c 'cat > /tmp/sp2pjob/code' < "$WORK/code"`), not as a visible argument.
 - If the pod or host restarts mid-transfer, the remote peer dies. Start over with a new code.
-- To stop a stuck remote peer, kill its process and remove `/tmp/sp2pjob`.
+- To stop a stuck remote peer, kill its process, then run the same cleanup command. It removes only the
+  files this job created, and `rmdir` refuses to delete the folder if anything else is in it.
 
 ## Streams
 
