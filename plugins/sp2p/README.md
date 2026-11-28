@@ -25,6 +25,10 @@ The plugin contains only instructions: no code, hooks, MCP servers, or binaries.
 
 The skill treats the transfer code as a secret. It keeps the code out of chat and logs, and never turns off checksum verification unless you ask.
 
+## Privacy and terms
+
+The public sp2p.io service is covered by the [Privacy Policy](https://github.com/zyno-io/sp2p/blob/main/PRIVACY.md) and [Terms of Service](https://github.com/zyno-io/sp2p/blob/main/TERMS.md).
+
 ## License
 
 MIT. See the [repository](https://github.com/zyno-io/sp2p).

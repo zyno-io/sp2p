@@ -12,5 +12,7 @@
   "keywords": ["file-transfer", "p2p", "encryption", "kubernetes", "rsync", "tunnel", "webrtc"],
   "icon": "./icon.png",
   "documentationUrl": "https://sp2p.io/llm",
-  "supportUrl": "https://github.com/zyno-io/sp2p/issues"
+  "supportUrl": "https://github.com/zyno-io/sp2p/issues",
+  "privacyPolicyUrl": "https://github.com/zyno-io/sp2p/blob/main/PRIVACY.md",
+  "termsOfServiceUrl": "https://github.com/zyno-io/sp2p/blob/main/TERMS.md"
 }
