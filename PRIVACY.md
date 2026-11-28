@@ -8,13 +8,15 @@ If you run your own SP2P server, this policy doesn't apply to it. Whoever operat
 
 ## The short version
 
-- We can't read what you transfer. Files, folders, streams, and file metadata are end-to-end encrypted between the two peers, and the server never has the key.
+- Files, folders, streams, and file metadata are end-to-end encrypted between the two peers. The server never receives the keys needed to read them.
 - There are no accounts, no analytics, no advertising, and no tracking cookies.
-- The server keeps session state in memory only while a transfer is being set up, and it doesn't write IP addresses to its logs.
+- The server keeps session state in memory only while a transfer is being set up, and its own log messages don't include IP addresses.
 
 ## What we can't see
 
-**Your data.** Transfers are encrypted with keys that only the two peers derive, using X25519 and AES-256-GCM. The transfer code that carries the secret never reaches the server in a usable form. When data goes through our TURN relay, the relay only carries ciphertext.
+**Your data.** Transfers are encrypted with keys that only the two peers derive, using X25519 and AES-256-GCM. The secret part of the transfer code never reaches the server. Share links keep it in the part of the URL that browsers don't send. When data goes through our TURN relay, the relay only carries ciphertext.
+
+sp2p.io also serves the browser app and the one-shot bootstrap scripts, so this protection depends on that code being the published open-source code. See the [Trust Model](README.md#trust-model). For the strongest guarantee, install the CLI from a release you verify yourself.
 
 **File details.** The sender encrypts the file name, size, type, and file count before giving them to the server, which only stores and serves the encrypted blob. See [Encrypted Metadata Preview](README.md#encrypted-metadata-preview).
 
@@ -24,27 +26,31 @@ If you run your own SP2P server, this policy doesn't apply to it. Whoever operat
 
 - a random session ID
 - each peer's client type (CLI or browser) and protocol version
+- for the CLI, its operating system and CPU architecture, used only to tell it about the latest release for that platform
 - timestamps
 - the encrypted file metadata described above
-- the sender's IP address, which is used only for rate limiting
+This state is removed when the session ends or goes idle.
 
-This state is removed when the session ends or goes idle. The rate limiter also keeps short-lived per-IP request counters in memory, and clears them once the limit window passes. Peers exchange connection candidates through the server so they can connect directly. These include IP addresses and ports, and the server relays them without storing them.
+The server also keeps the IP addresses of connected peers, and per-IP counters, to apply rate and abuse limits. These are kept only in memory, used for nothing else, and never written to disk or to its logs.
 
-**Server logs.** The SP2P server logs operational events, such as a peer connecting or disconnecting, or a session being removed. These events include the session ID, the peer's role, and its client type. The server does not log IP addresses, transfer codes, file names, or file contents.
+Peers exchange connection candidates through the server so they can connect directly. These include IP addresses and ports, and the server relays them without storing them.
 
-**Aggregate counters.** The server keeps service-wide totals: send attempts, connected sends, completed sends, and bytes transferred. These are not linked to any person, session, or IP address.
+**Server logs.** The SP2P server logs operational events, such as a peer connecting or disconnecting, or a session being removed. These events include the session ID, the peer's role, and its client type. Its log messages don't include IP addresses, transfer codes, file names, or file contents.
 
-**TURN relay.** Peers use the relay only if a direct connection fails and they agree to it. The relay sees both peers' IP addresses, connection timing, and traffic volume, but only ciphertext. Relay credentials are short-lived and tied to one session.
+**Aggregate counters.** The server keeps service-wide totals of send attempts and connected sends. These are not linked to any person, session, or IP address.
 
-**Your browser.** The website stores your light or dark theme choice in your browser's local storage. It sets no cookies and loads no third-party scripts, fonts, or trackers.
+**TURN relay.** Peers use the relay only if a direct connection fails and both of them agree to it. The relay sees both peers' IP addresses and ports, connection timing, and traffic volume, but only ciphertext. The relay server may log these connection details, along with the session ID that's part of the relay username. We use those logs only to operate the relay and prevent abuse.
+
+**Your browser.** The website stores your light or dark theme choice in your browser's local storage. SP2P itself sets no cookies and loads no third-party scripts, fonts, or trackers. Cloudflare may set strictly necessary security cookies.
 
 ## Service providers
 
-Some infrastructure providers see standard network information, such as your IP address and request details, under their own privacy policies:
+Some providers see standard network information, such as your IP address and request details, under their own privacy policies:
 
-- **Cloudflare** serves sp2p.io and sees requests to the website and signaling server. Cloudflare keeps any request logs for its standard retention periods. We don't configure longer retention.
-- **GitHub** hosts the CLI releases. The bootstrap scripts and install instructions download binaries from GitHub.
-- **Google** runs the public STUN servers (`stun.l.google.com`). By default, the CLI and the browser use them to discover their public address for direct connections.
+- **Cloudflare** serves sp2p.io and terminates its TLS connections. It sees requests to the website and the signaling messages that pass through it, including the session ID and the connection candidates (IP addresses and ports) peers exchange. It doesn't see transfer contents or readable file metadata. Cloudflare keeps any request logs for its standard retention periods, and we don't configure longer retention.
+- **Our hosting provider** runs the server and the TURN relay, and sees the network traffic to them.
+- **GitHub** hosts the CLI releases. The bootstrap scripts and most install instructions download binaries from GitHub. Package managers you choose to install with (such as Homebrew, Scoop, or WinGet), and npm for `npx skills add`, have their own policies.
+- **Google** runs public STUN servers (`stun.l.google.com`). Unless sp2p.io provides its own STUN servers, the CLI and the browser use Google's to discover their public address for direct connections.
 
 We don't sell personal information or logs, and we don't share them for advertising.
 

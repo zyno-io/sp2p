@@ -4,12 +4,12 @@ Effective: November 27, 2026
 
 These terms cover your use of the public SP2P service at [sp2p.io](https://sp2p.io): the website, the signaling server, the TURN relay, and the one-shot bootstrap scripts. The service is operated by Signal24 LLC dba Zyno Consulting ("we"). By using the service, you agree to these terms.
 
-The SP2P software, including the CLI, the server, and the agent skill and plugin, is open source under the [MIT License](LICENSE). That license, not these terms, governs your use, copying, and modification of the software. If you run your own server, these terms don't apply to it.
+The SP2P software, including the CLI, the server, and the agent skill and plugin, is open source under the [MIT License](LICENSE). That license, not these terms, governs your use, copying, and modification of the software. When the CLI, the bootstrap scripts, or the agent skill or plugin connect to sp2p.io, these terms govern that use of the service. If you run your own server, these terms don't apply to it.
 
 ## Using the service
 
 - The service is free and has no accounts. It is offered as is, as a convenience.
-- You're responsible for what you send and receive. Transfers are end-to-end encrypted, so we can't see or check their contents.
+- You're responsible for what you send and receive. Transfers are end-to-end encrypted, and the server never receives the keys, so we don't see or check their contents.
 - Keep your transfer codes private. Anyone who has a code can join that transfer.
 
 ## Acceptable use
