@@ -17,7 +17,7 @@ Server-only release (`v0.7.7-server`). The CLI fixes listed under Unreleased shi
 
 ### Added
 
-- Add a [Privacy Policy](PRIVACY.md) and [Terms of Service](TERMS.md) for the public sp2p.io service. The site footer links them on sp2p.io only; self-hosted servers don't show them.
+- Add a [Privacy Policy](https://github.com/zyno-io/sp2p/blob/main/PRIVACY.md) and [Terms of Service](https://github.com/zyno-io/sp2p/blob/main/TERMS.md) for the public sp2p.io service. The site footer links them on sp2p.io only; self-hosted servers don't show them.
 
 ### Changed
 
