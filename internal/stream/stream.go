@@ -50,6 +50,11 @@ const (
 // retain an unbounded local writer forever.
 var physicalWriteTimeout = 30 * time.Second
 
+// testHookAfterRemoteFin, when set by tests, runs after a remote FIN has been
+// acknowledged and signaled locally, widening the window in which Finish can
+// queue a status. It is always nil outside tests.
+var testHookAfterRemoteFin atomic.Pointer[func()]
+
 // Config describes the authenticated application selected by stream/1.  Each
 // peer sends Service and Mode. ExpectedService and ExpectedMode constrain the
 // peer's corresponding declaration; an empty expected value accepts any value.
@@ -729,10 +734,18 @@ func (s *Stream) readFrames() {
 			}
 			s.remoteFin = true
 			s.stateMu.Unlock()
-			close(s.remoteFinCh)
-			s.closeData()
+			// Queue the acknowledgment before Read or Finish can observe the
+			// remote FIN. Finish queues this side's status only after that,
+			// and writeCh is FIFO, so the peer always sees FinAck before
+			// Status. The reverse order makes the peer reject a "success
+			// status before stream FIN completion" and reset the connection.
 			if !s.queueControl(msgFinAck, nil) {
 				return
+			}
+			close(s.remoteFinCh)
+			s.closeData()
+			if hook := testHookAfterRemoteFin.Load(); hook != nil {
+				(*hook)()
 			}
 		case msgFinAck:
 			s.stateMu.Lock()

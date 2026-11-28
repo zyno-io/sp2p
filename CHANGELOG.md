@@ -8,6 +8,7 @@ This project uses [Semantic Versioning](https://semver.org/). During early devel
 
 ### Fixed
 
+- `sp2p rsync` and `sp2p tunnel` no longer occasionally fail on both sides after a complete transfer with `success status before stream FIN completion` / `connection reset by peer` (often shown as `context canceled`). A peer could send its final status before acknowledging the other side's FIN; the acknowledgment now always goes first.
 - The CLI now sends much smaller WebRTC descriptions by dropping duplicate RTCP-component candidates and redundant IPv6 privacy addresses. This keeps parallel WebRTC lanes under the 12 KiB description limit on hosts with many addresses.
 
 ## [0.7.6] - 2026-11-26
