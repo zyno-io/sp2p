@@ -1148,6 +1148,15 @@ function initFooterVersion(): void {
   });
 }
 
+// The Privacy and Terms links cover the public sp2p.io service only, so a
+// self-hosted server serving this same page keeps them hidden.
+function initFooterLegal(): void {
+  if (location.hostname !== "sp2p.io") return;
+  document.querySelectorAll<HTMLElement>(".footer-legal").forEach((el) => {
+    el.hidden = false;
+  });
+}
+
 // Initialize based on page.
 // Enables scroll-reveal styling; without JS, everything stays visible.
 document.documentElement.classList.add("js");
@@ -1155,6 +1164,7 @@ document.documentElement.classList.add("js");
 document.addEventListener("DOMContentLoaded", () => {
   let platform = detectPlatform();
   initFooterVersion();
+  initFooterLegal();
   initTabs(platform);
   applyDownloadLinks(platform);
   initArchToggle(() => platform);

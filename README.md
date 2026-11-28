@@ -745,3 +745,5 @@ plugins/
 ## License
 
 MIT
+
+The public sp2p.io service is covered by the [Privacy Policy](PRIVACY.md) and [Terms of Service](TERMS.md).
